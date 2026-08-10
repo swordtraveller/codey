@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: light;
   font-family: "Segoe UI", system-ui, sans-serif;
   color: #242424;
@@ -18,6 +18,15 @@ body {
   background: #f7f7f5;
 }
 
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
 .shell {
   display: flex;
   flex-direction: column;
@@ -25,8 +34,7 @@ body {
   padding: 28px 40px 24px;
 }
 
-.topbar,
-.footer {
+.topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -35,32 +43,31 @@ body {
 .brand {
   font-size: 16px;
   font-weight: 650;
-  letter-spacing: 0.01em;
 }
 
-.status,
-.footer {
-  color: #777773;
-  font-size: 12px;
+.new-conversation {
+  border: 1px solid #d6d6d0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #4f4f4a;
+  background: transparent;
+  font-size: 13px;
 }
 
-.status {
+.new-conversation:hover {
+  background: #eeeeea;
+}
+
+.conversation {
   display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #4d8063;
-}
-
-.welcome {
+  flex: 1;
   width: min(100%, 680px);
-  margin: auto;
-  padding: 72px 0;
+  margin: 0 auto;
+  padding: 72px 0 32px;
+}
+
+.empty-state {
+  margin: auto 0;
 }
 
 .eyebrow {
@@ -73,7 +80,6 @@ body {
 }
 
 h1 {
-  max-width: 600px;
   margin: 0;
   font-size: clamp(36px, 5vw, 58px);
   font-weight: 650;
@@ -81,17 +87,48 @@ h1 {
   line-height: 1.06;
 }
 
-.intro {
-  max-width: 480px;
-  margin: 24px 0 0;
-  color: #656560;
-  font-size: 17px;
-  line-height: 1.6;
+.messages {
+  width: 100%;
+  margin-top: auto;
 }
 
-.footer {
-  border-top: 1px solid #e0e0db;
-  padding-top: 16px;
+.message {
+  width: fit-content;
+  max-width: 80%;
+  margin: 12px 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  line-height: 1.5;
+}
+
+.message.user {
+  margin-left: auto;
+  color: #fff;
+  background: #242424;
+}
+
+.message.system {
+  color: #4f4f4a;
+  background: #e9e9e4;
+}
+
+.composer {
+  width: min(100%, 680px);
+  margin: 0 auto;
+}
+
+.composer input {
+  width: 100%;
+  border: 1px solid #d6d6d0;
+  border-radius: 8px;
+  padding: 13px 14px;
+  outline: none;
+  color: #242424;
+  background: #fff;
+}
+
+.composer input:focus {
+  border-color: #8f8f88;
 }
 
 @media (max-width: 600px) {
@@ -99,8 +136,8 @@ h1 {
     padding: 22px 24px 20px;
   }
 
-  .welcome {
-    padding: 56px 0;
+  .conversation {
+    padding: 56px 0 24px;
   }
 
   h1 {

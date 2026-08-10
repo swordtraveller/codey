@@ -1,7 +1,34 @@
+﻿import { FormEvent, useState } from 'react'
+
+type Message = {
+  role: 'user' | 'system'
+  content: string
+}
+
 export function App(): React.JSX.Element {
-  const runtime = window.runtime?.electron
-    ? `Electron ${window.runtime.electron}`
-    : 'Electron'
+  const [messages, setMessages] = useState<Message[]>([])
+  const [draft, setDraft] = useState('')
+
+  function startNewConversation(): void {
+    setMessages([])
+    setDraft('')
+  }
+
+  function sendMessage(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault()
+
+    const content = draft.trim()
+    if (!content) {
+      return
+    }
+
+    setMessages((current) => [
+      ...current,
+      { role: 'user', content },
+      { role: 'system', content: 'Received' },
+    ])
+    setDraft('')
+  }
 
   return (
     <main className="shell">
@@ -9,24 +36,36 @@ export function App(): React.JSX.Element {
         <div className="brand" aria-label="Codey">
           Codey
         </div>
-        <div className="status">
-          <span className="status-dot" />
-          Ready
-        </div>
+        <button className="new-conversation" type="button" onClick={startNewConversation}>
+          New conversation
+        </button>
       </header>
 
-      <section className="welcome" aria-labelledby="welcome-title">
-        <p className="eyebrow">Desktop workspace</p>
-        <h1 id="welcome-title">Conversation, work and coding.</h1>
-        <p className="intro">
-          A quiet place to think clearly and move work forward.
-        </p>
+      <section className="conversation" aria-label="Conversation">
+        {messages.length === 0 ? (
+          <div className="empty-state">
+            <p className="eyebrow">Desktop workspace</p>
+            <h1>Start a conversation.</h1>
+          </div>
+        ) : (
+          <div className="messages" aria-live="polite">
+            {messages.map((message, index) => (
+              <p className={`message ${message.role}`} key={`${message.role}-${index}`}>
+                {message.content}
+              </p>
+            ))}
+          </div>
+        )}
       </section>
 
-      <footer className="footer">
-        <span>Codey desktop</span>
-        <span>{runtime}</span>
-      </footer>
+      <form className="composer" onSubmit={sendMessage}>
+        <input
+          aria-label="Message"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="Write a message..."
+        />
+      </form>
     </main>
   )
 }
