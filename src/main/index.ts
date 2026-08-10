@@ -1,7 +1,7 @@
-const { app, BrowserWindow } = require('electron');
-const path = require('node:path');
+import { app, BrowserWindow } from 'electron'
+import { join } from 'node:path'
 
-function createWindow() {
+function createWindow(): void {
   const window = new BrowserWindow({
     width: 1120,
     height: 720,
@@ -14,25 +14,29 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: join(__dirname, '../preload/index.js')
     }
-  });
+  })
 
-  window.loadFile(path.join(__dirname, 'index.html'));
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    void window.loadFile(join(__dirname, '../renderer/index.html'))
+  }
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  createWindow()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      createWindow()
     }
-  });
-});
+  })
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    app.quit();
+    app.quit()
   }
-});
+})

@@ -6,7 +6,13 @@ A desktop app for conversation, work and coding.
 
 ```bash
 pnpm install
-pnpm start
+pnpm dev
+```
+
+## Build
+
+```bash
+pnpm build
 ```
 
 ## Packaging

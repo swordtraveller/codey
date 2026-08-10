@@ -1,11 +1,14 @@
 # Dependencies
 node_modules/
+.node_modules-stale/
 .pnpm-store/
+
+# TypeScript
+*.tsbuildinfo
 
 # Electron build output
 out/
 dist/
-release/
 
 # Electron Builder metadata
 *.blockmap
