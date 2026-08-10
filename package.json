@@ -1,0 +1,36 @@
+{
+  "name": "codey",
+  "version": "0.1.0",
+  "description": "A desktop app for conversation, work and coding.",
+  "main": "src/main.js",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  },
+  "build": {
+    "appId": "com.codey.desktop",
+    "productName": "Codey",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
