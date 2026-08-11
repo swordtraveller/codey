@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   color-scheme: light;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
@@ -29,7 +29,7 @@ body {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 20px;
   border-right: 1px solid #e0e0e0;
   padding: 24px;
   background: #fff;
@@ -59,6 +59,10 @@ body {
   font-size: 14px;
 }
 
+.settings-button {
+  margin-top: auto;
+}
+
 .workspace {
   display: flex;
   flex-direction: column;
@@ -77,13 +81,15 @@ body {
   font-weight: 600;
 }
 
-.status {
+.status,
+.pending {
   color: #616161;
   font-size: 12px;
   font-weight: 400;
 }
 
 .conversation {
+  position: relative;
   display: flex;
   flex: 1;
   overflow-y: auto;
@@ -111,7 +117,7 @@ h1 {
 }
 
 .empty-state p {
-  margin: 10px 0 0;
+  margin: 10px 0 20px;
   color: #616161;
 }
 
@@ -134,15 +140,26 @@ h1 {
   background: #0f6cbd;
 }
 
-.message.system {
+.message.assistant {
   border-left: 2px solid #0f6cbd;
   padding-left: 16px;
 }
 
-
-.message p {
+.message p,
+.pending {
   margin: 0;
   line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.error {
+  position: absolute;
+  right: 32px;
+  bottom: 16px;
+  left: 32px;
+  margin: 0 auto;
+  color: #bc2f32;
+  text-align: center;
 }
 
 .composer {
@@ -157,6 +174,17 @@ h1 {
   flex: 1;
 }
 
+.settings-fields {
+  display: grid;
+  gap: 16px;
+  min-width: 420px;
+}
+
+.settings-error {
+  margin: 0;
+  color: #bc2f32;
+}
+
 @media (max-width: 680px) {
   .shell {
     display: flex;
@@ -166,10 +194,13 @@ h1 {
   .sidebar {
     flex-direction: row;
     align-items: center;
-    justify-content: space-between;
     border-right: 0;
     border-bottom: 1px solid #e0e0e0;
     padding: 16px 20px;
+  }
+
+  .settings-button {
+    margin: 0 0 0 auto;
   }
 
   .workspace {
@@ -190,5 +221,9 @@ h1 {
   .composer {
     width: calc(100% - 40px);
     padding-bottom: 20px;
+  }
+
+  .settings-fields {
+    min-width: 0;
   }
 }
