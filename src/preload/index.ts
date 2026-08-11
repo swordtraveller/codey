@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('projects:add-folder', projectId),
     createConversation: (projectId: string) =>
       ipcRenderer.invoke('conversations:create', projectId),
-    chat: (projectId: string, conversationId: string, content: string) =>
-      ipcRenderer.invoke('chat:send', projectId, conversationId, content),
+    develop: (projectId: string, conversationId: string, content: string) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content),
   }),
 )

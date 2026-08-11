@@ -23,7 +23,8 @@ export type Project = {
   conversations: Conversation[]
 }
 
-export type ChatResult = {
+export type DevelopmentResult = {
   project?: Project
+  writtenFiles: string[]
   error?: string
 }

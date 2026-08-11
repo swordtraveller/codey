@@ -1,4 +1,4 @@
-﻿import {
+import {
   Button,
   Dialog,
   DialogActions,
@@ -38,7 +38,7 @@ export function App(): React.JSX.Element {
     (conversation) => conversation.id === activeConversationId,
   )
   const configured = Boolean(config.baseUrl && config.apiKey && config.modelName)
-  const canSend = Boolean(configured && activeConversation)
+  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
 
   useEffect(() => {
     void window.codey
@@ -185,7 +185,7 @@ export function App(): React.JSX.Element {
     setSending(true)
 
     try {
-      const result = await window.codey.chat(
+      const result = await window.codey.develop(
         activeProject.id,
         activeConversation.id,
         content,
@@ -194,19 +194,28 @@ export function App(): React.JSX.Element {
         replaceProject(result.project)
       }
       if (result.error) {
-        setError(result.error)
+        const files = result.writtenFiles.length
+          ? ` (${result.writtenFiles.length} file(s) written)`
+          : ''
+        setError(`${result.error}${files}`)
       }
     } catch {
-      setError('Unable to send the message')
+      setError('Unable to process the development request')
     } finally {
       setSending(false)
     }
   }
 
-  const emptyTitle = activeProject ? 'How can I help?' : 'Create a project'
-  const emptyDescription = activeProject
-    ? 'Write a message to start this conversation.'
-    : 'Projects group folders and conversations.'
+  const emptyTitle = !activeProject
+    ? 'Create a project'
+    : activeProject.folders.length === 0
+      ? 'Add a project folder'
+      : 'What should I build?'
+  const emptyDescription = !activeProject
+    ? 'Projects group folders and conversations.'
+    : activeProject.folders.length === 0
+      ? 'Codey only writes files inside folders you select.'
+      : 'Describe a development task to start this conversation.'
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -317,6 +326,11 @@ export function App(): React.JSX.Element {
                     New project
                   </Button>
                 )}
+                {activeProject && activeProject.folders.length === 0 && (
+                  <Button appearance="primary" onClick={() => void addFolder()}>
+                    Add folder
+                  </Button>
+                )}
               </div>
             ) : (
               <div className="messages" aria-live="polite">
@@ -333,13 +347,19 @@ export function App(): React.JSX.Element {
 
           <form className="composer" onSubmit={sendMessage}>
             <Input
-              aria-label="Message"
+              aria-label="Development request"
               className="message-input"
               disabled={!canSend || sending}
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
-              placeholder={configured ? 'Message Codey' : 'Configure a model first'}
+              placeholder={
+                !configured
+                  ? 'Configure a model first'
+                  : !activeProject?.folders.length
+                    ? 'Add a project folder first'
+                    : 'Describe a development task'
+              }
             />
             <Button
               appearance="primary"
@@ -442,4 +462,3 @@ export function App(): React.JSX.Element {
     </FluentProvider>
   )
 }
-

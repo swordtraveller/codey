@@ -1,77 +1,44 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
-import type { ChatMessage, ChatResult, ModelConfig } from '../shared/types'
+import type { DevelopmentResult, ModelConfig } from '../shared/types'
+import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import {
   addMessage,
   addProjectFolder,
   createConversation,
   createProject,
+  getProject,
   getProjects,
 } from './workspace'
 
-type ChatResponse = {
-  choices?: Array<{ message?: { content?: string } }>
-  error?: { message?: string }
-}
-
-async function requestReply(messages: ChatMessage[]): Promise<string> {
-  const config = await readConfig()
-  if (!config.baseUrl || !config.apiKey || !config.modelName) {
-    throw new Error('Configure a model before sending a message')
-  }
-
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.modelName,
-      messages: messages.map(({ role, content }) => ({ role, content })),
-    }),
-  })
-  const data = (await response.json()) as ChatResponse
-
-  if (!response.ok) {
-    throw new Error(data.error?.message || `Request failed with status ${response.status}`)
-  }
-
-  const reply = data.choices?.[0]?.message?.content?.trim()
-  if (!reply) {
-    throw new Error('The model returned an empty response')
-  }
-
-  return reply
-}
-
-async function chat(
+async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
-): Promise<ChatResult> {
+): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   if (!normalizedContent) {
-    return { error: 'Enter a message' }
+    return { writtenFiles: [], error: 'Enter a development request' }
   }
 
-  let project = await addMessage(projectId, conversationId, 'user', normalizedContent)
+  let project = await getProject(projectId)
+  if (project.folders.length === 0) {
+    return { project, writtenFiles: [], error: 'Add a project folder first' }
+  }
+
+  project = await addMessage(projectId, conversationId, 'user', normalizedContent)
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) {
-    return { project, error: 'Conversation not found' }
+    return { project, writtenFiles: [], error: 'Conversation not found' }
   }
 
-  try {
-    const reply = await requestReply(conversation.messages)
-    project = await addMessage(projectId, conversationId, 'assistant', reply)
-    return { project }
-  } catch (error) {
-    return {
-      project,
-      error: error instanceof Error ? error.message : 'Request failed',
-    }
+  const result = await develop(project, conversation.messages)
+  if (result.reply) {
+    project = await addMessage(projectId, conversationId, 'assistant', result.reply)
   }
+
+  return { project, writtenFiles: result.writtenFiles, error: result.error }
 }
 
 function createWindow(): void {
@@ -114,9 +81,9 @@ app.whenReady().then(() => {
     createConversation(projectId),
   )
   ipcMain.handle(
-    'chat:send',
+    'development:send',
     (_event, projectId: string, conversationId: string, content: string) =>
-      chat(projectId, conversationId, content),
+      developProject(projectId, conversationId, content),
   )
 
   createWindow()
