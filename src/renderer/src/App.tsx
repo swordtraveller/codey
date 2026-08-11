@@ -12,31 +12,33 @@ import {
   webLightTheme,
 } from '@fluentui/react-components'
 import { useEffect, useState, type FormEvent } from 'react'
-
-type ModelConfig = {
-  baseUrl: string
-  apiKey: string
-  modelName: string
-}
-
-type ChatMessage = {
-  role: 'user' | 'assistant'
-  content: string
-}
+import type { ModelConfig, Project } from '../../shared/types'
 
 const emptyConfig: ModelConfig = { baseUrl: '', apiKey: '', modelName: '' }
 
 export function App(): React.JSX.Element {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState('')
+  const [activeConversationId, setActiveConversationId] = useState('')
   const [draft, setDraft] = useState('')
   const [config, setConfig] = useState(emptyConfig)
   const [configDraft, setConfigDraft] = useState(emptyConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
+  const [projectName, setProjectName] = useState('')
   const [sending, setSending] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
+  const [projectError, setProjectError] = useState('')
+
+  const activeProject = projects.find((project) => project.id === activeProjectId)
+  const activeConversation = activeProject?.conversations.find(
+    (conversation) => conversation.id === activeConversationId,
+  )
   const configured = Boolean(config.baseUrl && config.apiKey && config.modelName)
+  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
 
   useEffect(() => {
     void window.codey
@@ -46,10 +48,29 @@ export function App(): React.JSX.Element {
         setConfigDraft(saved)
       })
       .catch(() => setError('Unable to load model configuration'))
+
+    void window.codey
+      .getProjects()
+      .then((savedProjects) => {
+        setProjects(savedProjects)
+        const firstProject = savedProjects[0]
+        if (firstProject) {
+          setActiveProjectId(firstProject.id)
+          setActiveConversationId(firstProject.conversations[0]?.id ?? '')
+        }
+      })
+      .catch(() => setError('Unable to load projects'))
   }, [])
 
-  function startNewConversation(): void {
-    setMessages([])
+  function replaceProject(updated: Project): void {
+    setProjects((current) => current.map((project) =>
+      project.id === updated.id ? updated : project,
+    ))
+  }
+
+  function selectProject(project: Project): void {
+    setActiveProjectId(project.id)
+    setActiveConversationId(project.conversations[0]?.id ?? '')
     setDraft('')
     setError('')
   }
@@ -77,33 +98,124 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function openProjectDialog(): void {
+    setProjectName('')
+    setProjectError('')
+    setProjectDialogOpen(true)
+  }
+
+  async function createNewProject(): Promise<void> {
+    if (!projectName.trim() || creatingProject) {
+      return
+    }
+
+    setCreatingProject(true)
+    setProjectError('')
+
+    try {
+      const project = await window.codey.createProject(projectName)
+      setProjects((current) => [...current, project])
+      setActiveProjectId(project.id)
+      setActiveConversationId(project.conversations[0]?.id ?? '')
+      setProjectName('')
+      setProjectDialogOpen(false)
+    } catch {
+      setProjectError('Enter a project name')
+    } finally {
+      setCreatingProject(false)
+    }
+  }
+
+  async function addFolder(): Promise<void> {
+    if (!activeProject) {
+      return
+    }
+
+    try {
+      const updated = await window.codey.addProjectFolder(activeProject.id)
+      if (updated) {
+        replaceProject(updated)
+      }
+    } catch {
+      setError('Unable to add the project folder')
+    }
+  }
+
+  async function startNewConversation(): Promise<void> {
+    if (!activeProject) {
+      return
+    }
+
+    try {
+      const updated = await window.codey.createConversation(activeProject.id)
+      replaceProject(updated)
+      setActiveConversationId(updated.conversations.at(-1)?.id ?? '')
+      setDraft('')
+      setError('')
+    } catch {
+      setError('Unable to create a conversation')
+    }
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
 
     const content = draft.trim()
-    if (!content || !configured || sending) {
+    if (!content || !canSend || !activeProject || !activeConversation || sending) {
       return
     }
 
-    const nextMessages = [...messages, { role: 'user' as const, content }]
-    setMessages(nextMessages)
     setDraft('')
     setError('')
+    const optimisticProject: Project = {
+      ...activeProject,
+      conversations: activeProject.conversations.map((conversation) =>
+        conversation.id === activeConversation.id
+          ? {
+              ...conversation,
+              messages: [
+                ...conversation.messages,
+                { id: crypto.randomUUID(), role: 'user', content },
+              ],
+            }
+          : conversation,
+      ),
+    }
+    replaceProject(optimisticProject)
     setSending(true)
 
     try {
-      const result = await window.codey.chat(nextMessages)
-      if (result.reply) {
-        setMessages([...nextMessages, { role: 'assistant', content: result.reply }])
-      } else {
-        setError(result.error || 'Request failed')
+      const result = await window.codey.develop(
+        activeProject.id,
+        activeConversation.id,
+        content,
+      )
+      if (result.project) {
+        replaceProject(result.project)
+      }
+      if (result.error) {
+        const files = result.writtenFiles.length
+          ? ` (${result.writtenFiles.length} file(s) written)`
+          : ''
+        setError(`${result.error}${files}`)
       }
     } catch {
-      setError('Unable to reach the model')
+      setError('Unable to process the development request')
     } finally {
       setSending(false)
     }
   }
+
+  const emptyTitle = !activeProject
+    ? 'Create a project'
+    : activeProject.folders.length === 0
+      ? 'Add a project folder'
+      : 'What should I build?'
+  const emptyDescription = !activeProject
+    ? 'Projects group folders and conversations.'
+    : activeProject.folders.length === 0
+      ? 'Codey only writes files inside folders you select.'
+      : 'Describe a development task to start this conversation.'
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -113,46 +225,121 @@ export function App(): React.JSX.Element {
             <span className="brand-mark">C</span>
             Codey
           </div>
-          <Button appearance="primary" disabled={sending} onClick={startNewConversation}>
-            New conversation
+
+          <Button appearance="primary" disabled={sending} onClick={openProjectDialog}>
+            New project
           </Button>
+
+          <section className="sidebar-section">
+            <p className="section-label">Projects</p>
+            <nav className="nav-list" aria-label="Projects">
+              {projects.map((project) => (
+                <Button
+                  appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
+                  disabled={sending}
+                  key={project.id}
+                  onClick={() => selectProject(project)}
+                >
+                  {project.name}
+                </Button>
+              ))}
+            </nav>
+          </section>
+
+          {activeProject && (
+            <section className="sidebar-section conversations-section">
+              <div className="section-heading">
+                <p className="section-label">Conversations</p>
+                <Button
+                  appearance="subtle"
+                  disabled={sending}
+                  size="small"
+                  onClick={() => void startNewConversation()}
+                >
+                  New
+                </Button>
+              </div>
+              <nav className="nav-list" aria-label="Conversations">
+                {activeProject.conversations.map((conversation) => (
+                  <Button
+                    appearance={
+                      conversation.id === activeConversationId ? 'secondary' : 'subtle'
+                    }
+                    disabled={sending}
+                    key={conversation.id}
+                    onClick={() => {
+                      setActiveConversationId(conversation.id)
+                      setDraft('')
+                      setError('')
+                    }}
+                  >
+                    {conversation.title}
+                  </Button>
+                ))}
+              </nav>
+            </section>
+          )}
+
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
-            Settings
+            Model settings
           </Button>
         </aside>
 
         <section className="workspace">
           <header className="topbar">
-            <span>Conversation</span>
+            <div>
+              <strong>{activeProject?.name ?? 'Codey'}</strong>
+              {activeConversation && <span>{activeConversation.title}</span>}
+            </div>
             <span className="status">
               {configured ? config.modelName : 'Not configured'}
             </span>
           </header>
 
+          {activeProject && (
+            <div className="folderbar">
+              <div className="folder-list">
+                {activeProject.folders.length === 0 ? (
+                  <span>No folders selected</span>
+                ) : (
+                  activeProject.folders.map((folder) => (
+                    <span className="folder" key={folder} title={folder}>
+                      {folder}
+                    </span>
+                  ))
+                )}
+              </div>
+              <Button disabled={sending} size="small" onClick={() => void addFolder()}>
+                Add folder
+              </Button>
+            </div>
+          )}
+
           <div className="conversation" aria-label="Conversation">
-            {messages.length === 0 ? (
+            {!activeConversation || (activeConversation.messages.length === 0 && !sending) ? (
               <div className="empty-state">
                 <span className="welcome-mark">C</span>
-                <h1>{configured ? 'How can I help?' : 'Configure a model'}</h1>
-                <p>
-                  {configured
-                    ? 'Write a message to start a conversation.'
-                    : 'Add an OpenAI-compatible endpoint to begin.'}
-                </p>
-                {!configured && (
-                  <Button appearance="primary" onClick={openSettings}>
-                    Open settings
+                <h1>{emptyTitle}</h1>
+                <p>{emptyDescription}</p>
+                {!activeProject && (
+                  <Button appearance="primary" onClick={openProjectDialog}>
+                    New project
+                  </Button>
+                )}
+                {activeProject && activeProject.folders.length === 0 && (
+                  <Button appearance="primary" onClick={() => void addFolder()}>
+                    Add folder
                   </Button>
                 )}
               </div>
             ) : (
               <div className="messages" aria-live="polite">
-                {messages.map((message, index) => (
-                  <div className={`message ${message.role}`} key={`${message.role}-${index}`}>
+                {activeConversation.messages.map((message) => (
+                  <div className={`message ${message.role}`} key={message.id}>
                     <p>{message.content}</p>
                   </div>
                 ))}
-                {sending && <p className="pending">Thinking…</p>}
+                {sending && <p className="pending">Working…</p>}
               </div>
             )}
             {error && <p className="error" role="alert">{error}</p>}
@@ -160,18 +347,23 @@ export function App(): React.JSX.Element {
 
           <form className="composer" onSubmit={sendMessage}>
             <Input
-              autoFocus
-              aria-label="Message"
+              aria-label="Development request"
               className="message-input"
-              disabled={!configured || sending}
+              disabled={!canSend || sending}
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
-              placeholder={configured ? 'Message Codey' : 'Configure a model first'}
+              placeholder={
+                !configured
+                  ? 'Configure a model first'
+                  : !activeProject?.folders.length
+                    ? 'Add a project folder first'
+                    : 'Describe a development task'
+              }
             />
             <Button
               appearance="primary"
-              disabled={!configured || !draft.trim() || sending}
+              disabled={!canSend || !draft.trim() || sending}
               size="large"
               type="submit"
             >
@@ -181,11 +373,49 @@ export function App(): React.JSX.Element {
         </section>
       </main>
 
+      <Dialog
+        open={projectDialogOpen}
+        onOpenChange={(_, data) => setProjectDialogOpen(data.open)}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>New project</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Field label="Project name" required>
+                <Input
+                  autoFocus
+                  value={projectName}
+                  onChange={(_, data) => setProjectName(data.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      void createNewProject()
+                    }
+                  }}
+                />
+              </Field>
+              {projectError && <p className="dialog-error">{projectError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setProjectDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={!projectName.trim() || creatingProject}
+                onClick={() => void createNewProject()}
+              >
+                {creatingProject ? 'Creating…' : 'Create'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
             <DialogTitle>Model settings</DialogTitle>
-            <DialogContent className="settings-fields">
+            <DialogContent className="dialog-fields">
               <Field label="Base URL" required>
                 <Input
                   value={configDraft.baseUrl}
@@ -207,11 +437,7 @@ export function App(): React.JSX.Element {
                   placeholder="model-name"
                 />
               </Field>
-              {settingsError && (
-                <p className="settings-error" role="alert">
-                  {settingsError}
-                </p>
-              )}
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
               <Button appearance="secondary" onClick={() => setSettingsOpen(false)}>

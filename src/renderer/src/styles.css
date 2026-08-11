@@ -22,7 +22,7 @@ body {
 
 .shell {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   background: #f5f5f5;
 }
 
@@ -30,6 +30,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  height: 100vh;
   border-right: 1px solid #e0e0e0;
   padding: 24px;
   background: #fff;
@@ -59,6 +60,57 @@ body {
   font-size: 14px;
 }
 
+.sidebar-section {
+  min-height: 0;
+}
+
+.conversations-section {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-label {
+  margin: 0 0 8px;
+  color: #707070;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.section-heading .section-label {
+  margin: 0;
+}
+
+.nav-list {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.conversations-section .nav-list {
+  max-height: none;
+  margin-top: 8px;
+}
+
+.nav-list button {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.nav-list button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-button {
   margin-top: auto;
 }
@@ -77,10 +129,16 @@ body {
   min-height: 64px;
   border-bottom: 1px solid #e0e0e0;
   padding: 0 32px;
-  background: rgb(255 255 255 / 85%);
-  font-weight: 600;
+  background: #fff;
 }
 
+.topbar div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.topbar div span,
 .status,
 .pending {
   color: #616161;
@@ -88,10 +146,43 @@ body {
   font-weight: 400;
 }
 
+.folderbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 48px;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 8px 32px;
+  background: #fafafa;
+}
+
+.folder-list {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  color: #707070;
+  font-size: 12px;
+}
+
+.folder {
+  flex: 0 0 auto;
+  max-width: 300px;
+  overflow: hidden;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: #fff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conversation {
   position: relative;
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 40px 32px;
 }
@@ -174,33 +265,33 @@ h1 {
   flex: 1;
 }
 
-.settings-fields {
+.dialog-fields {
   display: grid;
   gap: 16px;
   min-width: 420px;
 }
 
-.settings-error {
+.dialog-error {
   margin: 0;
   color: #bc2f32;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 760px) {
   .shell {
     display: flex;
     flex-direction: column;
   }
 
   .sidebar {
-    flex-direction: row;
-    align-items: center;
+    height: auto;
     border-right: 0;
     border-bottom: 1px solid #e0e0e0;
-    padding: 16px 20px;
   }
 
+  .conversations-section,
+  .sidebar-section,
   .settings-button {
-    margin: 0 0 0 auto;
+    display: none;
   }
 
   .workspace {
@@ -209,9 +300,10 @@ h1 {
     flex: 1;
   }
 
-  .topbar {
-    min-height: 52px;
-    padding: 0 20px;
+  .topbar,
+  .folderbar {
+    padding-right: 20px;
+    padding-left: 20px;
   }
 
   .conversation {
@@ -223,7 +315,7 @@ h1 {
     padding-bottom: 20px;
   }
 
-  .settings-fields {
+  .dialog-fields {
     min-width: 0;
   }
 }

@@ -1,118 +1,52 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron'
-import { readFile, writeFile } from 'node:fs/promises'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
+import type { DevelopmentResult, ModelConfig } from '../shared/types'
+import { develop } from './agent'
+import { readConfig, saveConfig } from './config'
+import {
+  addMessage,
+  addProjectFolder,
+  createConversation,
+  createProject,
+  getProject,
+  getProjects,
+} from './workspace'
 
-type ModelConfig = {
-  baseUrl: string
-  apiKey: string
-  modelName: string
-}
-
-type ChatMessage = {
-  role: 'user' | 'assistant'
-  content: string
-}
-
-type StoredConfig = ModelConfig & {
-  encrypted: boolean
-}
-
-type ChatResponse = {
-  choices?: Array<{ message?: { content?: string } }>
-  error?: { message?: string }
-}
-
-const emptyConfig: ModelConfig = { baseUrl: '', apiKey: '', modelName: '' }
-
-function getConfigPath(): string {
-  return join(app.getPath('userData'), 'model-config.json')
-}
-
-async function readConfig(): Promise<ModelConfig> {
-  try {
-    const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredConfig
-    const apiKey = stored.encrypted
-      ? safeStorage.decryptString(Buffer.from(stored.apiKey, 'base64'))
-      : stored.apiKey
-
-    return {
-      baseUrl: stored.baseUrl ?? '',
-      apiKey: apiKey ?? '',
-      modelName: stored.modelName ?? '',
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return emptyConfig
-    }
-    throw new Error('Unable to read model configuration')
-  }
-}
-
-async function saveConfig(config: ModelConfig): Promise<ModelConfig> {
-  const normalized = {
-    baseUrl: config.baseUrl.trim().replace(/\/+$/, ''),
-    apiKey: config.apiKey.trim(),
-    modelName: config.modelName.trim(),
-  }
-  const url = new URL(normalized.baseUrl)
-
-  if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    !normalized.apiKey ||
-    !normalized.modelName
-  ) {
-    throw new Error('Enter a valid base URL, API key, and model name')
+async function developProject(
+  projectId: string,
+  conversationId: string,
+  content: string,
+): Promise<DevelopmentResult> {
+  const normalizedContent = content.trim()
+  if (!normalizedContent) {
+    return { writtenFiles: [], error: 'Enter a development request' }
   }
 
-  const encrypted = Boolean(normalized.apiKey) && safeStorage.isEncryptionAvailable()
-  const stored: StoredConfig = {
-    ...normalized,
-    apiKey: encrypted
-      ? safeStorage.encryptString(normalized.apiKey).toString('base64')
-      : normalized.apiKey,
-    encrypted,
+  let project = await getProject(projectId)
+  if (project.folders.length === 0) {
+    return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
 
-  await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
-  return normalized
-}
-
-async function requestReply(messages: ChatMessage[]): Promise<string> {
-  const config = await readConfig()
-  if (!config.baseUrl || !config.apiKey || !config.modelName) {
-    throw new Error('Configure a model before sending a message')
+  project = await addMessage(projectId, conversationId, 'user', normalizedContent)
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
+    return { project, writtenFiles: [], error: 'Conversation not found' }
   }
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (config.apiKey) {
-    headers.Authorization = `Bearer ${config.apiKey}`
+  const result = await develop(project, conversation.messages)
+  if (result.reply) {
+    project = await addMessage(projectId, conversationId, 'assistant', result.reply)
   }
 
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ model: config.modelName, messages }),
-  })
-  const data = (await response.json()) as ChatResponse
-
-  if (!response.ok) {
-    throw new Error(data.error?.message || `Request failed with status ${response.status}`)
-  }
-
-  const reply = data.choices?.[0]?.message?.content?.trim()
-  if (!reply) {
-    throw new Error('The model returned an empty response')
-  }
-
-  return reply
+  return { project, writtenFiles: result.writtenFiles, error: result.error }
 }
 
 function createWindow(): void {
   const window = new BrowserWindow({
-    width: 1120,
-    height: 720,
-    minWidth: 840,
-    minHeight: 560,
+    width: 1200,
+    height: 760,
+    minWidth: 900,
+    minHeight: 600,
     title: 'Codey',
     autoHideMenuBar: true,
     backgroundColor: '#f7f7f5',
@@ -134,13 +68,23 @@ function createWindow(): void {
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
   ipcMain.handle('config:save', (_event, config: ModelConfig) => saveConfig(config))
-  ipcMain.handle('chat:send', async (_event, messages: ChatMessage[]) => {
-    try {
-      return { reply: await requestReply(messages) }
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : 'Request failed' }
+  ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('projects:create', (_event, name: string) => createProject(name))
+  ipcMain.handle('projects:add-folder', async (_event, projectId: string) => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (result.canceled || !result.filePaths[0]) {
+      return null
     }
+    return addProjectFolder(projectId, result.filePaths[0])
   })
+  ipcMain.handle('conversations:create', (_event, projectId: string) =>
+    createConversation(projectId),
+  )
+  ipcMain.handle(
+    'development:send',
+    (_event, projectId: string, conversationId: string, content: string) =>
+      developProject(projectId, conversationId, content),
+  )
 
   createWindow()
 
