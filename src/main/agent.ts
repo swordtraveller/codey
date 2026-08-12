@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/pro
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { ChatMessage, Project } from '../shared/types'
 import { readConfig } from './config'
+import { log } from './logger'
 
 type ToolCall = {
   id: string
@@ -203,20 +204,37 @@ async function requestCompletion(messages: ApiMessage[], tools: object[]): Promi
     throw new Error('Configure a model before sending a message')
   }
 
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.modelName,
-      messages,
-      tools,
-      tool_choice: 'auto',
-    }),
+  const requestBody = {
+    model: config.modelName,
+    messages,
+    tools,
+    tool_choice: 'auto',
+  }
+  log.debug('model.request', {
+    url: `${config.baseUrl}/chat/completions`,
+    body: requestBody,
   })
+
+  let response: Response
+  try {
+    response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    })
+  } catch (error) {
+    log.error('model.request.failed', error instanceof Error ? error.message : 'Request failed')
+    throw error
+  }
+
   const body = await response.text()
+  log.debug('model.response', {
+    status: response.status,
+    body,
+  })
   let data: ChatResponse = {}
   try {
     data = JSON.parse(body) as ChatResponse
@@ -224,9 +242,10 @@ async function requestCompletion(messages: ApiMessage[], tools: object[]): Promi
     // The status error below is more useful than a JSON parsing error.
   }
   if (!response.ok) {
-    throw new Error(
-      data.error?.message || body.slice(0, 200) || `Request failed with status ${response.status}`,
-    )
+    const message =
+      data.error?.message || body.slice(0, 200) || `Request failed with status ${response.status}`
+    log.error('model.response.failed', message)
+    throw new Error(message)
   }
   return data
 }
