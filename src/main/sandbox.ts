@@ -7,22 +7,59 @@ type ProcessResult = {
   stdout: string
   stderr: string
   timedOut: boolean
+  durationMs: number
+}
+
+export type PythonExecutionResult = {
+  stdout: string
+  stderr: string
+  exit_code: number
+  duration_ms: number
+  traceback: string | null
+}
+
+export type PythonInstallResult = {
+  success: boolean
+  installed_versions: Record<string, string>
+  log: string
+}
+
+export type PythonEnvironmentInfo = {
+  python_version: string
+  venv_path: string
+  sys_path: string[]
+  installed_packages: Array<{ name: string; version: string }>
+}
+
+export type PythonSymbol = {
+  type: 'class' | 'function'
+  name: string
+  signature: string
+  line_start: number
+  bases: string[]
+}
+
+export type PythonSymbolsResult = {
+  symbols: PythonSymbol[]
+  truncated: boolean
 }
 
 const defaultTimeoutMs = 120_000
 const maxOutputSize = 20_000
 const environmentTasks = new Map<string, Promise<void>>()
 
-const runnerSource = String.raw`import json
+const runnerSource = String.raw`import ast
+import importlib.metadata as metadata
+import json
 import os
 import runpy
 import sys
 
+mode = sys.argv[1]
 project_roots = [os.path.realpath(path) for path in json.loads(sys.argv[2])]
 protected_root = os.path.realpath(sys.argv[3])
 blocked_roots = [os.path.realpath(path) for path in json.loads(sys.argv[4])]
-script_path = os.path.realpath(sys.argv[1])
-script_args = sys.argv[5:]
+allow_writes = mode == 'script'
 
 runtime_roots = []
 for path in [sys.base_prefix, sys.prefix, os.path.dirname(sys.executable), *sys.path]:
@@ -56,6 +93,8 @@ def check_path(path, write=False, project_only=False):
     resolved = resolve_path(path)
     if resolved is None:
         return
+    if write and not allow_writes:
+        raise PermissionError('Writing files is not allowed for this operation')
     roots = project_roots if write or project_only else project_roots + runtime_roots
     if not is_within(resolved, roots):
         raise PermissionError('Path is outside the project sandbox')
@@ -77,9 +116,9 @@ def audit(event, arguments):
         raise PermissionError('Starting child processes is not allowed')
 
     if event == 'open':
-        path, mode, flags = arguments
+        path, mode_value, flags = arguments
         writing = (
-            isinstance(mode, str) and any(character in mode for character in 'wax+')
+            isinstance(mode_value, str) and any(character in mode_value for character in 'wax+')
         ) or (
             isinstance(flags, int)
             and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
@@ -114,17 +153,77 @@ def audit(event, arguments):
 
 
 sys.addaudithook(audit)
-check_path(script_path, project_only=True)
-sys.path.insert(0, os.path.dirname(script_path))
-sys.argv = [script_path, *script_args]
-runpy.run_path(script_path, run_name='__main__')
+
+if mode == 'code':
+    source = sys.stdin.read()
+    sys.argv = ['<memory>']
+    exec(compile(source, '<memory>', 'exec'), {'__name__': '__main__'})
+elif mode == 'script':
+    script_path = os.path.realpath(sys.argv[5])
+    check_path(script_path, project_only=True)
+    sys.path.insert(0, os.path.dirname(script_path))
+    sys.argv = [script_path, *sys.argv[6:]]
+    runpy.run_path(script_path, run_name='__main__')
+elif mode == 'symbols':
+    file_path = os.path.realpath(sys.argv[5])
+    check_path(file_path, project_only=True)
+    with open(file_path, encoding='utf-8') as source_file:
+        tree = ast.parse(source_file.read(), filename=file_path)
+    symbols = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            all_bases = [ast.unparse(base) for base in node.bases]
+            bases = [base[:100] for base in all_bases[:5]]
+            signature = (f"{node.name}({', '.join(all_bases)})" if all_bases else node.name)[:300]
+            symbols.append({
+                'type': 'class', 'name': node.name[:100], 'signature': signature,
+                'line_start': node.lineno, 'bases': bases,
+            })
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            prefix = 'async ' if isinstance(node, ast.AsyncFunctionDef) else ''
+            symbols.append({
+                'type': 'function', 'name': node.name[:100],
+                'signature': f"{prefix}{node.name}({ast.unparse(node.args)})"[:300],
+                'line_start': node.lineno, 'bases': [],
+            })
+    symbols = sorted(symbols, key=lambda item: item['line_start'])
+    print(json.dumps({
+        'symbols': symbols[:20],
+        'truncated': len(symbols) > 20,
+    }))
+elif mode == 'env_info':
+    packages = sorted(
+        ({'name': dist.metadata['Name'] or 'unknown', 'version': dist.version} for dist in metadata.distributions()),
+        key=lambda item: item['name'].lower(),
+    )
+    packages = [
+        {'name': item['name'][:100], 'version': item['version'][:50]}
+        for item in packages
+    ]
+    if len(packages) > 50:
+        packages = packages[:49] + [{'name': '[output truncated]', 'version': ''}]
+    print(json.dumps({
+        'python_version': sys.version.split()[0],
+        'venv_path': sys.prefix,
+        'sys_path': [path[:300] for path in sys.path[:20]],
+        'installed_packages': packages,
+    }))
+elif mode == 'package_versions':
+    versions = {}
+    for name in json.loads(sys.stdin.read()):
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            pass
+    print(json.dumps(versions))
+else:
+    raise ValueError('Unknown runner mode')
 `
 
 export function truncateOutput(value: string, limit = maxOutputSize): string {
   if (value.length <= limit) {
     return value
   }
-
   return `${value.slice(0, limit)}\n[output truncated]`
 }
 
@@ -137,7 +236,6 @@ export function safeResolvePath(projectRoot: string, inputPath: string): string 
   if (!inputPath || inputPath.includes('\0')) {
     throw new Error('Path is required')
   }
-
   const segments = inputPath.split(/[\\/]+/)
   if (
     isAbsolute(inputPath) ||
@@ -147,13 +245,11 @@ export function safeResolvePath(projectRoot: string, inputPath: string): string 
   ) {
     throw new Error('Path is outside the project root')
   }
-
   const root = resolve(projectRoot)
   const target = resolve(root, inputPath)
   if (!isWithin(root, target)) {
     throw new Error('Path is outside the project root')
   }
-
   return target
 }
 
@@ -173,7 +269,6 @@ function appendOutput(current: string, chunk: Buffer | string): string {
   if (current.length > maxOutputSize) {
     return current
   }
-
   return `${current}${chunk.toString()}`.slice(0, maxOutputSize + 1)
 }
 
@@ -220,20 +315,21 @@ function runProcess(
   cwd: string,
   timeoutMs: number,
   env?: NodeJS.ProcessEnv,
+  input?: string,
 ): Promise<ProcessResult> {
   return new Promise((resolveProcess, rejectProcess) => {
+    const startedAt = Date.now()
     const child = spawn(command, args, {
       cwd,
       env,
       shell: false,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
     let stderr = ''
     let timedOut = false
     let settled = false
-
     const timer = setTimeout(() => {
       if (!settled) {
         timedOut = true
@@ -241,10 +337,10 @@ function runProcess(
       }
     }, timeoutMs)
 
-    child.stdout.on('data', (chunk: Buffer | string) => {
+    child.stdout?.on('data', (chunk: Buffer | string) => {
       stdout = appendOutput(stdout, chunk)
     })
-    child.stderr.on('data', (chunk: Buffer | string) => {
+    child.stderr?.on('data', (chunk: Buffer | string) => {
       stderr = appendOutput(stderr, chunk)
     })
     child.once('error', (error) => {
@@ -265,8 +361,12 @@ function runProcess(
         stdout: truncateOutput(stdout),
         stderr: truncateOutput(stderr),
         timedOut,
+        durationMs: Date.now() - startedAt,
       })
     })
+    if (input !== undefined) {
+      child.stdin?.end(input)
+    }
   })
 }
 
@@ -294,16 +394,9 @@ function runnerPath(projectRoot: string): string {
 
 async function createVenv(projectRoot: string): Promise<void> {
   const candidates = process.platform === 'win32'
-    ? [
-        { command: 'py', args: ['-3'] },
-        { command: 'python', args: [] },
-      ]
-    : [
-        { command: 'python3', args: [] },
-        { command: 'python', args: [] },
-      ]
+    ? [{ command: 'py', args: ['-3'] }, { command: 'python', args: [] }]
+    : [{ command: 'python3', args: [] }, { command: 'python', args: [] }]
   let failure = ''
-
   for (const candidate of candidates) {
     try {
       const result = await runProcess(
@@ -320,7 +413,6 @@ async function createVenv(projectRoot: string): Promise<void> {
       failure = error instanceof Error ? error.message : 'Python was not found'
     }
   }
-
   throw new Error(
     `Unable to create project Python environment${failure ? `: ${truncateOutput(failure)}` : ''}`,
   )
@@ -337,7 +429,6 @@ async function initializePythonEnvironment(projectRoot: string): Promise<void> {
     await access(pythonPath(projectRoot))
     await access(pipPath(projectRoot))
   }
-
   await safeResolveWritablePath(projectRoot, 'agent_venv/.codey_runner.py')
   await writeFile(runnerPath(projectRoot), runnerSource, 'utf8')
 }
@@ -348,45 +439,56 @@ export async function ensurePythonEnvironment(projectRoot: string): Promise<void
   if (existingTask) {
     return existingTask
   }
-
   const task = initializePythonEnvironment(root).finally(() => environmentTasks.delete(root))
   environmentTasks.set(root, task)
   return task
 }
 
-export async function runPython(
-  projectRoot: string,
-  projectFolders: string[],
-  scriptRoot: string,
-  scriptPath: string,
-  args: string[] = [],
-  timeoutMs = defaultTimeoutMs,
-): Promise<string> {
-  const root = await safeResolveExistingPath(projectRoot, '.')
-  const selectedRoot = await safeResolveExistingPath(scriptRoot, '.')
-  const allowedRoots = await Promise.all(
-    projectFolders.map((folder) => safeResolveExistingPath(folder, '.')),
-  )
-  const script = await safeResolveExistingPath(selectedRoot, scriptPath)
-  const safeTimeoutMs = Math.min(Math.max(timeoutMs, 1_000), defaultTimeoutMs)
-  const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
+function normalizeTimeout(timeoutSeconds: number): number {
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) {
+    throw new Error('timeout must be between 1 and 120 seconds')
+  }
+  return Math.round(timeoutSeconds * 1000)
+}
 
+function tracebackFrom(stderr: string): string | null {
+  const index = stderr.lastIndexOf('Traceback (most recent call last):')
+  return index === -1 ? null : truncateOutput(stderr.slice(index))
+}
+
+async function projectRoots(projectFolders: string[]): Promise<string[]> {
+  return Promise.all(projectFolders.map((folder) => safeResolveExistingPath(folder, '.')))
+}
+
+function runnerArguments(mode: string, roots: string[], root: string): string[] {
+  return [
+    '-I',
+    '-u',
+    runnerPath(root),
+    mode,
+    JSON.stringify(roots),
+    venvPath(root),
+    JSON.stringify(roots.map((folder) => safeResolvePath(folder, '.git'))),
+  ]
+}
+
+async function runSandboxMode(
+  root: string,
+  roots: string[],
+  mode: string,
+  modeArgs: string[],
+  timeoutMs: number,
+  cwd: string,
+  input?: string,
+): Promise<ProcessResult> {
+  const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
   await ensurePythonEnvironment(root)
   await mkdir(temporaryDirectory, { recursive: true })
-  const result = await runProcess(
+  return runProcess(
     pythonPath(root),
-    [
-      '-I',
-      '-u',
-      runnerPath(root),
-      script,
-      JSON.stringify(allowedRoots),
-      venvPath(root),
-      JSON.stringify(allowedRoots.map((folder) => safeResolvePath(folder, '.git'))),
-      ...args,
-    ],
-    selectedRoot,
-    safeTimeoutMs,
+    [...runnerArguments(mode, roots, root), ...modeArgs],
+    cwd,
+    timeoutMs,
     {
       ...process.env,
       PYTHONDONTWRITEBYTECODE: '1',
@@ -397,64 +499,140 @@ export async function runPython(
       USERPROFILE: temporaryDirectory,
       XDG_CACHE_HOME: temporaryDirectory,
     },
+    input,
   )
+}
 
-  if (result.timedOut) {
-    throw new Error(`Python execution timed out after ${safeTimeoutMs} ms`)
+function executionResult(result: ProcessResult, timeoutMs: number): PythonExecutionResult {
+  const stderr = result.timedOut
+    ? truncateOutput(`${result.stderr}${result.stderr ? '\n' : ''}Execution timed out after ${timeoutMs / 1000} seconds`)
+    : result.stderr
+  return {
+    stdout: result.stdout,
+    stderr,
+    exit_code: result.timedOut ? -1 : (result.exitCode ?? -1),
+    duration_ms: result.durationMs,
+    traceback: tracebackFrom(stderr),
   }
-  if (result.exitCode !== 0) {
-    throw new Error(truncateOutput(result.stderr || result.stdout || 'Python execution failed'))
-  }
+}
 
-  return truncateOutput([result.stdout, result.stderr].filter(Boolean).join('\n'))
+export async function executePythonCode(
+  projectRoot: string,
+  projectFolders: string[],
+  workingRoot: string,
+  code: string,
+  timeoutSeconds: number,
+): Promise<PythonExecutionResult> {
+  const root = await safeResolveExistingPath(projectRoot, '.')
+  const roots = await projectRoots(projectFolders)
+  const workingDirectory = await safeResolveExistingPath(workingRoot, '.')
+  if (!roots.includes(workingDirectory)) {
+    throw new Error('Working directory is outside the project folders')
+  }
+  const timeoutMs = normalizeTimeout(timeoutSeconds)
+  const result = await runSandboxMode(root, roots, 'code', [], timeoutMs, workingDirectory, code)
+  return executionResult(result, timeoutMs)
+}
+
+export async function runPythonScript(
+  projectRoot: string,
+  projectFolders: string[],
+  scriptRoot: string,
+  filePath: string,
+  argv: string[],
+  timeoutSeconds: number,
+): Promise<PythonExecutionResult> {
+  if (!filePath.toLowerCase().endsWith('.py')) {
+    throw new Error('file_path must reference a .py file')
+  }
+  const root = await safeResolveExistingPath(projectRoot, '.')
+  const selectedRoot = await safeResolveExistingPath(scriptRoot, '.')
+  const script = await safeResolveExistingPath(selectedRoot, filePath)
+  const roots = await projectRoots(projectFolders)
+  if (!roots.includes(selectedRoot)) {
+    throw new Error('Script folder is outside the project folders')
+  }
+  const timeoutMs = normalizeTimeout(timeoutSeconds)
+  const result = await runSandboxMode(root, roots, 'script', [script, ...argv], timeoutMs, selectedRoot)
+  return executionResult(result, timeoutMs)
 }
 
 function isPackageName(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9_,.-]+\])?(?:===|==|~=|!=|>=|<=|>|<)?[A-Za-z0-9.*+!_-]*$/.test(
-    value,
-  )
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9_,.-]+\])?(?:===|==|~=|!=|>=|<=|>|<)?[A-Za-z0-9.*+!_-]*$/.test(value)
+}
+
+function distributionName(specifier: string): string {
+  return specifier.match(/^[A-Za-z0-9][A-Za-z0-9._-]*/)?.[0] ?? specifier
 }
 
 export async function installPythonPackages(
   projectRoot: string,
   packages: string[],
-): Promise<string> {
+): Promise<PythonInstallResult> {
   if (packages.length === 0 || packages.length > 20 || packages.some((item) => !isPackageName(item))) {
     throw new Error('Provide 1 to 20 valid Python package names')
   }
-
   const root = await safeResolveExistingPath(projectRoot, '.')
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
   await ensurePythonEnvironment(root)
   await mkdir(temporaryDirectory, { recursive: true })
   const result = await runProcess(
     pipPath(root),
-    [
-      'install',
-      '--isolated',
-      '--disable-pip-version-check',
-      '--no-cache-dir',
-      '--only-binary=:all:',
-      ...packages,
-    ],
+    ['install', '--isolated', '--disable-pip-version-check', '--no-cache-dir', ...packages],
     root,
     defaultTimeoutMs,
-    {
-      ...process.env,
-      TEMP: temporaryDirectory,
-      TMP: temporaryDirectory,
-      TMPDIR: temporaryDirectory,
-    },
+    { ...process.env, TEMP: temporaryDirectory, TMP: temporaryDirectory, TMPDIR: temporaryDirectory },
   )
-
-  if (result.timedOut) {
-    throw new Error(`pip install timed out after ${defaultTimeoutMs} ms`)
+  const roots = [root]
+  const names = packages.map(distributionName)
+  const versionResult = await runSandboxMode(
+    root,
+    roots,
+    'package_versions',
+    [],
+    30_000,
+    root,
+    JSON.stringify(names),
+  )
+  let installedVersions: Record<string, string> = {}
+  try {
+    installedVersions = JSON.parse(versionResult.stdout) as Record<string, string>
+  } catch {
+    // Keep an empty version map when metadata cannot be read.
   }
-  if (result.exitCode !== 0) {
-    throw new Error(truncateOutput(result.stderr || result.stdout || 'pip install failed'))
+  const log = truncateOutput([result.stdout, result.stderr].filter(Boolean).join('\n'))
+  return {
+    success: !result.timedOut && result.exitCode === 0,
+    installed_versions: installedVersions,
+    log: result.timedOut ? truncateOutput(`${log}\npip install timed out`) : log,
   }
-
-  return truncateOutput([result.stdout, result.stderr].filter(Boolean).join('\n'))
 }
 
+export async function getPythonEnvironmentInfo(
+  projectRoot: string,
+): Promise<PythonEnvironmentInfo> {
+  const root = await safeResolveExistingPath(projectRoot, '.')
+  const result = await runSandboxMode(root, [root], 'env_info', [], 30_000, root)
+  if (result.timedOut || result.exitCode !== 0) {
+    throw new Error(result.stderr || 'Unable to inspect Python environment')
+  }
+  return JSON.parse(result.stdout) as PythonEnvironmentInfo
+}
 
+export async function listPythonSymbols(
+  projectRoot: string,
+  fileRoot: string,
+  filePath: string,
+): Promise<PythonSymbolsResult> {
+  if (!filePath.toLowerCase().endsWith('.py')) {
+    throw new Error('file_path must reference a .py file')
+  }
+  const root = await safeResolveExistingPath(projectRoot, '.')
+  const selectedRoot = await safeResolveExistingPath(fileRoot, '.')
+  const target = await safeResolveExistingPath(selectedRoot, filePath)
+  const result = await runSandboxMode(root, [selectedRoot], 'symbols', [target], 30_000, selectedRoot)
+  if (result.timedOut || result.exitCode !== 0) {
+    throw new Error(result.stderr || 'Unable to parse Python symbols')
+  }
+  return JSON.parse(result.stdout) as PythonSymbolsResult
+}

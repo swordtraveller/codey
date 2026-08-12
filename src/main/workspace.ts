@@ -1,13 +1,32 @@
+import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
-import type { ChatMessage, Conversation, Project } from '../shared/types'
+import type { ChatMessage, Conversation, Project, ProjectFolder } from '../shared/types'
+
+type StoredProject = Omit<Project, 'folders' | 'pythonEnvironmentFolderId'> & {
+  folders: Array<ProjectFolder | string>
+  pythonEnvironmentFolderId?: string | null
+}
 
 let projects: Project[] | undefined
 
 function getWorkspacePath(): string {
   return join(app.getPath('userData'), 'workspace.json')
+}
+
+function normalizeProject(value: StoredProject): Project {
+  const folders = value.folders.map((folder) =>
+    typeof folder === 'string' ? { id: randomUUID(), path: folder } : folder,
+  )
+  const configuredFolder = folders.some((folder) => folder.id === value.pythonEnvironmentFolderId)
+  return {
+    ...value,
+    folders,
+    pythonEnvironmentFolderId: configuredFolder
+      ? (value.pythonEnvironmentFolderId ?? null)
+      : (folders[0]?.id ?? null),
+  }
 }
 
 async function loadProjects(): Promise<Project[]> {
@@ -16,7 +35,15 @@ async function loadProjects(): Promise<Project[]> {
   }
 
   try {
-    projects = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as Project[]
+    const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as StoredProject[]
+    const needsMigration = stored.some((project) =>
+      project.pythonEnvironmentFolderId === undefined ||
+      project.folders.some((folder) => typeof folder === 'string'),
+    )
+    projects = stored.map(normalizeProject)
+    if (needsMigration) {
+      await saveProjects()
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw new Error('Unable to read projects')
@@ -65,6 +92,7 @@ export async function createProject(name: string): Promise<Project> {
     id: randomUUID(),
     name: normalizedName,
     folders: [],
+    pythonEnvironmentFolderId: null,
     conversations: [createConversationRecord(1)],
   }
   const currentProjects = await loadProjects()
@@ -76,11 +104,13 @@ export async function createProject(name: string): Promise<Project> {
 export async function addProjectFolder(projectId: string, folderPath: string): Promise<Project> {
   const project = await findProject(projectId)
   const exists = project.folders.some(
-    (current) => current.toLowerCase() === folderPath.toLowerCase(),
+    (current) => current.path.toLowerCase() === folderPath.toLowerCase(),
   )
 
   if (!exists) {
-    project.folders.push(folderPath)
+    const folder = { id: randomUUID(), path: folderPath }
+    project.folders.push(folder)
+    project.pythonEnvironmentFolderId ??= folder.id
     await saveProjects()
   }
 

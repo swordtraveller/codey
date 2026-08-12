@@ -303,8 +303,8 @@ export function App(): React.JSX.Element {
                   <span>No folders selected</span>
                 ) : (
                   activeProject.folders.map((folder) => (
-                    <span className="folder" key={folder} title={folder}>
-                      {folder}
+                    <span className="folder" key={folder.id} title={folder.path}>
+                      {folder.path}
                     </span>
                   ))
                 )}

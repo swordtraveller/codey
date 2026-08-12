@@ -16,10 +16,16 @@ export type Conversation = {
   messages: ChatMessage[]
 }
 
+export type ProjectFolder = {
+  id: string
+  path: string
+}
+
 export type Project = {
   id: string
   name: string
-  folders: string[]
+  folders: ProjectFolder[]
+  pythonEnvironmentFolderId: string | null
   conversations: Conversation[]
 }
 
