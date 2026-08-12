@@ -1,8 +1,15 @@
 import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname } from 'node:path'
 import type { ChatMessage, Project } from '../shared/types'
 import { readConfig } from './config'
 import { log } from './logger'
+import {
+  installPythonPackages,
+  runPython,
+  safeResolveExistingPath,
+  safeResolveWritablePath,
+  truncateOutput,
+} from './sandbox'
 
 type ToolCall = {
   id: string
@@ -40,33 +47,13 @@ type ToolArguments = {
   folderPath?: string
   relativePath?: string
   content?: string
+  args?: string[]
+  packages?: string[]
+  timeoutMs?: number
 }
 
 const maxFileSize = 200_000
 const maxWriteSize = 1_000_000
-
-function isWithin(root: string, target: string): boolean {
-  const pathFromRoot = relative(root, target)
-  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
-}
-
-async function nearestExistingPath(target: string): Promise<string> {
-  let current = target
-  while (true) {
-    try {
-      return await realpath(current)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error
-      }
-      const parent = dirname(current)
-      if (parent === current) {
-        throw error
-      }
-      current = parent
-    }
-  }
-}
 
 async function resolveProjectPath(
   project: Project,
@@ -77,22 +64,33 @@ async function resolveProjectPath(
   const root = project.folders.find(
     (folder) => folder.toLowerCase() === folderPath.toLowerCase(),
   )
-  const segments = relativePath.split(/[\\/]+/)
-  if (
-    !root ||
-    isAbsolute(relativePath) ||
-    segments.some((segment) => segment.toLowerCase() === '.git')
-  ) {
+  if (!root) {
     throw new Error('Path is outside the project folders')
   }
 
   const rootPath = await realpath(root)
-  const target = resolve(rootPath, relativePath || '.')
-  const checkedPath = allowMissing ? await nearestExistingPath(target) : await realpath(target)
-  if (!isWithin(rootPath, checkedPath) || !isWithin(rootPath, target)) {
-    throw new Error('Path is outside the project folders')
+  const segments = relativePath.split(/[\\/]+/)
+  if (
+    segments.some((segment) =>
+      ['.git', 'agent_venv', '.agent_tmp'].includes(segment.toLowerCase()),
+    )
+  ) {
+    throw new Error('Path is not available to the coding agent')
   }
-  return target
+
+  if (!allowMissing) {
+    return safeResolveExistingPath(rootPath, relativePath || '.')
+  }
+
+  return safeResolveWritablePath(rootPath, relativePath || '.')
+}
+
+function getProjectRoot(project: Project): string {
+  const root = project.folders[0]
+  if (!root) {
+    throw new Error('Add a project folder first')
+  }
+  return root
 }
 
 async function runTool(
@@ -101,6 +99,14 @@ async function runTool(
   writtenFiles: string[],
 ): Promise<string> {
   const args = JSON.parse(toolCall.function.arguments) as ToolArguments
+
+  if (toolCall.function.name === 'pip_install') {
+    if (!Array.isArray(args.packages)) {
+      throw new Error('packages are required')
+    }
+    return installPythonPackages(getProjectRoot(project), args.packages)
+  }
+
   if (!args.folderPath || !args.relativePath) {
     throw new Error('folderPath and relativePath are required')
   }
@@ -109,10 +115,15 @@ async function runTool(
     const target = await resolveProjectPath(project, args.folderPath, args.relativePath, false)
     const entries = await readdir(target, { withFileTypes: true })
     return JSON.stringify(
-      entries.slice(0, 200).map((entry) => ({
-        name: entry.name,
-        type: entry.isDirectory() ? 'directory' : 'file',
-      })),
+      entries
+        .filter((entry) =>
+          !['.git', 'agent_venv', '.agent_tmp'].includes(entry.name.toLowerCase()),
+        )
+        .slice(0, 200)
+        .map((entry) => ({
+          name: entry.name,
+          type: entry.isDirectory() ? 'directory' : 'file',
+        })),
     )
   }
 
@@ -135,6 +146,23 @@ async function runTool(
       writtenFiles.push(target)
     }
     return `Wrote ${args.relativePath}`
+  }
+
+  if (toolCall.function.name === 'run_python') {
+    const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+    const scriptArgs = args.args ?? []
+    if (!Array.isArray(scriptArgs) || scriptArgs.some((item) => typeof item !== 'string')) {
+      throw new Error('args must be an array of strings')
+    }
+    await resolveProjectPath(project, args.folderPath, args.relativePath, false)
+    return runPython(
+      getProjectRoot(project),
+      project.folders,
+      args.folderPath,
+      args.relativePath,
+      scriptArgs,
+      timeoutMs,
+    )
   }
 
   throw new Error(`Unknown tool: ${toolCall.function.name}`)
@@ -191,6 +219,39 @@ function createTools(project: Project): object[] {
             content: { type: 'string', description: 'Complete file content.' },
           },
           required: ['folderPath', 'relativePath', 'content'],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'run_python',
+        description: 'Run a Python script with the project agent_venv interpreter.',
+        parameters: {
+          type: 'object',
+          properties: {
+            folderPath,
+            relativePath,
+            args: { type: 'array', items: { type: 'string' }, maxItems: 20 },
+            timeoutMs: { type: 'integer', minimum: 1000, maximum: 120000 },
+          },
+          required: ['folderPath', 'relativePath'],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'pip_install',
+        description: 'Install Python packages into the project agent_venv environment.',
+        parameters: {
+          type: 'object',
+          properties: {
+            packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
+          },
+          required: ['packages'],
           additionalProperties: false,
         },
       },
@@ -264,7 +325,7 @@ export async function develop(project: Project, messages: ChatMessage[]): Promis
         'You are a coding agent working in the project folders below.',
         ...project.folders.map((folder) => `- ${folder}`),
         'Inspect relevant files and use write_file to implement requested changes.',
-        'Only access paths inside these folders. Do not run tests.',
+        'Only access paths inside these folders. Use run_python for Python scripts and pip_install for packages. Do not run tests.',
         'After completing the changes, give a concise summary.',
       ].join('\n'),
     },
@@ -300,9 +361,11 @@ export async function develop(project: Project, messages: ChatMessage[]): Promis
       for (const toolCall of toolCalls) {
         let content: string
         try {
-          content = await runTool(project, toolCall, writtenFiles)
+          content = truncateOutput(await runTool(project, toolCall, writtenFiles))
         } catch (error) {
-          content = `Error: ${error instanceof Error ? error.message : 'Tool failed'}`
+          content = truncateOutput(
+            `Error: ${error instanceof Error ? error.message : 'Tool failed'}`,
+          )
         }
         apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content })
       }
