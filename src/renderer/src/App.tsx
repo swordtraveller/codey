@@ -14,6 +14,7 @@ import {
 } from '@fluentui/react-components'
 import { Component, Fragment, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
 
 const emptyConfig = defaultModelConfig
@@ -27,7 +28,7 @@ function formatToolParameters(parameters: string): string {
 }
 
 function looksLikeMarkdown(content: string): boolean {
-  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|```|>\s)|\*\*[^*]+\*\*|`[^`]+`|\[[^]]+\]\([^)]+\)/.test(content)
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|```|>\s)|\*\*[^*]+\*\*|`[^`]+`|\[[^]]+\]\([^)]+\)|(^|\n)\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?/.test(content)
 }
 
 class MarkdownErrorBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { hasError: boolean }> {
@@ -111,7 +112,7 @@ function AssistantContent({ content }: { content: string }): React.JSX.Element {
       {looksLikeMarkdown(content) ? (
         <MarkdownErrorBoundary fallback={fallback}>
           <div className="markdown-content">
-            <Markdown>{content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
           </div>
         </MarkdownErrorBoundary>
       ) : (
