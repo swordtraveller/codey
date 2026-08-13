@@ -138,6 +138,16 @@ body {
   gap: 3px;
 }
 
+.model-status {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.context-status {
+  color: #8a8a8a;
+  font-size: 11px;
+}
+
 .topbar div span,
 .status,
 .pending {

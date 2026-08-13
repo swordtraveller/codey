@@ -10,6 +10,7 @@ import {
   createProject,
   getProject,
   getProjects,
+  saveConversationContext,
 } from './workspace'
 
 async function developProject(
@@ -33,7 +34,16 @@ async function developProject(
     return { project, writtenFiles: [], error: 'Conversation not found' }
   }
 
-  const result = await develop(project, conversation.messages)
+  const result = await develop(project, [
+    ...conversation.agentMessages,
+    { role: 'user', content: normalizedContent },
+  ])
+  project = await saveConversationContext(
+    projectId,
+    conversationId,
+    result.agentMessages,
+    result.context,
+  )
   if (result.reply) {
     project = await addMessage(projectId, conversationId, 'assistant', result.reply)
   }

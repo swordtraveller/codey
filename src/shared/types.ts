@@ -2,6 +2,29 @@ export type ModelConfig = {
   baseUrl: string
   apiKey: string
   modelName: string
+  modelMaxContext: number
+  safeOutputMargin: number
+  recentKeepRounds: number
+}
+
+export const defaultModelConfig: ModelConfig = {
+  baseUrl: '',
+  apiKey: '',
+  modelName: '',
+  modelMaxContext: 128_000,
+  safeOutputMargin: 16_000,
+  recentKeepRounds: 5,
+}
+
+export type ContextMetrics = {
+  originalTokens: number
+  compressedTokens: number
+  modelMaxContext: number
+  triggerThreshold: number
+  compressionRatio: number
+  filtered: boolean
+  rewritten: boolean
+  truncated: boolean
 }
 
 export type ChatMessage = {
@@ -10,10 +33,19 @@ export type ChatMessage = {
   content: string
 }
 
+export type AgentContextMessage = {
+  role: ChatMessage['role'] | 'tool'
+  content: string | null
+  toolCalls?: unknown[]
+  toolCallId?: string
+}
+
 export type Conversation = {
   id: string
   title: string
   messages: ChatMessage[]
+  agentMessages: AgentContextMessage[]
+  context?: ContextMetrics
 }
 
 export type ProjectFolder = {

@@ -12,9 +12,9 @@ import {
   webLightTheme,
 } from '@fluentui/react-components'
 import { useEffect, useState, type FormEvent } from 'react'
-import type { ModelConfig, Project } from '../../shared/types'
+import { defaultModelConfig, type Project } from '../../shared/types'
 
-const emptyConfig: ModelConfig = { baseUrl: '', apiKey: '', modelName: '' }
+const emptyConfig = defaultModelConfig
 
 export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([])
@@ -38,6 +38,15 @@ export function App(): React.JSX.Element {
     (conversation) => conversation.id === activeConversationId,
   )
   const configured = Boolean(config.baseUrl && config.apiKey && config.modelName)
+  const context = activeConversation?.context
+  const contextActions = context
+    ? [context.filtered && 'filtered', context.rewritten && 'rewritten', context.truncated && 'truncated']
+        .filter(Boolean)
+        .join(', ')
+    : ''
+  const contextStatus = context
+    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input / ${context.compressionRatio.toFixed(2)}x compression${contextActions ? ` (${contextActions})` : ''}`
+    : ''
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
 
   useEffect(() => {
@@ -92,7 +101,7 @@ export function App(): React.JSX.Element {
       setError('')
       setSettingsOpen(false)
     } catch {
-      setSettingsError('Enter a valid base URL, API key, and model name')
+      setSettingsError('Enter valid model and context settings')
     } finally {
       setSaving(false)
     }
@@ -291,9 +300,19 @@ export function App(): React.JSX.Element {
               <strong>{activeProject?.name ?? 'Codey'}</strong>
               {activeConversation && <span>{activeConversation.title}</span>}
             </div>
-            <span className="status">
-              {configured ? config.modelName : 'Not configured'}
-            </span>
+            <div className="model-status">
+              <span className="status">
+                {configured ? config.modelName : 'Not configured'}
+              </span>
+              {context && contextStatus && (
+                <span
+                  className="context-status"
+                  title={`Peak input ${context.originalTokens} tokens; current input ${context.compressedTokens} tokens`}
+                >
+                  {contextStatus}
+                </span>
+              )}
+            </div>
           </header>
 
           {activeProject && (
@@ -437,6 +456,42 @@ export function App(): React.JSX.Element {
                   placeholder="model-name"
                 />
               </Field>
+              <Field label="Maximum context tokens" required>
+                <Input
+                  min={1000}
+                  step={1000}
+                  type="number"
+                  value={String(configDraft.modelMaxContext)}
+                  onChange={(_, data) => setConfigDraft({
+                    ...configDraft,
+                    modelMaxContext: Number(data.value),
+                  })}
+                />
+              </Field>
+              <Field label="Output token margin" required>
+                <Input
+                  min={1}
+                  step={1000}
+                  type="number"
+                  value={String(configDraft.safeOutputMargin)}
+                  onChange={(_, data) => setConfigDraft({
+                    ...configDraft,
+                    safeOutputMargin: Number(data.value),
+                  })}
+                />
+              </Field>
+              <Field label="Recent rounds to keep" required>
+                <Input
+                  max={20}
+                  min={1}
+                  type="number"
+                  value={String(configDraft.recentKeepRounds)}
+                  onChange={(_, data) => setConfigDraft({
+                    ...configDraft,
+                    recentKeepRounds: Number(data.value),
+                  })}
+                />
+              </Field>
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -449,6 +504,11 @@ export function App(): React.JSX.Element {
                   !configDraft.baseUrl.trim() ||
                   !configDraft.apiKey.trim() ||
                   !configDraft.modelName.trim() ||
+                  configDraft.modelMaxContext < 1_000 ||
+                  configDraft.safeOutputMargin < 1 ||
+                  configDraft.safeOutputMargin >= configDraft.modelMaxContext ||
+                  configDraft.recentKeepRounds < 1 ||
+                  configDraft.recentKeepRounds > 20 ||
                   saving
                 }
                 onClick={() => void saveSettings()}
