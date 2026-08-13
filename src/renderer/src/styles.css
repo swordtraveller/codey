@@ -147,10 +147,8 @@ body {
   color: #8a8a8a;
   font-size: 11px;
 }
-
 .topbar div span,
-.status,
-.pending {
+.status {
   color: #616161;
   font-size: 12px;
   font-weight: 400;
@@ -338,8 +336,7 @@ h1 {
   word-break: break-word;
 }
 
-.message p,
-.pending {
+.message p {
   margin: 0;
   line-height: 1.5;
   white-space: pre-wrap;

@@ -582,7 +582,6 @@ export function App(): React.JSX.Element {
                     )}
                   </div>
                 )}
-                {sending && <p className="pending">Working…</p>}
               </div>
             )}
               {error && <p className="error" role="alert">{error}</p>}
