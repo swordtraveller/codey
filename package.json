@@ -1,0 +1,51 @@
+{
+  "name": "codey",
+  "version": "0.1.0",
+  "description": "A desktop app for conversation, work and coding.",
+  "main": "out/main/index.js",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -b --pretty false",
+    "build": "pnpm typecheck && electron-vite build",
+    "dist": "pnpm build && electron-builder",
+    "dist:dir": "pnpm build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.74.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
+  "build": {
+    "appId": "com.codey.desktop",
+    "productName": "Codey",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}

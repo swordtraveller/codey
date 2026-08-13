@@ -1,0 +1,145 @@
+import { randomUUID } from 'node:crypto'
+import { app } from 'electron'
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { ChatMessage, Conversation, Project, ProjectFolder } from '../shared/types'
+
+type StoredProject = Omit<Project, 'folders' | 'pythonEnvironmentFolderId'> & {
+  folders: Array<ProjectFolder | string>
+  pythonEnvironmentFolderId?: string | null
+}
+
+let projects: Project[] | undefined
+
+function getWorkspacePath(): string {
+  return join(app.getPath('userData'), 'workspace.json')
+}
+
+function normalizeProject(value: StoredProject): Project {
+  const folders = value.folders.map((folder) =>
+    typeof folder === 'string' ? { id: randomUUID(), path: folder } : folder,
+  )
+  const configuredFolder = folders.some((folder) => folder.id === value.pythonEnvironmentFolderId)
+  return {
+    ...value,
+    folders,
+    pythonEnvironmentFolderId: configuredFolder
+      ? (value.pythonEnvironmentFolderId ?? null)
+      : (folders[0]?.id ?? null),
+  }
+}
+
+async function loadProjects(): Promise<Project[]> {
+  if (projects) {
+    return projects
+  }
+
+  try {
+    const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as StoredProject[]
+    const needsMigration = stored.some((project) =>
+      project.pythonEnvironmentFolderId === undefined ||
+      project.folders.some((folder) => typeof folder === 'string'),
+    )
+    projects = stored.map(normalizeProject)
+    if (needsMigration) {
+      await saveProjects()
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error('Unable to read projects')
+    }
+    projects = []
+  }
+
+  return projects
+}
+
+async function saveProjects(): Promise<void> {
+  await writeFile(getWorkspacePath(), JSON.stringify(projects), 'utf8')
+}
+
+function createConversationRecord(index: number): Conversation {
+  return {
+    id: randomUUID(),
+    title: `Conversation ${index}`,
+    messages: [],
+  }
+}
+
+async function findProject(projectId: string): Promise<Project> {
+  const project = (await loadProjects()).find((item) => item.id === projectId)
+  if (!project) {
+    throw new Error('Project not found')
+  }
+  return project
+}
+
+export async function getProjects(): Promise<Project[]> {
+  return loadProjects()
+}
+
+export async function getProject(projectId: string): Promise<Project> {
+  return findProject(projectId)
+}
+
+export async function createProject(name: string): Promise<Project> {
+  const normalizedName = name.trim()
+  if (!normalizedName) {
+    throw new Error('Enter a project name')
+  }
+
+  const project: Project = {
+    id: randomUUID(),
+    name: normalizedName,
+    folders: [],
+    pythonEnvironmentFolderId: null,
+    conversations: [createConversationRecord(1)],
+  }
+  const currentProjects = await loadProjects()
+  currentProjects.push(project)
+  await saveProjects()
+  return project
+}
+
+export async function addProjectFolder(projectId: string, folderPath: string): Promise<Project> {
+  const project = await findProject(projectId)
+  const exists = project.folders.some(
+    (current) => current.path.toLowerCase() === folderPath.toLowerCase(),
+  )
+
+  if (!exists) {
+    const folder = { id: randomUUID(), path: folderPath }
+    project.folders.push(folder)
+    project.pythonEnvironmentFolderId ??= folder.id
+    await saveProjects()
+  }
+
+  return project
+}
+
+export async function createConversation(projectId: string): Promise<Project> {
+  const project = await findProject(projectId)
+  project.conversations.push(createConversationRecord(project.conversations.length + 1))
+  await saveProjects()
+  return project
+}
+
+export async function addMessage(
+  projectId: string,
+  conversationId: string,
+  role: ChatMessage['role'],
+  content: string,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
+    throw new Error('Conversation not found')
+  }
+
+  conversation.messages.push({ id: randomUUID(), role, content })
+  if (role === 'user' && conversation.messages.length === 1) {
+    conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
+  }
+  await saveProjects()
+  return project
+}
