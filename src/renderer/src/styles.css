@@ -188,6 +188,13 @@ body {
   white-space: nowrap;
 }
 
+.conversation-container {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
 .conversation {
   position: relative;
   display: flex;
@@ -284,6 +291,18 @@ h1 {
   white-space: pre-wrap;
 }
 
+.scroll-to-bottom {
+  position: absolute;
+  right: 32px;
+  bottom: 24px;
+  min-width: 36px !important;
+  width: 36px;
+  height: 36px;
+  border-radius: 50% !important;
+  padding: 0;
+  font-size: 18px;
+}
+
 .error {
   position: absolute;
   right: 32px;
@@ -349,6 +368,11 @@ h1 {
 
   .conversation {
     padding: 28px 20px;
+  }
+
+  .scroll-to-bottom {
+    right: 20px;
+    bottom: 20px;
   }
 
   .composer {

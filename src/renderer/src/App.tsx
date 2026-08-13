@@ -12,7 +12,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
 
 const emptyConfig = defaultModelConfig
@@ -46,6 +46,8 @@ export function App(): React.JSX.Element {
     conversationId: string
     blocks: AssistantMessageBlock[]
   } | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  const conversationRef = useRef<HTMLDivElement>(null)
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const activeConversation = activeProject?.conversations.find(
@@ -88,6 +90,23 @@ export function App(): React.JSX.Element {
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
     setLiveResponse(progress)
   }), [])
+
+  function updateScrollButton(): void {
+    const element = conversationRef.current
+    if (element) {
+      setShowScrollToBottom(element.scrollHeight - element.scrollTop - element.clientHeight > 24)
+    }
+  }
+
+  function scrollToBottom(): void {
+    setShowScrollToBottom(false)
+    conversationRef.current?.scrollTo({
+      top: conversationRef.current.scrollHeight,
+      behavior: 'smooth',
+    })
+  }
+
+  useEffect(updateScrollButton, [activeConversation?.messages, liveResponse, sending])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -358,7 +377,13 @@ export function App(): React.JSX.Element {
             </div>
           )}
 
-          <div className="conversation" aria-label="Conversation">
+          <div className="conversation-container">
+            <div
+              ref={conversationRef}
+              className="conversation"
+              aria-label="Conversation"
+              onScroll={updateScrollButton}
+            >
             {!activeConversation || (activeConversation.messages.length === 0 && !sending) ? (
               <div className="empty-state">
                 <span className="welcome-mark">C</span>
@@ -424,7 +449,20 @@ export function App(): React.JSX.Element {
                 {sending && <p className="pending">Working…</p>}
               </div>
             )}
-            {error && <p className="error" role="alert">{error}</p>}
+              {error && <p className="error" role="alert">{error}</p>}
+            </div>
+            {showScrollToBottom && (
+              <Button
+                aria-label="Scroll to bottom"
+                className="scroll-to-bottom"
+                appearance="secondary"
+                shape="circular"
+                onClick={scrollToBottom}
+                title="Scroll to bottom"
+              >
+                ↓
+              </Button>
+            )}
           </div>
 
           <form className="composer" onSubmit={sendMessage}>
