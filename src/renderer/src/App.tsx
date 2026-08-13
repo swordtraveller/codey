@@ -13,9 +13,17 @@ import {
   webLightTheme,
 } from '@fluentui/react-components'
 import { useEffect, useState, type FormEvent } from 'react'
-import { defaultModelConfig, type Project } from '../../shared/types'
+import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
 
 const emptyConfig = defaultModelConfig
+
+function formatToolParameters(parameters: string): string {
+  try {
+    return JSON.stringify(JSON.parse(parameters), null, 2)
+  } catch {
+    return parameters
+  }
+}
 
 export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([])
@@ -33,6 +41,11 @@ export function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [projectError, setProjectError] = useState('')
+  const [liveResponse, setLiveResponse] = useState<{
+    projectId: string
+    conversationId: string
+    blocks: AssistantMessageBlock[]
+  } | null>(null)
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const activeConversation = activeProject?.conversations.find(
@@ -49,6 +62,11 @@ export function App(): React.JSX.Element {
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input / ${context.compressionRatio.toFixed(2)}x compression${contextActions ? ` (${contextActions})` : ''}`
     : ''
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
+  const liveBlocks =
+    liveResponse?.projectId === activeProjectId &&
+    liveResponse.conversationId === activeConversationId
+      ? liveResponse.blocks
+      : []
 
   useEffect(() => {
     void window.codey
@@ -71,6 +89,10 @@ export function App(): React.JSX.Element {
       })
       .catch(() => setError('Unable to load projects'))
   }, [])
+
+  useEffect(() => window.codey.onDevelopmentProgress((progress) => {
+    setLiveResponse(progress)
+  }), [])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -192,6 +214,11 @@ export function App(): React.JSX.Element {
       ),
     }
     replaceProject(optimisticProject)
+    setLiveResponse({
+      projectId: activeProject.id,
+      conversationId: activeConversation.id,
+      blocks: [],
+    })
     setSending(true)
 
     try {
@@ -202,6 +229,7 @@ export function App(): React.JSX.Element {
       )
       if (result.project) {
         replaceProject(result.project)
+        setLiveResponse(null)
       }
       if (result.error) {
         const files = result.writtenFiles.length
@@ -356,9 +384,40 @@ export function App(): React.JSX.Element {
               <div className="messages" aria-live="polite">
                 {activeConversation.messages.map((message) => (
                   <div className={`message ${message.role}`} key={message.id}>
-                    <p>{message.content}</p>
+                    {message.role === 'assistant' && message.blocks?.length ? (
+                      message.blocks.map((block, index) =>
+                        block.type === 'content' ? (
+                          <div className="message-card" key={`${message.id}-${index}`}>
+                            <p>{block.content}</p>
+                          </div>
+                        ) : (
+                          <details className="function-call" key={block.id}>
+                            <summary>{block.name}</summary>
+                            <pre>{formatToolParameters(block.parameters)}</pre>
+                          </details>
+                        ),
+                      )
+                    ) : (
+                      <p>{message.content}</p>
+                    )}
                   </div>
                 ))}
+                {liveBlocks.length > 0 && (
+                  <div className="message assistant live-response">
+                    {liveBlocks.map((block, index) =>
+                      block.type === 'content' ? (
+                        <div className="message-card" key={`live-${index}`}>
+                          <p>{block.content}</p>
+                        </div>
+                      ) : (
+                        <details className="function-call" key={block.id}>
+                          <summary>{block.name}</summary>
+                          <pre>{formatToolParameters(block.parameters)}</pre>
+                        </details>
+                      ),
+                    )}
+                  </div>
+                )}
                 {sending && <p className="pending">Working…</p>}
               </div>
             )}

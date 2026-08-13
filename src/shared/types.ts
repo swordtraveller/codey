@@ -27,10 +27,15 @@ export type ContextMetrics = {
   truncated: boolean
 }
 
+export type AssistantMessageBlock =
+  | { type: 'content'; content: string }
+  | { type: 'function_call'; id: string; name: string; parameters: string }
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  blocks?: AssistantMessageBlock[]
 }
 
 export type AgentContextMessage = {
@@ -59,6 +64,12 @@ export type Project = {
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]
+}
+
+export type DevelopmentProgress = {
+  projectId: string
+  conversationId: string
+  blocks: AssistantMessageBlock[]
 }
 
 export type DevelopmentResult = {

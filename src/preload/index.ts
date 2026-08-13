@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ModelConfig } from '../shared/types'
+import type { DevelopmentProgress, ModelConfig } from '../shared/types'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -19,5 +19,11 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('conversations:create', projectId),
     develop: (projectId: string, conversationId: string, content: string) =>
       ipcRenderer.invoke('development:send', projectId, conversationId, content),
+    onDevelopmentProgress: (listener: (progress: DevelopmentProgress) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, progress: DevelopmentProgress) =>
+        listener(progress)
+      ipcRenderer.on('development:progress', handler)
+      return () => ipcRenderer.removeListener('development:progress', handler)
+    },
   }),
 )

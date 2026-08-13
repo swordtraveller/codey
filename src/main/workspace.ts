@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { ChatMessage, Conversation, Project, ProjectFolder } from '../shared/types'
+import type { AssistantMessageBlock, ChatMessage, Conversation, Project, ProjectFolder } from '../shared/types'
 
 type StoredConversation = Omit<Conversation, 'agentMessages'> & {
   agentMessages?: Conversation['agentMessages']
@@ -142,6 +142,7 @@ export async function addMessage(
   conversationId: string,
   role: ChatMessage['role'],
   content: string,
+  blocks?: AssistantMessageBlock[],
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
@@ -149,7 +150,7 @@ export async function addMessage(
     throw new Error('Conversation not found')
   }
 
-  conversation.messages.push({ id: randomUUID(), role, content })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
-import type { DevelopmentResult, ModelConfig } from '../shared/types'
+import type { AssistantMessageBlock, DevelopmentProgress, DevelopmentResult, ModelConfig } from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import {
@@ -17,6 +17,7 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
+  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   if (!normalizedContent) {
@@ -34,18 +35,28 @@ async function developProject(
     return { project, writtenFiles: [], error: 'Conversation not found' }
   }
 
-  const result = await develop(project, [
-    ...conversation.agentMessages,
-    { role: 'user', content: normalizedContent },
-  ])
+  const result = await develop(
+    project,
+    [
+      ...conversation.agentMessages,
+      { role: 'user', content: normalizedContent },
+    ],
+    onBlocks,
+  )
   project = await saveConversationContext(
     projectId,
     conversationId,
     result.agentMessages,
     result.context,
   )
-  if (result.reply) {
-    project = await addMessage(projectId, conversationId, 'assistant', result.reply)
+  if (result.reply || result.blocks?.length) {
+    project = await addMessage(
+      projectId,
+      conversationId,
+      'assistant',
+      result.reply ?? '',
+      result.blocks,
+    )
   }
 
   return { project, writtenFiles: result.writtenFiles, error: result.error }
@@ -92,8 +103,13 @@ app.whenReady().then(() => {
   )
   ipcMain.handle(
     'development:send',
-    (_event, projectId: string, conversationId: string, content: string) =>
-      developProject(projectId, conversationId, content),
+    (event, projectId: string, conversationId: string, content: string) =>
+      developProject(projectId, conversationId, content, (blocks) => {
+        if (!event.sender.isDestroyed()) {
+          const progress: DevelopmentProgress = { projectId, conversationId, blocks }
+          event.sender.send('development:progress', progress)
+        }
+      }),
   )
 
   createWindow()
