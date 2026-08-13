@@ -12,7 +12,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, Fragment, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
 
@@ -48,6 +48,50 @@ function copyText(content: string): void {
   void navigator.clipboard?.writeText(content)
 }
 
+type TurnResult = 'processing' | 'normal' | 'timeout' | 'other'
+
+type ConversationTurn = {
+  projectId: string
+  conversationId: string
+  userMessageId: string
+  startedAt: number
+  endedAt?: number
+  result: TurnResult
+  error?: string
+}
+
+function formatTurnDuration(durationMs: number): string {
+  const totalMinutes = Math.floor(Math.max(0, durationMs) / 60000)
+  return `${Math.floor(totalMinutes / 60)} 时 ${totalMinutes % 60} 分`
+}
+
+function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.Element {
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    if (turn.result !== 'processing') {
+      return
+    }
+
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [turn.result])
+
+  const duration = formatTurnDuration((turn.endedAt ?? now) - turn.startedAt)
+  const result = turn.result === 'processing'
+    ? ''
+    : turn.result === 'normal'
+      ? '正常结束'
+      : turn.result === 'timeout'
+        ? '超时未响应'
+        : `其他 ${turn.error ?? '未知'} 异常`
+
+  return (
+    <p className="turn-stopwatch">
+      {turn.result === 'processing' ? `正在处理中 ${duration}...` : `已结束处理 ${duration}：${result}`}
+    </p>
+  )
+}
 function AssistantContent({ content }: { content: string }): React.JSX.Element {
   const fallback = <p>{content}</p>
 
@@ -87,6 +131,7 @@ export function App(): React.JSX.Element {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [sending, setSending] = useState(false)
+  const [conversationTurn, setConversationTurn] = useState<ConversationTurn | null>(null)
   const [saving, setSaving] = useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
@@ -168,6 +213,7 @@ export function App(): React.JSX.Element {
   function selectProject(project: Project): void {
     setActiveProjectId(project.id)
     setActiveConversationId(project.conversations[0]?.id ?? '')
+    setConversationTurn(null)
     setDraft('')
     setError('')
   }
@@ -214,6 +260,7 @@ export function App(): React.JSX.Element {
       setProjects((current) => [...current, project])
       setActiveProjectId(project.id)
       setActiveConversationId(project.conversations[0]?.id ?? '')
+      setConversationTurn(null)
       setProjectName('')
       setProjectDialogOpen(false)
     } catch {
@@ -247,6 +294,7 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.createConversation(activeProject.id)
       replaceProject(updated)
       setActiveConversationId(updated.conversations.at(-1)?.id ?? '')
+      setConversationTurn(null)
       setDraft('')
       setError('')
     } catch {
@@ -264,6 +312,7 @@ export function App(): React.JSX.Element {
 
     setDraft('')
     setError('')
+    const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
       ...activeProject,
       conversations: activeProject.conversations.map((conversation) =>
@@ -272,7 +321,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: crypto.randomUUID(), role: 'user', content },
+                { id: userMessageId, role: 'user', content },
               ],
             }
           : conversation,
@@ -284,6 +333,13 @@ export function App(): React.JSX.Element {
       conversationId: activeConversation.id,
       blocks: [],
     })
+    setConversationTurn({
+      projectId: activeProject.id,
+      conversationId: activeConversation.id,
+      userMessageId,
+      startedAt: Date.now(),
+      result: 'processing',
+    })
     setSending(true)
 
     try {
@@ -293,9 +349,27 @@ export function App(): React.JSX.Element {
         content,
       )
       if (result.project) {
+        const updatedConversation = result.project.conversations.find(
+          (conversation) => conversation.id === activeConversation.id,
+        )
+        const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
+          .reverse()
+          .find((message) => message.role === 'user' && message.content === content)
+        setConversationTurn((current) => current ? {
+          ...current,
+          userMessageId: updatedUserMessage?.id ?? current.userMessageId,
+        } : current)
         replaceProject(result.project)
         setLiveResponse(null)
       }
+      setConversationTurn((current) => current ? {
+        ...current,
+        endedAt: Date.now(),
+        result: result.error
+          ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+          : 'normal',
+        error: result.error,
+      } : current)
       if (result.error) {
         const files = result.writtenFiles.length
           ? ` (${result.writtenFiles.length} file(s) written)`
@@ -303,6 +377,12 @@ export function App(): React.JSX.Element {
         setError(`${result.error}${files}`)
       }
     } catch {
+      setConversationTurn((current) => current ? {
+        ...current,
+        endedAt: Date.now(),
+        result: 'other',
+        error: '请求失败',
+      } : current)
       setError('Unable to process the development request')
     } finally {
       setSending(false)
@@ -372,6 +452,7 @@ export function App(): React.JSX.Element {
                     key={conversation.id}
                     onClick={() => {
                       setActiveConversationId(conversation.id)
+                      setConversationTurn(null)
                       setDraft('')
                       setError('')
                     }}
@@ -454,32 +535,37 @@ export function App(): React.JSX.Element {
             ) : (
               <div className="messages" aria-live="polite">
                 {activeConversation.messages.map((message) => (
-                  <div className={`message ${message.role}`} key={message.id}>
-                    {message.compression ? (
-                      <div className="compression-message">
-                        <p>
-                          Context compressed: {message.compression.originalTokens.toLocaleString()} to{' '}
-                          {message.compression.compressedTokens.toLocaleString()} tokens ({message.compression.compressionRatio.toFixed(2)}x)
-                        </p>
-                        <p>Method: {message.compression.method}</p>
-                      </div>
-                    ) : message.role === 'assistant' && message.blocks?.length ? (
-                      message.blocks.map((block, index) =>
-                        block.type === 'content' ? (
-                          <AssistantContent content={block.content} key={`${message.id}-${index}`} />
-                        ) : (
-                          <details className="function-call" key={block.id}>
-                            <summary>{block.name}</summary>
-                            <pre>{formatToolParameters(block.parameters)}</pre>
-                          </details>
-                        ),
-                      )
-                     ) : message.role === 'assistant' ? (
-                      <AssistantContent content={message.content} />
-                    ) : (
-                      <p>{message.content}</p>
+                  <Fragment key={message.id}>
+                    <div className={`message ${message.role}`}>
+                      {message.compression ? (
+                        <div className="compression-message">
+                          <p>
+                            Context compressed: {message.compression.originalTokens.toLocaleString()} to{' '}
+                            {message.compression.compressedTokens.toLocaleString()} tokens ({message.compression.compressionRatio.toFixed(2)}x)
+                          </p>
+                          <p>Method: {message.compression.method}</p>
+                        </div>
+                      ) : message.role === 'assistant' && message.blocks?.length ? (
+                        message.blocks.map((block, index) =>
+                          block.type === 'content' ? (
+                            <AssistantContent content={block.content} key={`${message.id}-${index}`} />
+                          ) : (
+                            <details className="function-call" key={block.id}>
+                              <summary>{block.name}</summary>
+                              <pre>{formatToolParameters(block.parameters)}</pre>
+                            </details>
+                          ),
+                        )
+                      ) : message.role === 'assistant' ? (
+                        <AssistantContent content={message.content} />
+                      ) : (
+                        <p>{message.content}</p>
+                      )}
+                    </div>
+                    {conversationTurn && conversationTurn.userMessageId === message.id && (
+                      <ConversationStopwatch turn={conversationTurn} />
                     )}
-                  </div>
+                  </Fragment>
                 ))}
                 {liveBlocks.length > 0 && (
                   <div className="message assistant live-response">

@@ -288,6 +288,12 @@ h1 {
 }
 
 
+.turn-stopwatch {
+  margin: 0 0 -8px;
+  color: #666;
+  font-size: 12px;
+}
+
 .function-call,
 .compression-message {
   padding: 10px 14px;
