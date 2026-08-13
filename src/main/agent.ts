@@ -116,6 +116,17 @@ function errorDetails(error: unknown): { name?: string; message: string; cause?:
   return { name: error.name, message: error.message, cause }
 }
 
+function createCompletionError(
+  error: unknown,
+  partial: ResponseMessage | undefined,
+  message = errorDetails(error).message,
+): CompletionError {
+  const failure = new Error(message, { cause: error }) as CompletionError
+  failure.name = error instanceof Error ? error.name : failure.name
+  failure.partial = partial
+  return failure
+}
+
 function hasResponseData(message: ResponseMessage | undefined): boolean {
   return Boolean(message?.content || message?.tool_calls?.length)
 }
@@ -301,9 +312,7 @@ async function requestCompletionAttempt(
     if (publishTimer) {
       clearTimeout(publishTimer)
     }
-    const failure = (error instanceof Error ? error : new Error(String(error))) as CompletionError
-    failure.partial = currentMessage()
-    throw failure
+    throw createCompletionError(error, currentMessage())
   }
 }
 
@@ -335,12 +344,16 @@ async function requestCompletion(
       return await requestCompletionAttempt(messages, tools, controller.signal, update)
     } catch (error) {
       const details = errorDetails(error)
-      const failure = (error instanceof Error ? error : new Error(details.message)) as CompletionError
-      if (timedOut) {
-        failure.message = 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
-      }
-      const partial = hasResponseData(failure.partial) ? failure.partial : latestPartial
-      failure.partial = responseSize(partial) >= responseSize(latestPartial) ? partial : latestPartial
+      const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
+      const partial = hasResponseData(errorPartial) ? errorPartial : latestPartial
+      const bestPartial = responseSize(partial) >= responseSize(latestPartial) ? partial : latestPartial
+      const failure = createCompletionError(
+        error,
+        bestPartial,
+        timedOut
+          ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
+          : details.message,
+      )
       log.error('model.request.failed', {
         attempt,
         maxAttempts: maxNetworkAttempts,
@@ -350,7 +363,7 @@ async function requestCompletion(
         hasPartialResponse: hasResponseData(failure.partial),
       })
 
-      if (attempt < maxNetworkAttempts && isRetryableRequestError(error)) {
+      if (attempt < maxNetworkAttempts && (timedOut || isRetryableRequestError(error))) {
         log.warn('model.request.retrying', {
           attempt: attempt + 1,
           maxAttempts: maxNetworkAttempts,
