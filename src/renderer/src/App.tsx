@@ -12,7 +12,8 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import Markdown from 'react-markdown'
 import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
 
 const emptyConfig = defaultModelConfig
@@ -25,6 +26,56 @@ function formatToolParameters(parameters: string): string {
   }
 }
 
+function looksLikeMarkdown(content: string): boolean {
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|```|>\s)|\*\*[^*]+\*\*|`[^`]+`|\[[^]]+\]\([^)]+\)/.test(content)
+}
+
+class MarkdownErrorBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true }
+  }
+
+  componentDidCatch(_error: Error, _info: ErrorInfo): void {}
+
+  render(): ReactNode {
+    return this.state.hasError ? this.props.fallback : this.props.children
+  }
+}
+
+function copyText(content: string): void {
+  void navigator.clipboard?.writeText(content)
+}
+
+function AssistantContent({ content }: { content: string }): React.JSX.Element {
+  const fallback = <p>{content}</p>
+
+  return (
+    <div className="message-card">
+      <div className="message-card-actions">
+        <Button
+          aria-label="Copy message"
+          appearance="subtle"
+          size="small"
+          title="Copy message"
+          onClick={() => copyText(content)}
+        >
+          Copy
+        </Button>
+      </div>
+      {looksLikeMarkdown(content) ? (
+        <MarkdownErrorBoundary fallback={fallback}>
+          <div className="markdown-content">
+            <Markdown>{content}</Markdown>
+          </div>
+        </MarkdownErrorBoundary>
+      ) : (
+        fallback
+      )}
+    </div>
+  )
+}
 export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('')
@@ -415,9 +466,7 @@ export function App(): React.JSX.Element {
                     ) : message.role === 'assistant' && message.blocks?.length ? (
                       message.blocks.map((block, index) =>
                         block.type === 'content' ? (
-                          <div className="message-card" key={`${message.id}-${index}`}>
-                            <p>{block.content}</p>
-                          </div>
+                          <AssistantContent content={block.content} key={`${message.id}-${index}`} />
                         ) : (
                           <details className="function-call" key={block.id}>
                             <summary>{block.name}</summary>
@@ -425,6 +474,8 @@ export function App(): React.JSX.Element {
                           </details>
                         ),
                       )
+                     ) : message.role === 'assistant' ? (
+                      <AssistantContent content={message.content} />
                     ) : (
                       <p>{message.content}</p>
                     )}
@@ -434,9 +485,7 @@ export function App(): React.JSX.Element {
                   <div className="message assistant live-response">
                     {liveBlocks.map((block, index) =>
                       block.type === 'content' ? (
-                        <div className="message-card" key={`live-${index}`}>
-                          <p>{block.content}</p>
-                        </div>
+                        <AssistantContent content={block.content} key={`live-${index}`} />
                       ) : (
                         <details className="function-call" key={block.id}>
                           <summary>{block.name}</summary>
