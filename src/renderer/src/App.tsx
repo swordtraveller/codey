@@ -9,6 +9,7 @@ import {
   Field,
   FluentProvider,
   Input,
+  Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
 import { useEffect, useState, type FormEvent } from 'react'
@@ -365,13 +366,19 @@ export function App(): React.JSX.Element {
           </div>
 
           <form className="composer" onSubmit={sendMessage}>
-            <Input
+            <Textarea
               aria-label="Development request"
               className="message-input"
               disabled={!canSend || sending}
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault()
+                  event.currentTarget.form?.requestSubmit()
+                }
+              }}
               placeholder={
                 !configured
                   ? 'Configure a model first'
