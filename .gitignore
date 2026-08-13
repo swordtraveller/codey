@@ -36,3 +36,7 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Python agent sandbox
+agent_venv/
+.agent_tmp/
