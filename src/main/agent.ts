@@ -1,4 +1,10 @@
-﻿import type { AgentContextMessage, AssistantMessageBlock, ContextMetrics, Project } from '../shared/types'
+import type {
+  AgentContextMessage,
+  AssistantMessageBlock,
+  ContextCompressionNotice,
+  ContextMetrics,
+  Project,
+} from '../shared/types'
 import { readConfig } from './config'
 import { manageContext, type ContextMessage } from './context'
 import { log } from './logger'
@@ -35,6 +41,7 @@ type AgentResult = {
   writtenFiles: string[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
+  compressionNotices: ContextCompressionNotice[]
   error?: string
 }
 
@@ -366,7 +373,12 @@ export async function develop(
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
-    return { writtenFiles: [], agentMessages, error: 'Add a project folder before sending a request' }
+    return {
+      writtenFiles: [],
+      agentMessages,
+      compressionNotices: [],
+      error: 'Add a project folder before sending a request',
+    }
   }
 
   const writtenFiles: string[] = []
@@ -389,6 +401,7 @@ export async function develop(
   let apiMessages = [systemMessage, ...toApiMessages(agentMessages)]
   let context: ContextMetrics | undefined
   const blocks: AssistantMessageBlock[] = []
+  const compressionNotices: ContextCompressionNotice[] = []
 
   let completedToolCalls = 0
 
@@ -397,6 +410,19 @@ export async function develop(
       const managed = manageContext(apiMessages, tools, config)
       apiMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
+      const methods = [
+        managed.metrics.filtered && 'filter',
+        managed.metrics.rewritten && 'rewrite',
+        managed.metrics.truncated && 'truncate',
+      ].filter((method): method is string => Boolean(method))
+      if (methods.length > 0) {
+        compressionNotices.push({
+          originalTokens: managed.metrics.originalTokens,
+          compressedTokens: managed.metrics.compressedTokens,
+          compressionRatio: managed.metrics.compressionRatio,
+          method: methods.join(', '),
+        })
+      }
       if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
         throw new Error('Recent conversation exceeds the configured input budget')
       }
@@ -435,7 +461,14 @@ export async function develop(
         blocks.push(block)
         onBlocks?.([...blocks])
         apiMessages.push({ role: 'assistant', content: reply })
-        return { reply, blocks, writtenFiles, agentMessages: toStoredMessages(apiMessages), context }
+        return {
+          reply,
+          blocks,
+          writtenFiles,
+          agentMessages: toStoredMessages(apiMessages),
+          context,
+          compressionNotices,
+        }
       }
 
       const responseBlocks = toMessageBlocks(message)
@@ -460,6 +493,7 @@ export async function develop(
       writtenFiles,
       agentMessages: toStoredMessages(apiMessages),
       context,
+      compressionNotices,
       error: error instanceof Error ? error.message : 'Request failed',
     }
   }

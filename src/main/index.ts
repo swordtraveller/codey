@@ -49,6 +49,16 @@ async function developProject(
     result.agentMessages,
     result.context,
   )
+  for (const compression of result.compressionNotices) {
+    project = await addMessage(
+      projectId,
+      conversationId,
+      'assistant',
+      '',
+      undefined,
+      compression,
+    )
+  }
   if (result.reply || result.blocks?.length) {
     project = await addMessage(
       projectId,

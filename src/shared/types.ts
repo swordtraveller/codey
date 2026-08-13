@@ -31,11 +31,19 @@ export type AssistantMessageBlock =
   | { type: 'content'; content: string }
   | { type: 'function_call'; id: string; name: string; parameters: string }
 
+export type ContextCompressionNotice = {
+  originalTokens: number
+  compressedTokens: number
+  compressionRatio: number
+  method: string
+}
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
   blocks?: AssistantMessageBlock[]
+  compression?: ContextCompressionNotice
 }
 
 export type AgentContextMessage = {

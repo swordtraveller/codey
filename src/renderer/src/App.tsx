@@ -53,13 +53,8 @@ export function App(): React.JSX.Element {
   )
   const configured = Boolean(config.baseUrl && config.apiKey && config.modelName)
   const context = activeConversation?.context
-  const contextActions = context
-    ? [context.filtered && 'filtered', context.rewritten && 'rewritten', context.truncated && 'truncated']
-        .filter(Boolean)
-        .join(', ')
-    : ''
   const contextStatus = context
-    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input / ${context.compressionRatio.toFixed(2)}x compression${contextActions ? ` (${contextActions})` : ''}`
+    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
     : ''
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
   const liveBlocks =
@@ -384,7 +379,15 @@ export function App(): React.JSX.Element {
               <div className="messages" aria-live="polite">
                 {activeConversation.messages.map((message) => (
                   <div className={`message ${message.role}`} key={message.id}>
-                    {message.role === 'assistant' && message.blocks?.length ? (
+                    {message.compression ? (
+                      <div className="compression-message">
+                        <p>
+                          Context compressed: {message.compression.originalTokens.toLocaleString()} to{' '}
+                          {message.compression.compressedTokens.toLocaleString()} tokens ({message.compression.compressionRatio.toFixed(2)}x)
+                        </p>
+                        <p>Method: {message.compression.method}</p>
+                      </div>
+                    ) : message.role === 'assistant' && message.blocks?.length ? (
                       message.blocks.map((block, index) =>
                         block.type === 'content' ? (
                           <div className="message-card" key={`${message.id}-${index}`}>
