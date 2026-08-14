@@ -2,6 +2,14 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Project, ProjectFolder } from '../shared/types'
 import {
+  gitAdd,
+  gitCommit,
+  gitDiff,
+  gitGetCurrentBranch,
+  gitLog,
+  gitStatus,
+} from './git'
+import {
   executePythonCode,
   getPythonEnvironmentInfo,
   installPythonPackages,
@@ -33,6 +41,10 @@ type ToolArguments = {
   query?: string
   file_pattern?: string | null
   case_sensitive?: boolean
+  paths?: string[]
+  message?: string
+  staged?: boolean
+  max_count?: number
 }
 
 type TreeNode = {
@@ -336,6 +348,39 @@ export async function runAgentTool(
   } catch {
     throw new Error('Tool arguments must be valid JSON')
   }
+  if (toolCall.function.name === 'git_status') {
+    if (typeof args.folder_id !== 'string') throw new Error('folder_id is required')
+    return stringifyResult(await gitStatus(getFolder(project, args.folder_id).path))
+  }
+  if (toolCall.function.name === 'git_diff') {
+    if (typeof args.folder_id !== 'string' || typeof args.staged !== 'boolean') {
+      throw new Error('folder_id and staged are required')
+    }
+    return stringifyResult(await gitDiff(getFolder(project, args.folder_id).path, args.staged))
+  }
+  if (toolCall.function.name === 'git_add') {
+    if (typeof args.folder_id !== 'string' || !Array.isArray(args.paths)) {
+      throw new Error('folder_id and paths are required')
+    }
+    return stringifyResult(await gitAdd(getFolder(project, args.folder_id).path, args.paths))
+  }
+  if (toolCall.function.name === 'git_commit') {
+    if (typeof args.folder_id !== 'string' || typeof args.message !== 'string') {
+      throw new Error('folder_id and message are required')
+    }
+    return stringifyResult(await gitCommit(getFolder(project, args.folder_id).path, args.message))
+  }
+  if (toolCall.function.name === 'git_log') {
+    if (typeof args.folder_id !== 'string' || typeof args.max_count !== 'number') {
+      throw new Error('folder_id and max_count are required')
+    }
+    return stringifyResult(await gitLog(getFolder(project, args.folder_id).path, args.max_count))
+  }
+  if (toolCall.function.name === 'git_get_current_branch') {
+    if (typeof args.folder_id !== 'string') throw new Error('folder_id is required')
+    return stringifyResult(await gitGetCurrentBranch(getFolder(project, args.folder_id).path))
+  }
+
   const environmentFolder = getEnvironmentFolder(project)
   const folderPaths = projectFolderPaths(project)
 
@@ -460,6 +505,10 @@ export function createAgentTools(project: Project): object[] {
   }
   const pathProperties = { folder_id: folderId, path }
   const pathRequired = ['folder_id', 'path']
+  const gitFolderId = {
+    ...folderId,
+    description: 'A project folder that is itself a Git repository root.',
+  }
 
   return [
     { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
@@ -473,5 +522,11 @@ export function createAgentTools(project: Project): object[] {
     { type: 'function', function: { name: 'python_list_symbols', description: 'Statically list classes and functions in a project Python file.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'project_tree', description: 'Return a filtered directory tree from one project folder.', parameters: { type: 'object', properties: { ...pathProperties, max_depth: { type: 'integer', minimum: 0, maximum: 8 } }, required: [...pathRequired, 'max_depth'], additionalProperties: false } } },
     { type: 'function', function: { name: 'project_search_text', description: 'Search text across all or selected project folders using a JavaScript regular expression.', parameters: { type: 'object', properties: { query: { type: 'string' }, file_pattern: { type: ['string', 'null'], description: 'Optional relative glob such as **/*.py.' }, case_sensitive: { type: 'boolean' }, folder_ids: { type: 'array', items: folderId, uniqueItems: true, description: 'Optional folder IDs. Omit to search all project folders.' } }, required: ['query', 'case_sensitive'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_status', description: 'Show the concise working tree and staging status for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_diff', description: 'Show unstaged or staged changes for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, staged: { type: 'boolean', description: 'True to show staged changes; false to show unstaged changes.' } }, required: ['folder_id', 'staged'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_add', description: 'Stage an explicit list of project files. Repository-wide paths and directories are rejected.', parameters: { type: 'object', properties: { folder_id: gitFolderId, paths: { type: 'array', items: { type: 'string', maxLength: 500, description: 'A file path relative to the repository root.' }, minItems: 1, maxItems: 100, uniqueItems: true } }, required: ['folder_id', 'paths'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_commit', description: 'Commit currently staged changes. Fails when the staging area is empty.', parameters: { type: 'object', properties: { folder_id: gitFolderId, message: { type: 'string', minLength: 1, maxLength: 5000 } }, required: ['folder_id', 'message'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_log', description: 'Show recent commits from a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, max_count: { type: 'integer', minimum: 1, maximum: 50 } }, required: ['folder_id', 'max_count'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_get_current_branch', description: 'Return the current branch or report a detached HEAD.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
   ]
 }

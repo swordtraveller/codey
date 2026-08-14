@@ -1,3 +1,5 @@
+export type AppLanguage = 'system' | 'en' | 'zh-CN'
+
 export type ModelConfig = {
   baseUrl: string
   apiKey: string
@@ -5,6 +7,7 @@ export type ModelConfig = {
   modelMaxContext: number
   safeOutputMargin: number
   recentKeepRounds: number
+  language: AppLanguage
 }
 
 export const defaultModelConfig: ModelConfig = {
@@ -14,6 +17,7 @@ export const defaultModelConfig: ModelConfig = {
   modelMaxContext: 128_000,
   safeOutputMargin: 16_000,
   recentKeepRounds: 5,
+  language: 'system',
 }
 
 export type ContextMetrics = {
@@ -27,10 +31,23 @@ export type ContextMetrics = {
   truncated: boolean
 }
 
+export type AssistantMessageBlock =
+  | { type: 'content'; content: string }
+  | { type: 'function_call'; id: string; name: string; parameters: string }
+
+export type ContextCompressionNotice = {
+  originalTokens: number
+  compressedTokens: number
+  compressionRatio: number
+  method: string
+}
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  blocks?: AssistantMessageBlock[]
+  compression?: ContextCompressionNotice
 }
 
 export type AgentContextMessage = {
@@ -59,6 +76,12 @@ export type Project = {
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]
+}
+
+export type DevelopmentProgress = {
+  projectId: string
+  conversationId: string
+  blocks: AssistantMessageBlock[]
 }
 
 export type DevelopmentResult = {
