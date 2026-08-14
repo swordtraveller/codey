@@ -2,11 +2,23 @@ import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { ChatMessage, Conversation, Project, ProjectFolder } from '../shared/types'
+import type {
+  AssistantMessageBlock,
+  ChatMessage,
+  ContextCompressionNotice,
+  Conversation,
+  Project,
+  ProjectFolder,
+} from '../shared/types'
 
-type StoredProject = Omit<Project, 'folders' | 'pythonEnvironmentFolderId'> & {
+type StoredConversation = Omit<Conversation, 'agentMessages'> & {
+  agentMessages?: Conversation['agentMessages']
+}
+
+type StoredProject = Omit<Project, 'folders' | 'pythonEnvironmentFolderId' | 'conversations'> & {
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
+  conversations: StoredConversation[]
 }
 
 let projects: Project[] | undefined
@@ -23,6 +35,12 @@ function normalizeProject(value: StoredProject): Project {
   return {
     ...value,
     folders,
+    conversations: value.conversations.map((conversation) => ({
+      ...conversation,
+      agentMessages:
+        conversation.agentMessages ??
+        conversation.messages.map(({ role, content }) => ({ role, content })),
+    })),
     pythonEnvironmentFolderId: configuredFolder
       ? (value.pythonEnvironmentFolderId ?? null)
       : (folders[0]?.id ?? null),
@@ -38,7 +56,8 @@ async function loadProjects(): Promise<Project[]> {
     const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as StoredProject[]
     const needsMigration = stored.some((project) =>
       project.pythonEnvironmentFolderId === undefined ||
-      project.folders.some((folder) => typeof folder === 'string'),
+      project.folders.some((folder) => typeof folder === 'string') ||
+      project.conversations.some((conversation) => !conversation.agentMessages),
     )
     projects = stored.map(normalizeProject)
     if (needsMigration) {
@@ -63,6 +82,7 @@ function createConversationRecord(index: number): Conversation {
     id: randomUUID(),
     title: `Conversation ${index}`,
     messages: [],
+    agentMessages: [],
   }
 }
 
@@ -129,6 +149,8 @@ export async function addMessage(
   conversationId: string,
   role: ChatMessage['role'],
   content: string,
+  blocks?: AssistantMessageBlock[],
+  compression?: ContextCompressionNotice,
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
@@ -136,10 +158,28 @@ export async function addMessage(
     throw new Error('Conversation not found')
   }
 
-  conversation.messages.push({ id: randomUUID(), role, content })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }
+  await saveProjects()
+  return project
+}
+
+export async function saveConversationContext(
+  projectId: string,
+  conversationId: string,
+  agentMessages: Conversation['agentMessages'],
+  context: Conversation['context'],
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
+    throw new Error('Conversation not found')
+  }
+
+  conversation.agentMessages = agentMessages
+  conversation.context = context
   await saveProjects()
   return project
 }

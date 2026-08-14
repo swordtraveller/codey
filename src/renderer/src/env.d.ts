@@ -1,4 +1,4 @@
-import type { DevelopmentResult, ModelConfig, Project } from '../../shared/types'
+import type { DevelopmentProgress, DevelopmentResult, ModelConfig, Project } from '../../shared/types'
 
 interface RuntimeInfo {
   readonly electron: string
@@ -19,6 +19,7 @@ declare global {
         conversationId: string,
         content: string,
       ): Promise<DevelopmentResult>
+      onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
     }
   }
 }

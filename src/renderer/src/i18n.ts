@@ -1,0 +1,153 @@
+import i18n from 'i18next'
+import { initReactI18next } from 'react-i18next'
+import type { AppLanguage } from '../../shared/types'
+
+const systemLocale = typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : 'en'
+
+export function detectSystemLanguage(): Exclude<AppLanguage, 'system'> {
+  return systemLocale === 'zh' || systemLocale.startsWith('zh-cn') || systemLocale.startsWith('zh-sg') || systemLocale.startsWith('zh-hans')
+    ? 'zh-CN'
+    : 'en'
+}
+
+export function resolveLanguage(language: AppLanguage): Exclude<AppLanguage, 'system'> {
+  return language === 'system' ? detectSystemLanguage() : language
+}
+
+void i18n.use(initReactI18next).init({
+  lng: resolveLanguage('system'),
+  fallbackLng: 'en',
+  interpolation: { escapeValue: false },
+  resources: {
+    en: {
+      translation: {
+        copyMessage: 'Copy message',
+        copy: 'Copy',
+        processing: 'Processing {{duration}}...',
+        completed: 'Completed in {{duration}}: {{result}}',
+        normal: 'Completed normally',
+        timeout: 'Timed out without a response',
+        otherError: 'Other {{error}} error',
+        unableLoadConfig: 'Unable to load model configuration',
+        unableLoadProjects: 'Unable to load projects',
+        invalidModelConfig: 'Enter valid model and context settings',
+        unableAddFolder: 'Unable to add the project folder',
+        unableCreateConversation: 'Unable to create a conversation',
+        filesWritten: ' ({{count}} file(s) written)',
+        requestFailed: 'Request failed',
+        unableProcessRequest: 'Unable to process the development request',
+        createProject: 'Create a project',
+        addProjectFolder: 'Add a project folder',
+        whatBuild: 'What should I build?',
+        projectDescription: 'Projects group folders and conversations.',
+        folderDescription: 'Codey only writes files inside folders you select.',
+        conversationDescription: 'Describe a development task to start this conversation.',
+        newProject: 'New project',
+        projects: 'Projects',
+        conversations: 'Conversations',
+        new: 'New',
+        modelSettings: 'Model settings',
+        settings: 'Settings',
+        languageSettings: 'Language settings',
+        notConfigured: 'Not configured',
+        peakInputTitle: 'Peak input {{original}} tokens; current input {{compressed}} tokens',
+        noFolders: 'No folders selected',
+        addFolder: 'Add folder',
+        conversation: 'Conversation',
+        contextCompressed: 'Context compressed: {{original}} to {{compressed}} tokens ({{ratio}}x)',
+        method: 'Method: {{method}}',
+        scrollToBottom: 'Scroll to bottom',
+        developmentRequest: 'Development request',
+        configureModel: 'Configure a model first',
+        addFolderFirst: 'Add a project folder first',
+        describeTask: 'Describe a development task',
+        cancel: 'Cancel',
+        projectName: 'Project name',
+        creating: 'Creating…',
+        create: 'Create',
+        send: 'Send',
+        projectNameRequired: 'Enter a project name',
+        baseUrl: 'Base URL',
+        apiKey: 'API key',
+        modelName: 'Model name',
+        maximumContextTokens: 'Maximum context tokens',
+        outputTokenMargin: 'Output token margin',
+        recentRounds: 'Recent rounds to keep',
+        saving: 'Saving…',
+        save: 'Save',
+        language: 'Language',
+        followSystem: 'Follow system',
+        english: 'English',
+        simplifiedChinese: 'Simplified Chinese',
+      },
+    },
+    'zh-CN': {
+      translation: {
+        copyMessage: '复制消息',
+        copy: '复制',
+        processing: '正在处理中 {{duration}}...',
+        completed: '已结束处理 {{duration}}：{{result}}',
+        normal: '正常结束',
+        timeout: '超时未响应',
+        otherError: '其他 {{error}} 异常',
+        unableLoadConfig: '无法加载模型配置',
+        unableLoadProjects: '无法加载项目',
+        invalidModelConfig: '请输入有效的模型和上下文设置',
+        unableAddFolder: '无法添加项目文件夹',
+        unableCreateConversation: '无法创建对话',
+        filesWritten: '（已写入 {{count}} 个文件）',
+        requestFailed: '请求失败',
+        unableProcessRequest: '无法处理开发请求',
+        createProject: '创建项目',
+        addProjectFolder: '添加项目文件夹',
+        whatBuild: '你想构建什么？',
+        projectDescription: '项目用于组织文件夹和对话。',
+        folderDescription: 'Codey 只会在你选择的文件夹中写入文件。',
+        conversationDescription: '描述一个开发任务，开始本次对话。',
+        newProject: '新建项目',
+        projects: '项目',
+        conversations: '对话',
+        new: '新建',
+        modelSettings: '模型设置',
+        settings: '设置',
+        languageSettings: '语言设置',
+        notConfigured: '未配置',
+        peakInputTitle: '峰值输入 {{original}} 个 token；当前输入 {{compressed}} 个 token',
+        noFolders: '未选择文件夹',
+        addFolder: '添加文件夹',
+        conversation: '对话',
+        contextCompressed: '上下文已压缩：{{original}} → {{compressed}} 个 token（{{ratio}}x）',
+        method: '方法：{{method}}',
+        scrollToBottom: '滚动到底部',
+        developmentRequest: '开发请求',
+        configureModel: '请先配置模型',
+        addFolderFirst: '请先添加项目文件夹',
+        describeTask: '描述开发任务',
+        cancel: '取消',
+        projectName: '项目名称',
+        creating: '创建中…',
+        create: '创建',
+        send: '发送',
+        projectNameRequired: '请输入项目名称',
+        baseUrl: 'Base URL',
+        apiKey: 'API key',
+        modelName: '模型名称',
+        maximumContextTokens: '最大上下文 token 数',
+        outputTokenMargin: '输出 token 预留',
+        recentRounds: '保留最近对话轮数',
+        saving: '保存中…',
+        save: '保存',
+        language: '语言',
+        followSystem: '跟随系统',
+        english: 'English',
+        simplifiedChinese: '简体中文',
+      },
+    },
+  },
+})
+
+export default i18n
+
+export function setAppLanguage(language: AppLanguage): void {
+  void i18n.changeLanguage(resolveLanguage(language))
+}
