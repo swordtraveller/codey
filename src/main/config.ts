@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defaultModelConfig, type ModelConfig } from '../shared/types'
+import { defaultModelConfig, type AppLanguage, type ModelConfig } from '../shared/types'
 
 type StoredConfig = Partial<ModelConfig> & {
   encrypted?: boolean
@@ -10,6 +10,10 @@ type StoredConfig = Partial<ModelConfig> & {
 
 function getConfigPath(): string {
   return join(app.getPath('userData'), 'model-config.json')
+}
+
+function isAppLanguage(value: unknown): value is AppLanguage {
+  return value === 'system' || value === 'en' || value === 'zh-CN'
 }
 
 export async function readConfig(): Promise<ModelConfig> {
@@ -27,6 +31,7 @@ export async function readConfig(): Promise<ModelConfig> {
       modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
       safeOutputMargin: stored.safeOutputMargin ?? defaultModelConfig.safeOutputMargin,
       recentKeepRounds: stored.recentKeepRounds ?? defaultModelConfig.recentKeepRounds,
+      language: isAppLanguage(stored.language) ? stored.language : defaultModelConfig.language,
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -44,6 +49,7 @@ export async function saveConfig(config: ModelConfig): Promise<ModelConfig> {
     modelMaxContext: Math.floor(config.modelMaxContext),
     safeOutputMargin: Math.floor(config.safeOutputMargin),
     recentKeepRounds: Math.floor(config.recentKeepRounds),
+    language: isAppLanguage(config.language) ? config.language : defaultModelConfig.language,
   }
   const url = new URL(normalized.baseUrl)
 

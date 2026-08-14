@@ -1,3 +1,5 @@
+export type AppLanguage = 'system' | 'en' | 'zh-CN'
+
 export type ModelConfig = {
   baseUrl: string
   apiKey: string
@@ -5,6 +7,7 @@ export type ModelConfig = {
   modelMaxContext: number
   safeOutputMargin: number
   recentKeepRounds: number
+  language: AppLanguage
 }
 
 export const defaultModelConfig: ModelConfig = {
@@ -14,6 +17,7 @@ export const defaultModelConfig: ModelConfig = {
   modelMaxContext: 128_000,
   safeOutputMargin: 16_000,
   recentKeepRounds: 5,
+  language: 'system',
 }
 
 export type ContextMetrics = {
