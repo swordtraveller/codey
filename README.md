@@ -2,6 +2,8 @@
 
 A desktop app for conversation, work and coding.
 
+<img src="docs/assets/codey_conversation_screenshot.png" style="width: 60dvw; height: auto;" />
+
 ## Development
 
 ```bash
