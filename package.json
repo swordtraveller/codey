@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
     "build": "pnpm typecheck && electron-vite build",
     "dist": "pnpm build && electron-builder",
@@ -32,7 +34,8 @@
     "electron-builder": "^26.0.0",
     "electron-vite": "^5.0.0",
     "typescript": "^7.0.2",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
