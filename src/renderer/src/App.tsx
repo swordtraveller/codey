@@ -65,11 +65,6 @@ type ConversationTurn = {
   error?: string
 }
 
-function formatTurnDuration(durationMs: number): string {
-  const totalMinutes = Math.floor(Math.max(0, durationMs) / 60000)
-  return `${Math.floor(totalMinutes / 60)} 时 ${totalMinutes % 60} 分`
-}
-
 function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.Element {
   const { t } = useTranslation()
   const [now, setNow] = useState(Date.now())
@@ -83,7 +78,11 @@ function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.
     return () => window.clearInterval(timer)
   }, [turn.result])
 
-  const duration = formatTurnDuration((turn.endedAt ?? now) - turn.startedAt)
+  const totalMinutes = Math.floor(Math.max(0, (turn.endedAt ?? now) - turn.startedAt) / 60000)
+  const duration = t('duration', {
+    hours: Math.floor(totalMinutes / 60),
+    minutes: totalMinutes % 60,
+  })
   const result = turn.result === 'processing'
     ? ''
     : turn.result === 'normal'

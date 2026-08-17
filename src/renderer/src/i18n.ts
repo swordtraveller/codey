@@ -23,6 +23,7 @@ void i18n.use(initReactI18next).init({
       translation: {
         copyMessage: 'Copy message',
         copy: 'Copy',
+        duration: '{{hours}} hr {{minutes}} min',
         processing: 'Processing {{duration}}...',
         completed: 'Completed in {{duration}}: {{result}}',
         normal: 'Completed normally',
@@ -85,6 +86,7 @@ void i18n.use(initReactI18next).init({
       translation: {
         copyMessage: '复制消息',
         copy: '复制',
+        duration: '{{hours}} 时 {{minutes}} 分',
         processing: '正在处理中 {{duration}}...',
         completed: '已结束处理 {{duration}}：{{result}}',
         normal: '正常结束',
