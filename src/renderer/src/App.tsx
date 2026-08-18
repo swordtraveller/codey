@@ -19,9 +19,13 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
 import type { AppLanguage } from '../../shared/types'
-import { defaultModelConfig, type AssistantMessageBlock, type Project } from '../../shared/types'
-
-const emptyConfig = defaultModelConfig
+import {
+  defaultAppConfig,
+  defaultModelConfig,
+  type AssistantMessageBlock,
+  type ModelConfig,
+  type Project,
+} from '../../shared/types'
 
 function formatToolParameters(parameters: string): string {
   try {
@@ -134,10 +138,10 @@ export function App(): React.JSX.Element {
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
   const [draft, setDraft] = useState('')
-  const [config, setConfig] = useState(emptyConfig)
-  const [configDraft, setConfigDraft] = useState(emptyConfig)
+  const [config, setConfig] = useState(defaultAppConfig)
+  const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [languageDraft, setLanguageDraft] = useState<AppLanguage>('system')
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [sending, setSending] = useState(false)
@@ -159,7 +163,10 @@ export function App(): React.JSX.Element {
   const activeConversation = activeProject?.conversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
-  const configured = Boolean(config.baseUrl && config.apiKey && config.modelName)
+  const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
+  const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
+  const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
+  const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
@@ -177,7 +184,6 @@ export function App(): React.JSX.Element {
       .then((saved) => {
         setConfig(saved)
         setConfigDraft(saved)
-        setLanguageDraft(saved.language)
         setAppLanguage(saved.language)
       })
       .catch(() => setError(t('unableLoadConfig')))
@@ -225,16 +231,46 @@ export function App(): React.JSX.Element {
   function selectProject(project: Project): void {
     setActiveProjectId(project.id)
     setActiveConversationId(project.conversations[0]?.id ?? '')
+    setOpenProjectMenuId(null)
     setConversationTurn(null)
     setDraft('')
     setError('')
   }
 
+  function createSettingsDraft(): typeof defaultAppConfig {
+    if (config.modelConfigs.length > 0) {
+      return config
+    }
+    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
+    return { ...config, modelConfigs: [model], activeModelConfigId: model.id }
+  }
+
   function openSettings(): void {
-    setConfigDraft(config)
-    setLanguageDraft(config.language)
+    setConfigDraft(createSettingsDraft())
     setSettingsError('')
     setSettingsOpen(true)
+  }
+
+  function updateSelectedModel(patch: Partial<ModelConfig>): void {
+    const selectedId = configDraft.activeModelConfigId
+    if (!selectedId) {
+      return
+    }
+    setConfigDraft((current) => ({
+      ...current,
+      modelConfigs: current.modelConfigs.map((model) =>
+        model.id === selectedId ? { ...model, ...patch } : model,
+      ),
+    }))
+  }
+
+  function addModelConfig(): void {
+    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
+    setConfigDraft((current) => ({
+      ...current,
+      modelConfigs: [...current.modelConfigs, model],
+      activeModelConfigId: model.id,
+    }))
   }
 
   async function saveSettings(): Promise<void> {
@@ -242,10 +278,9 @@ export function App(): React.JSX.Element {
     setSettingsError('')
 
     try {
-      const saved = await window.codey.saveConfig({ ...configDraft, language: languageDraft })
+      const saved = await window.codey.saveConfig(configDraft)
       setConfig(saved)
       setConfigDraft(saved)
-      setLanguageDraft(saved.language)
       setAppLanguage(saved.language)
       setError('')
       setSettingsOpen(false)
@@ -297,6 +332,36 @@ export function App(): React.JSX.Element {
       }
     } catch {
       setError(t('unableAddFolder'))
+    }
+  }
+
+  async function changeProjectModelConfig(projectId: string, modelConfigId: string): Promise<void> {
+    if (sending) {
+      return
+    }
+
+    try {
+      const updated = await window.codey.setProjectModelConfig(projectId, modelConfigId || null)
+      replaceProject(updated)
+    } catch {
+      setError(t('unableChangeModelConfig'))
+    }
+  }
+
+  async function changeConversationModelConfig(modelConfigId: string): Promise<void> {
+    if (!activeProject || !activeConversation || sending) {
+      return
+    }
+
+    try {
+      const updated = await window.codey.setConversationModelConfig(
+        activeProject.id,
+        activeConversation.id,
+        modelConfigId || null,
+      )
+      replaceProject(updated)
+    } catch {
+      setError(t('unableChangeModelConfig'))
     }
   }
 
@@ -414,6 +479,20 @@ export function App(): React.JSX.Element {
     : activeProject.folders.length === 0
       ? t('folderDescription')
       : t('conversationDescription')
+  const selectedModel = configDraft.modelConfigs.find(
+    (model) => model.id === configDraft.activeModelConfigId,
+  ) ?? configDraft.modelConfigs[0]
+  const invalidModelConfig = configDraft.modelConfigs.length === 0 || configDraft.modelConfigs.some((model) =>
+    !model.name.trim() ||
+    !model.baseUrl.trim() ||
+    !model.apiKey.trim() ||
+    !model.modelName.trim() ||
+    model.modelMaxContext < 1_000 ||
+    model.safeOutputMargin < 1 ||
+    model.safeOutputMargin >= model.modelMaxContext ||
+    model.recentKeepRounds < 1 ||
+    model.recentKeepRounds > 20,
+  )
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -432,14 +511,52 @@ export function App(): React.JSX.Element {
             <p className="section-label">{t('projects')}</p>
             <nav className="nav-list" aria-label={t('projects')}>
               {projects.map((project) => (
-                <Button
-                  appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
-                  disabled={sending}
-                  key={project.id}
-                  onClick={() => selectProject(project)}
-                >
-                  {project.name}
-                </Button>
+                <div className="project-nav-item" key={project.id}>
+                  <div className="project-nav-row">
+                    <Button
+                      appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
+                      disabled={sending}
+                      onClick={() => selectProject(project)}
+                    >
+                      {project.name}
+                    </Button>
+                    <Button
+                      appearance="subtle"
+                      size="small"
+                      aria-expanded={openProjectMenuId === project.id}
+                      aria-label={t('projectOptions')}
+                      disabled={sending}
+                      onClick={() => setOpenProjectMenuId((current) =>
+                        current === project.id ? null : project.id
+                      )}
+                    >
+                      …
+                    </Button>
+                  </div>
+                  {openProjectMenuId === project.id && (
+                    <div className="project-menu-panel">
+                      <label>
+                        <span>{t('projectDefaultModel')}</span>
+                        <Select
+                          aria-label={t('projectDefaultModel')}
+                          disabled={sending || config.modelConfigs.length === 0}
+                          value={project.defaultModelConfigId ?? ''}
+                          onChange={(_, data) => {
+                            setOpenProjectMenuId(null)
+                            void changeProjectModelConfig(project.id, data.value)
+                          }}
+                        >
+                          <option value="">{t('applicationDefault')}</option>
+                          {config.modelConfigs.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.name || model.modelName || t('unnamedModel')}
+                            </option>
+                          ))}
+                        </Select>
+                      </label>
+                    </div>
+                  )}
+                </div>
               ))}
             </nav>
           </section>
@@ -491,9 +608,28 @@ export function App(): React.JSX.Element {
               {activeConversation && <span>{activeConversation.title}</span>}
             </div>
             <div className="model-status">
-              <span className="status">
-                {configured ? config.modelName : t('notConfigured')}
-              </span>
+              {activeConversation && config.modelConfigs.length > 0 ? (
+                <label className="conversation-model-picker">
+                  <span>
+                    {configured ? effectiveModelConfig?.modelName : t('notConfigured')}
+                  </span>
+                  <select
+                    aria-label={t('conversationModel')}
+                    disabled={sending}
+                    value={activeConversation.modelConfigId ?? ''}
+                    onChange={(event) => void changeConversationModelConfig(event.target.value)}
+                  >
+                    <option value="">{t('followProjectDefault')}</option>
+                    {config.modelConfigs.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name || model.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span className="status">{t('notConfigured')}</span>
+              )}
               {context && contextStatus && (
                 <span
                   className="context-status"
@@ -696,24 +832,49 @@ export function App(): React.JSX.Element {
             <DialogContent className="dialog-fields">
               <section className="settings-group">
                 <h2>{t('modelSettings')}</h2>
+                <div className="model-config-toolbar">
+                  <Select
+                    aria-label={t('modelSettings')}
+                    value={configDraft.activeModelConfigId ?? ''}
+                    onChange={(_, data) => setConfigDraft((current) => ({
+                      ...current,
+                      activeModelConfigId: data.value || null,
+                    }))}
+                  >
+                    {configDraft.modelConfigs.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name || model.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addModelConfig}>
+                    {t('addModelConfig')}
+                  </Button>
+                </div>
+                <Field label={t('modelConfigName')} required>
+                  <Input
+                    value={selectedModel?.name ?? ''}
+                    onChange={(_, data) => updateSelectedModel({ name: data.value })}
+                  />
+                </Field>
                 <Field label={t('baseUrl')} required>
                   <Input
-                    value={configDraft.baseUrl}
-                    onChange={(_, data) => setConfigDraft({ ...configDraft, baseUrl: data.value })}
+                    value={selectedModel?.baseUrl ?? ''}
+                    onChange={(_, data) => updateSelectedModel({ baseUrl: data.value })}
                     placeholder="https://api.example.com/v1"
                   />
                 </Field>
                 <Field label={t('apiKey')} required>
                   <Input
                     type="password"
-                    value={configDraft.apiKey}
-                    onChange={(_, data) => setConfigDraft({ ...configDraft, apiKey: data.value })}
+                    value={selectedModel?.apiKey ?? ''}
+                    onChange={(_, data) => updateSelectedModel({ apiKey: data.value })}
                   />
                 </Field>
                 <Field label={t('modelName')} required>
                   <Input
-                    value={configDraft.modelName}
-                    onChange={(_, data) => setConfigDraft({ ...configDraft, modelName: data.value })}
+                    value={selectedModel?.modelName ?? ''}
+                    onChange={(_, data) => updateSelectedModel({ modelName: data.value })}
                     placeholder="model-name"
                   />
                 </Field>
@@ -722,11 +883,8 @@ export function App(): React.JSX.Element {
                     min={1000}
                     step={1000}
                     type="number"
-                    value={String(configDraft.modelMaxContext)}
-                    onChange={(_, data) => setConfigDraft({
-                      ...configDraft,
-                      modelMaxContext: Number(data.value),
-                    })}
+                    value={String(selectedModel?.modelMaxContext ?? '')}
+                    onChange={(_, data) => updateSelectedModel({ modelMaxContext: Number(data.value) })}
                   />
                 </Field>
                 <Field label={t('outputTokenMargin')} required>
@@ -734,11 +892,8 @@ export function App(): React.JSX.Element {
                     min={1}
                     step={1000}
                     type="number"
-                    value={String(configDraft.safeOutputMargin)}
-                    onChange={(_, data) => setConfigDraft({
-                      ...configDraft,
-                      safeOutputMargin: Number(data.value),
-                    })}
+                    value={String(selectedModel?.safeOutputMargin ?? '')}
+                    onChange={(_, data) => updateSelectedModel({ safeOutputMargin: Number(data.value) })}
                   />
                 </Field>
                 <Field label={t('recentRounds')} required>
@@ -746,11 +901,8 @@ export function App(): React.JSX.Element {
                     max={20}
                     min={1}
                     type="number"
-                    value={String(configDraft.recentKeepRounds)}
-                    onChange={(_, data) => setConfigDraft({
-                      ...configDraft,
-                      recentKeepRounds: Number(data.value),
-                    })}
+                    value={String(selectedModel?.recentKeepRounds ?? '')}
+                    onChange={(_, data) => updateSelectedModel({ recentKeepRounds: Number(data.value) })}
                   />
                 </Field>
               </section>
@@ -758,8 +910,11 @@ export function App(): React.JSX.Element {
                 <h2>{t('languageSettings')}</h2>
                 <Field label={t('language')}>
                   <Select
-                    value={languageDraft}
-                    onChange={(_, data) => setLanguageDraft(data.value as AppLanguage)}
+                    value={configDraft.language}
+                    onChange={(_, data) => setConfigDraft((current) => ({
+                      ...current,
+                      language: data.value as AppLanguage,
+                    }))}
                   >
                     <option value="system">{t('followSystem')}</option>
                     <option value="en">{t('english')}</option>
@@ -775,17 +930,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={
-                  !configDraft.baseUrl.trim() ||
-                  !configDraft.apiKey.trim() ||
-                  !configDraft.modelName.trim() ||
-                  configDraft.modelMaxContext < 1_000 ||
-                  configDraft.safeOutputMargin < 1 ||
-                  configDraft.safeOutputMargin >= configDraft.modelMaxContext ||
-                  configDraft.recentKeepRounds < 1 ||
-                  configDraft.recentKeepRounds > 20 ||
-                  saving
-                }
+                disabled={invalidModelConfig || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}

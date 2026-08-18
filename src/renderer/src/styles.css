@@ -132,7 +132,7 @@ body {
   background: #fff;
 }
 
-.topbar div {
+.topbar > div {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -147,7 +147,7 @@ body {
   color: #8a8a8a;
   font-size: 11px;
 }
-.topbar div span,
+.topbar > div > span,
 .status {
   color: #616161;
   font-size: 12px;
@@ -184,6 +184,100 @@ body {
   background: #fff;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-nav-item {
+  display: grid;
+  gap: 4px;
+}
+
+.project-nav-row {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.project-nav-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-menu-panel {
+  margin: 0 8px 4px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+  color: #707070;
+  font-size: 11px;
+}
+
+.project-menu-panel label {
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-model-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 240px;
+  min-height: 30px;
+  box-sizing: border-box;
+  border: 1px solid #d1d1d1;
+  border-radius: 4px;
+  padding: 0 28px 0 9px;
+  background: #fff;
+  color: #242424;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.conversation-model-picker:hover {
+  border-color: #adadad;
+}
+
+.conversation-model-picker:focus-within {
+  border-color: #0f6cbd;
+  box-shadow: 0 0 0 1px #0f6cbd;
+}
+
+.conversation-model-picker::after {
+  position: absolute;
+  right: 9px;
+  content: '⌄';
+  color: #616161;
+  pointer-events: none;
+}
+
+.conversation-model-picker span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-model-picker select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.conversation-model-picker select:disabled {
+  cursor: default;
+}
+
+.model-config-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.model-config-toolbar select {
+  flex: 1;
 }
 
 .conversation-container {

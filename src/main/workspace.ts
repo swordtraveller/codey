@@ -7,15 +7,21 @@ import type {
   ChatMessage,
   ContextCompressionNotice,
   Conversation,
+  ModelConfigSnapshot,
   Project,
   ProjectFolder,
 } from '../shared/types'
 
-type StoredConversation = Omit<Conversation, 'agentMessages'> & {
+type StoredConversation = Omit<Conversation, 'agentMessages' | 'modelConfigId'> & {
   agentMessages?: Conversation['agentMessages']
+  modelConfigId?: string | null
 }
 
-type StoredProject = Omit<Project, 'folders' | 'pythonEnvironmentFolderId' | 'conversations'> & {
+type StoredProject = Omit<
+  Project,
+  'defaultModelConfigId' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations'
+> & {
+  defaultModelConfigId?: string | null
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
@@ -34,9 +40,11 @@ function normalizeProject(value: StoredProject): Project {
   const configuredFolder = folders.some((folder) => folder.id === value.pythonEnvironmentFolderId)
   return {
     ...value,
+    defaultModelConfigId: value.defaultModelConfigId ?? null,
     folders,
     conversations: value.conversations.map((conversation) => ({
       ...conversation,
+      modelConfigId: conversation.modelConfigId ?? null,
       agentMessages:
         conversation.agentMessages ??
         conversation.messages.map(({ role, content }) => ({ role, content })),
@@ -55,9 +63,12 @@ async function loadProjects(): Promise<Project[]> {
   try {
     const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as StoredProject[]
     const needsMigration = stored.some((project) =>
+      project.defaultModelConfigId === undefined ||
       project.pythonEnvironmentFolderId === undefined ||
       project.folders.some((folder) => typeof folder === 'string') ||
-      project.conversations.some((conversation) => !conversation.agentMessages),
+      project.conversations.some((conversation) =>
+        conversation.modelConfigId === undefined || !conversation.agentMessages,
+      ),
     )
     projects = stored.map(normalizeProject)
     if (needsMigration) {
@@ -81,6 +92,7 @@ function createConversationRecord(index: number): Conversation {
   return {
     id: randomUUID(),
     title: `Conversation ${index}`,
+    modelConfigId: null,
     messages: [],
     agentMessages: [],
   }
@@ -102,7 +114,10 @@ export async function getProject(projectId: string): Promise<Project> {
   return findProject(projectId)
 }
 
-export async function createProject(name: string): Promise<Project> {
+export async function createProject(
+  name: string,
+  defaultModelConfigId: string | null = null,
+): Promise<Project> {
   const normalizedName = name.trim()
   if (!normalizedName) {
     throw new Error('Enter a project name')
@@ -111,6 +126,7 @@ export async function createProject(name: string): Promise<Project> {
   const project: Project = {
     id: randomUUID(),
     name: normalizedName,
+    defaultModelConfigId,
     folders: [],
     pythonEnvironmentFolderId: null,
     conversations: [createConversationRecord(1)],
@@ -137,9 +153,35 @@ export async function addProjectFolder(projectId: string, folderPath: string): P
   return project
 }
 
+export async function setProjectModelConfig(
+  projectId: string,
+  modelConfigId: string | null,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  project.defaultModelConfigId = modelConfigId
+  await saveProjects()
+  return project
+}
+
 export async function createConversation(projectId: string): Promise<Project> {
   const project = await findProject(projectId)
   project.conversations.push(createConversationRecord(project.conversations.length + 1))
+  await saveProjects()
+  return project
+}
+
+export async function setConversationModelConfig(
+  projectId: string,
+  conversationId: string,
+  modelConfigId: string | null,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
+    throw new Error('Conversation not found')
+  }
+
+  conversation.modelConfigId = modelConfigId
   await saveProjects()
   return project
 }
@@ -151,6 +193,7 @@ export async function addMessage(
   content: string,
   blocks?: AssistantMessageBlock[],
   compression?: ContextCompressionNotice,
+  modelConfig?: ModelConfigSnapshot,
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
@@ -158,7 +201,7 @@ export async function addMessage(
     throw new Error('Conversation not found')
   }
 
-  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }

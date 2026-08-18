@@ -1,12 +1,28 @@
+import { randomUUID } from 'node:crypto'
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defaultModelConfig, type AppLanguage, type ModelConfig } from '../shared/types'
+import {
+  defaultAppConfig,
+  defaultModelConfig,
+  type AppConfig,
+  type AppLanguage,
+  type ModelConfig,
+} from '../shared/types'
 
-type StoredConfig = Partial<ModelConfig> & {
+type StoredModelConfig = Partial<ModelConfig> & {
   encrypted?: boolean
 }
 
+type StoredAppConfig = {
+  modelConfigs?: StoredModelConfig[]
+  activeModelConfigId?: string | null
+  language?: AppLanguage
+}
+
+type LegacyStoredConfig = StoredModelConfig & {
+  language?: AppLanguage
+}
 
 function getConfigPath(): string {
   return join(app.getPath('userData'), 'model-config.json')
@@ -16,68 +32,136 @@ function isAppLanguage(value: unknown): value is AppLanguage {
   return value === 'system' || value === 'en' || value === 'zh-CN'
 }
 
-export async function readConfig(): Promise<ModelConfig> {
-  try {
-    const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredConfig
-    const apiKey = stored.encrypted
-      ? safeStorage.decryptString(Buffer.from(stored.apiKey ?? '', 'base64'))
-      : stored.apiKey
+function readModelConfig(stored: StoredModelConfig): ModelConfig {
+  const apiKey = stored.encrypted
+    ? safeStorage.decryptString(Buffer.from(stored.apiKey ?? '', 'base64'))
+    : stored.apiKey
 
-    return {
-      ...defaultModelConfig,
-      baseUrl: stored.baseUrl ?? '',
-      apiKey: apiKey ?? '',
-      modelName: stored.modelName ?? '',
-      modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
-      safeOutputMargin: stored.safeOutputMargin ?? defaultModelConfig.safeOutputMargin,
-      recentKeepRounds: stored.recentKeepRounds ?? defaultModelConfig.recentKeepRounds,
-      language: isAppLanguage(stored.language) ? stored.language : defaultModelConfig.language,
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return defaultModelConfig
-    }
-    throw new Error('Unable to read model configuration')
+  return {
+    ...defaultModelConfig,
+    id: stored.id?.trim() || randomUUID(),
+    name: stored.name?.trim() || stored.modelName?.trim() || 'Model',
+    baseUrl: stored.baseUrl ?? '',
+    apiKey: apiKey ?? '',
+    modelName: stored.modelName ?? '',
+    modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
+    safeOutputMargin: stored.safeOutputMargin ?? defaultModelConfig.safeOutputMargin,
+    recentKeepRounds: stored.recentKeepRounds ?? defaultModelConfig.recentKeepRounds,
   }
 }
 
-export async function saveConfig(config: ModelConfig): Promise<ModelConfig> {
-  const normalized: ModelConfig = {
+function normalizeModelConfig(config: ModelConfig): ModelConfig {
+  return {
+    id: config.id.trim(),
+    name: config.name.trim(),
     baseUrl: config.baseUrl.trim().replace(/\/+$/, ''),
     apiKey: config.apiKey.trim(),
     modelName: config.modelName.trim(),
     modelMaxContext: Math.floor(config.modelMaxContext),
     safeOutputMargin: Math.floor(config.safeOutputMargin),
     recentKeepRounds: Math.floor(config.recentKeepRounds),
-    language: isAppLanguage(config.language) ? config.language : defaultModelConfig.language,
   }
-  const url = new URL(normalized.baseUrl)
+}
+
+function isValidModelConfig(config: ModelConfig): boolean {
+  try {
+    const url = new URL(config.baseUrl)
+    return Boolean(
+      config.id &&
+      config.name &&
+      ['http:', 'https:'].includes(url.protocol) &&
+      config.apiKey &&
+      config.modelName &&
+      Number.isInteger(config.modelMaxContext) &&
+      Number.isInteger(config.safeOutputMargin) &&
+      Number.isInteger(config.recentKeepRounds) &&
+      config.modelMaxContext >= 1_000 &&
+      config.safeOutputMargin >= 1 &&
+      config.safeOutputMargin < config.modelMaxContext &&
+      config.recentKeepRounds >= 1 &&
+      config.recentKeepRounds <= 20
+    )
+  } catch {
+    return false
+  }
+}
+
+async function writeConfig(config: AppConfig): Promise<void> {
+  const encrypted = safeStorage.isEncryptionAvailable()
+  const stored: StoredAppConfig = {
+    ...config,
+    modelConfigs: config.modelConfigs.map((model) => ({
+      ...model,
+      apiKey: encrypted
+        ? safeStorage.encryptString(model.apiKey).toString('base64')
+        : model.apiKey,
+      encrypted,
+    })),
+  }
+
+  await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
+}
+
+export async function readConfig(): Promise<AppConfig> {
+  try {
+    const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredAppConfig & LegacyStoredConfig
+    const language = isAppLanguage(stored.language) ? stored.language : defaultAppConfig.language
+
+    if (Array.isArray(stored.modelConfigs)) {
+      const modelConfigs = stored.modelConfigs.map(readModelConfig)
+      const activeModelConfigId = modelConfigs.some((model) => model.id === stored.activeModelConfigId)
+        ? (stored.activeModelConfigId ?? null)
+        : (modelConfigs[0]?.id ?? null)
+      const config = { modelConfigs, activeModelConfigId, language }
+      const needsMigration = stored.modelConfigs.some((model) => !model.id || !model.name) ||
+        stored.activeModelConfigId !== activeModelConfigId
+      if (needsMigration) {
+        await writeConfig(config)
+      }
+      return config
+    }
+
+    const hasLegacyModel = Boolean(stored.baseUrl || stored.apiKey || stored.modelName)
+    if (!hasLegacyModel) {
+      return { ...defaultAppConfig, language }
+    }
+
+    const model = readModelConfig(stored)
+    const migrated = {
+      modelConfigs: [model],
+      activeModelConfigId: model.id,
+      language,
+    }
+    await writeConfig(migrated)
+    return migrated
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ...defaultAppConfig, modelConfigs: [] }
+    }
+    throw new Error('Unable to read model configuration')
+  }
+}
+
+export async function saveConfig(config: AppConfig): Promise<AppConfig> {
+  const modelConfigs = config.modelConfigs.map(normalizeModelConfig)
+  const ids = new Set(modelConfigs.map((model) => model.id))
+  const activeModelConfigId = config.activeModelConfigId ?? modelConfigs[0]?.id ?? null
 
   if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    !normalized.apiKey ||
-    !normalized.modelName ||
-    !Number.isInteger(normalized.modelMaxContext) ||
-    !Number.isInteger(normalized.safeOutputMargin) ||
-    !Number.isInteger(normalized.recentKeepRounds) ||
-    normalized.modelMaxContext < 1_000 ||
-    normalized.safeOutputMargin < 1 ||
-    normalized.safeOutputMargin >= normalized.modelMaxContext ||
-    normalized.recentKeepRounds < 1 ||
-    normalized.recentKeepRounds > 20
+    modelConfigs.length === 0 ||
+    ids.size !== modelConfigs.length ||
+    modelConfigs.some((model) => !isValidModelConfig(model)) ||
+    !activeModelConfigId ||
+    !ids.has(activeModelConfigId)
   ) {
     throw new Error('Enter valid model and context settings')
   }
 
-  const encrypted = safeStorage.isEncryptionAvailable()
-  const stored: StoredConfig = {
-    ...normalized,
-    apiKey: encrypted
-      ? safeStorage.encryptString(normalized.apiKey).toString('base64')
-      : normalized.apiKey,
-    encrypted,
+  const normalized: AppConfig = {
+    modelConfigs,
+    activeModelConfigId,
+    language: isAppLanguage(config.language) ? config.language : defaultAppConfig.language,
   }
-
-  await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
+  await writeConfig(normalized)
   return normalized
 }
