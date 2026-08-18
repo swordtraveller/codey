@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
-import type { AssistantMessageBlock, DevelopmentProgress, DevelopmentResult, ModelConfig } from '../shared/types'
+import type { AppConfig, AssistantMessageBlock, DevelopmentProgress, DevelopmentResult } from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
+import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
   addProjectFolder,
@@ -11,7 +12,19 @@ import {
   getProject,
   getProjects,
   saveConversationContext,
+  setConversationModelConfig,
+  setProjectModelConfig,
 } from './workspace'
+
+async function validateModelConfigId(modelConfigId: string | null): Promise<void> {
+  if (!modelConfigId) {
+    return
+  }
+  const config = await readConfig()
+  if (!config.modelConfigs.some((model) => model.id === modelConfigId)) {
+    throw new Error('Model configuration not found')
+  }
+}
 
 async function developProject(
   projectId: string,
@@ -29,16 +42,36 @@ async function developProject(
     return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
 
-  project = await addMessage(projectId, conversationId, 'user', normalizedContent)
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) {
     return { project, writtenFiles: [], error: 'Conversation not found' }
   }
 
+  const appConfig = await readConfig()
+  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  if (!modelConfig) {
+    return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
+  }
+
+  project = await addMessage(
+    projectId,
+    conversationId,
+    'user',
+    normalizedContent,
+    undefined,
+    undefined,
+    createModelConfigSnapshot(modelConfig),
+  )
+  const updatedConversation = project.conversations.find((item) => item.id === conversationId)
+  if (!updatedConversation) {
+    return { project, writtenFiles: [], error: 'Conversation not found' }
+  }
+
   const result = await develop(
     project,
+    modelConfig,
     [
-      ...conversation.agentMessages,
+      ...updatedConversation.agentMessages,
       { role: 'user', content: normalizedContent },
     ],
     onBlocks,
@@ -98,9 +131,12 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
-  ipcMain.handle('config:save', (_event, config: ModelConfig) => saveConfig(config))
+  ipcMain.handle('config:save', (_event, config: AppConfig) => saveConfig(config))
   ipcMain.handle('projects:get', () => getProjects())
-  ipcMain.handle('projects:create', (_event, name: string) => createProject(name))
+  ipcMain.handle('projects:create', async (_event, name: string) => {
+    const config = await readConfig()
+    return createProject(name, config.activeModelConfigId)
+  })
   ipcMain.handle('projects:add-folder', async (_event, projectId: string) => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) {
@@ -108,8 +144,27 @@ app.whenReady().then(() => {
     }
     return addProjectFolder(projectId, result.filePaths[0])
   })
+  ipcMain.handle(
+    'projects:set-model-config',
+    async (_event, projectId: string, modelConfigId: string | null) => {
+      await validateModelConfigId(modelConfigId)
+      return setProjectModelConfig(projectId, modelConfigId)
+    },
+  )
   ipcMain.handle('conversations:create', (_event, projectId: string) =>
     createConversation(projectId),
+  )
+  ipcMain.handle(
+    'conversations:set-model-config',
+    async (
+      _event,
+      projectId: string,
+      conversationId: string,
+      modelConfigId: string | null,
+    ) => {
+      await validateModelConfigId(modelConfigId)
+      return setConversationModelConfig(projectId, conversationId, modelConfigId)
+    },
   )
   ipcMain.handle(
     'development:send',

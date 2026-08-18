@@ -3,9 +3,9 @@ import type {
   AssistantMessageBlock,
   ContextCompressionNotice,
   ContextMetrics,
+  ModelConfig,
   Project,
 } from '../shared/types'
-import { readConfig } from './config'
 import { manageContext, type ContextMessage } from './context'
 import { log } from './logger'
 import { truncateOutput } from './sandbox'
@@ -156,12 +156,12 @@ function isRetryableRequestError(error: unknown): boolean {
 }
 
 async function requestCompletionAttempt(
+  config: ModelConfig,
   messages: ContextMessage[],
   tools: object[],
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
 ): Promise<ChatResponse> {
-  const config = await readConfig()
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
   }
@@ -317,6 +317,7 @@ async function requestCompletionAttempt(
 }
 
 async function requestCompletion(
+  config: ModelConfig,
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
@@ -341,7 +342,7 @@ async function requestCompletion(
     }
 
     try {
-      return await requestCompletionAttempt(messages, tools, controller.signal, update)
+      return await requestCompletionAttempt(config, messages, tools, controller.signal, update)
     } catch (error) {
       const details = errorDetails(error)
       const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -382,6 +383,7 @@ async function requestCompletion(
 
 export async function develop(
   project: Project,
+  config: ModelConfig,
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
 ): Promise<AgentResult> {
@@ -396,7 +398,6 @@ export async function develop(
 
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
-  const config = await readConfig()
   const systemMessage: ContextMessage = {
     role: 'system',
     content: [
@@ -442,7 +443,7 @@ export async function develop(
       }
       let response: ChatResponse
       try {
-        response = await requestCompletion(apiMessages, tools, (message) => {
+        response = await requestCompletion(config, apiMessages, tools, (message) => {
           onBlocks?.([...blocks, ...toMessageBlocks(message)])
         })
       } catch (error) {
