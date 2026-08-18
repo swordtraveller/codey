@@ -1,4 +1,10 @@
-import type { AppConfig, DevelopmentProgress, DevelopmentResult, Project } from '../../shared/types'
+import type {
+  AppConfig,
+  ContextManagementConfig,
+  DevelopmentProgress,
+  DevelopmentResult,
+  Project,
+} from '../../shared/types'
 
 interface RuntimeInfo {
   readonly electron: string
@@ -14,11 +20,20 @@ declare global {
       createProject(name: string): Promise<Project>
       addProjectFolder(projectId: string): Promise<Project | null>
       setProjectModelConfig(projectId: string, modelConfigId: string | null): Promise<Project>
+      setProjectContextConfig(
+        projectId: string,
+        contextConfig: ContextManagementConfig | null,
+      ): Promise<Project>
       createConversation(projectId: string): Promise<Project>
       setConversationModelConfig(
         projectId: string,
         conversationId: string,
         modelConfigId: string | null,
+      ): Promise<Project>
+      setConversationContextConfig(
+        projectId: string,
+        conversationId: string,
+        contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
       develop(
         projectId: string,

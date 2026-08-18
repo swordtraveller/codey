@@ -7,8 +7,6 @@ export type ModelConfig = {
   apiKey: string
   modelName: string
   modelMaxContext: number
-  safeOutputMargin: number
-  recentKeepRounds: number
 }
 
 export const defaultModelConfig: ModelConfig = {
@@ -18,19 +16,43 @@ export const defaultModelConfig: ModelConfig = {
   apiKey: '',
   modelName: '',
   modelMaxContext: 128_000,
+}
+
+export type ContextManagementConfig = {
+  layeredEnabled: boolean
+  filterEnabled: boolean
+  rewriteEnabled: boolean
+  truncateEnabled: boolean
+  safeOutputMargin: number
+  recentKeepRounds: number
+  hotTokenBudget: number
+  warmTokenBudget: number
+  coldRecallTokenBudget: number
+}
+
+export const defaultContextManagementConfig: ContextManagementConfig = {
+  layeredEnabled: false,
+  filterEnabled: true,
+  rewriteEnabled: true,
+  truncateEnabled: true,
   safeOutputMargin: 16_000,
   recentKeepRounds: 5,
+  hotTokenBudget: 64_000,
+  warmTokenBudget: 32_000,
+  coldRecallTokenBudget: 8_000,
 }
 
 export type AppConfig = {
   modelConfigs: ModelConfig[]
   activeModelConfigId: string | null
+  contextManagement: ContextManagementConfig
   language: AppLanguage
 }
 
 export const defaultAppConfig: AppConfig = {
   modelConfigs: [],
   activeModelConfigId: null,
+  contextManagement: defaultContextManagementConfig,
   language: 'system',
 }
 
@@ -42,6 +64,8 @@ export type ContextMetrics = {
   modelMaxContext: number
   triggerThreshold: number
   compressionRatio: number
+  layered: boolean
+  recalled: boolean
   filtered: boolean
   rewritten: boolean
   truncated: boolean
@@ -65,6 +89,7 @@ export type ChatMessage = {
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
+  contextConfig?: ContextManagementConfig
 }
 
 export type AgentContextMessage = {
@@ -78,6 +103,7 @@ export type Conversation = {
   id: string
   title: string
   modelConfigId: string | null
+  contextConfigOverride: ContextManagementConfig | null
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
@@ -92,6 +118,7 @@ export type Project = {
   id: string
   name: string
   defaultModelConfigId: string | null
+  contextConfigOverride: ContextManagementConfig | null
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

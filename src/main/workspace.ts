@@ -6,22 +6,26 @@ import type {
   AssistantMessageBlock,
   ChatMessage,
   ContextCompressionNotice,
+  ContextManagementConfig,
   Conversation,
   ModelConfigSnapshot,
   Project,
   ProjectFolder,
 } from '../shared/types'
+import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 
-type StoredConversation = Omit<Conversation, 'agentMessages' | 'modelConfigId'> & {
+type StoredConversation = Omit<Conversation, 'agentMessages' | 'modelConfigId' | 'contextConfigOverride'> & {
   agentMessages?: Conversation['agentMessages']
   modelConfigId?: string | null
+  contextConfigOverride?: Partial<ContextManagementConfig> | null
 }
 
 type StoredProject = Omit<
   Project,
-  'defaultModelConfigId' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations'
+  'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations'
 > & {
   defaultModelConfigId?: string | null
+  contextConfigOverride?: Partial<ContextManagementConfig> | null
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
@@ -33,6 +37,23 @@ function getWorkspacePath(): string {
   return join(app.getPath('userData'), 'workspace.json')
 }
 
+function normalizeOverride(
+  value: Partial<ContextManagementConfig> | null | undefined,
+): ContextManagementConfig | null {
+  return value ? normalizeContextManagementConfig(value) : null
+}
+
+function validateOverride(contextConfig: ContextManagementConfig | null): ContextManagementConfig | null {
+  if (!contextConfig) {
+    return null
+  }
+  const normalized = normalizeContextManagementConfig(contextConfig)
+  if (!isValidContextManagementConfig(normalized)) {
+    throw new Error('Enter valid context settings')
+  }
+  return normalized
+}
+
 function normalizeProject(value: StoredProject): Project {
   const folders = value.folders.map((folder) =>
     typeof folder === 'string' ? { id: randomUUID(), path: folder } : folder,
@@ -41,10 +62,12 @@ function normalizeProject(value: StoredProject): Project {
   return {
     ...value,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
+    contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     folders,
     conversations: value.conversations.map((conversation) => ({
       ...conversation,
       modelConfigId: conversation.modelConfigId ?? null,
+      contextConfigOverride: normalizeOverride(conversation.contextConfigOverride),
       agentMessages:
         conversation.agentMessages ??
         conversation.messages.map(({ role, content }) => ({ role, content })),
@@ -64,10 +87,13 @@ async function loadProjects(): Promise<Project[]> {
     const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as StoredProject[]
     const needsMigration = stored.some((project) =>
       project.defaultModelConfigId === undefined ||
+      project.contextConfigOverride === undefined ||
       project.pythonEnvironmentFolderId === undefined ||
       project.folders.some((folder) => typeof folder === 'string') ||
       project.conversations.some((conversation) =>
-        conversation.modelConfigId === undefined || !conversation.agentMessages,
+        conversation.modelConfigId === undefined ||
+        conversation.contextConfigOverride === undefined ||
+        !conversation.agentMessages,
       ),
     )
     projects = stored.map(normalizeProject)
@@ -93,6 +119,7 @@ function createConversationRecord(index: number): Conversation {
     id: randomUUID(),
     title: `Conversation ${index}`,
     modelConfigId: null,
+    contextConfigOverride: null,
     messages: [],
     agentMessages: [],
   }
@@ -104,6 +131,14 @@ async function findProject(projectId: string): Promise<Project> {
     throw new Error('Project not found')
   }
   return project
+}
+
+function findConversation(project: Project, conversationId: string): Conversation {
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
+    throw new Error('Conversation not found')
+  }
+  return conversation
 }
 
 export async function getProjects(): Promise<Project[]> {
@@ -127,6 +162,7 @@ export async function createProject(
     id: randomUUID(),
     name: normalizedName,
     defaultModelConfigId,
+    contextConfigOverride: null,
     folders: [],
     pythonEnvironmentFolderId: null,
     conversations: [createConversationRecord(1)],
@@ -163,6 +199,16 @@ export async function setProjectModelConfig(
   return project
 }
 
+export async function setProjectContextConfig(
+  projectId: string,
+  contextConfig: ContextManagementConfig | null,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  project.contextConfigOverride = validateOverride(contextConfig)
+  await saveProjects()
+  return project
+}
+
 export async function createConversation(projectId: string): Promise<Project> {
   const project = await findProject(projectId)
   project.conversations.push(createConversationRecord(project.conversations.length + 1))
@@ -176,12 +222,18 @@ export async function setConversationModelConfig(
   modelConfigId: string | null,
 ): Promise<Project> {
   const project = await findProject(projectId)
-  const conversation = project.conversations.find((item) => item.id === conversationId)
-  if (!conversation) {
-    throw new Error('Conversation not found')
-  }
+  findConversation(project, conversationId).modelConfigId = modelConfigId
+  await saveProjects()
+  return project
+}
 
-  conversation.modelConfigId = modelConfigId
+export async function setConversationContextConfig(
+  projectId: string,
+  conversationId: string,
+  contextConfig: ContextManagementConfig | null,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  findConversation(project, conversationId).contextConfigOverride = validateOverride(contextConfig)
   await saveProjects()
   return project
 }
@@ -194,14 +246,12 @@ export async function addMessage(
   blocks?: AssistantMessageBlock[],
   compression?: ContextCompressionNotice,
   modelConfig?: ModelConfigSnapshot,
+  contextConfig?: ContextManagementConfig,
 ): Promise<Project> {
   const project = await findProject(projectId)
-  const conversation = project.conversations.find((item) => item.id === conversationId)
-  if (!conversation) {
-    throw new Error('Conversation not found')
-  }
+  const conversation = findConversation(project, conversationId)
 
-  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }
@@ -216,11 +266,7 @@ export async function saveConversationContext(
   context: Conversation['context'],
 ): Promise<Project> {
   const project = await findProject(projectId)
-  const conversation = project.conversations.find((item) => item.id === conversationId)
-  if (!conversation) {
-    throw new Error('Conversation not found')
-  }
-
+  const conversation = findConversation(project, conversationId)
   conversation.agentMessages = agentMessages
   conversation.context = context
   await saveProjects()

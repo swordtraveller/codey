@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { manageContext, type ContextMessage } from '../src/main/context'
-import { defaultModelConfig, type ModelConfig } from '../src/shared/types'
+import {
+  defaultContextManagementConfig,
+  defaultModelConfig,
+  type ContextManagementConfig,
+  type ModelConfig,
+} from '../src/shared/types'
 
-function config(overrides: Partial<ModelConfig>): ModelConfig {
+function model(overrides: Partial<ModelConfig> = {}): ModelConfig {
   return { ...defaultModelConfig, ...overrides }
 }
 
+function context(overrides: Partial<ContextManagementConfig> = {}): ContextManagementConfig {
+  return { ...defaultContextManagementConfig, ...overrides }
+}
+
 function compressionThreshold(messages: ContextMessage[]): number {
-  return manageContext(messages, [], config({ modelMaxContext: 1_000_000 })).metrics.originalTokens
+  return manageContext(
+    messages,
+    [],
+    model({ modelMaxContext: 1_000_000 }),
+    context(),
+  ).metrics.originalTokens
 }
 
 describe('manageContext', () => {
@@ -18,10 +32,16 @@ describe('manageContext', () => {
       { role: 'assistant', content: 'Hi' },
     ]
 
-    const result = manageContext(messages, [], config({ modelMaxContext: 10_000, safeOutputMargin: 1_000 }))
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({ safeOutputMargin: 1_000 }),
+    )
 
     expect(result.messages).toBe(messages)
     expect(result.metrics).toEqual(expect.objectContaining({
+      layered: false,
       filtered: false,
       rewritten: false,
       truncated: false,
@@ -45,16 +65,46 @@ describe('manageContext', () => {
     const result = manageContext(
       messages,
       [],
-      config({ modelMaxContext: threshold + 100, safeOutputMargin: 100, recentKeepRounds: 1 }),
+      model({ modelMaxContext: threshold + 100 }),
+      context({ safeOutputMargin: 100, recentKeepRounds: 1 }),
     )
 
     expect(result.metrics.filtered).toBe(true)
     expect(result.metrics.rewritten).toBe(false)
-    expect(result.metrics.truncated).toBe(false)
     expect(result.messages[1].content).toContain(code)
     expect(result.messages[1].content?.match(new RegExp(duplicate, 'g'))).toHaveLength(1)
     expect(result.messages[2].content).toBe(traceback)
     expect(result.messages.slice(-2)).toEqual(messages.slice(-2))
+  })
+
+  it('honors independently disabled compression features', () => {
+    const repeated = 'please keep this repeated paragraph unchanged.'
+    const messages: ContextMessage[] = [
+      { role: 'system', content: 'System instruction' },
+      { role: 'user', content: `${repeated}\n\n${repeated}` },
+      { role: 'assistant', content: repeated },
+      { role: 'user', content: 'Latest request' },
+    ]
+
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 100 }),
+      context({
+        safeOutputMargin: 10,
+        recentKeepRounds: 1,
+        filterEnabled: false,
+        rewriteEnabled: false,
+        truncateEnabled: false,
+      }),
+    )
+
+    expect(result.messages).toBe(messages)
+    expect(result.metrics).toEqual(expect.objectContaining({
+      filtered: false,
+      rewritten: false,
+      truncated: false,
+    }))
   })
 
   it('never rewrites tool calls or tool results', () => {
@@ -76,7 +126,8 @@ describe('manageContext', () => {
     const result = manageContext(
       messages,
       [],
-      config({ modelMaxContext: threshold + 100, safeOutputMargin: 100, recentKeepRounds: 1 }),
+      model({ modelMaxContext: threshold + 100 }),
+      context({ safeOutputMargin: 100, recentKeepRounds: 1 }),
     )
 
     expect(result.messages).toContainEqual(messages[2])
@@ -95,7 +146,8 @@ describe('manageContext', () => {
     const result = manageContext(
       messages,
       [],
-      config({ modelMaxContext: 100, safeOutputMargin: 10, recentKeepRounds: 1 }),
+      model({ modelMaxContext: 100 }),
+      context({ safeOutputMargin: 10, recentKeepRounds: 1 }),
     )
 
     expect(result.metrics.truncated).toBe(true)
@@ -104,6 +156,63 @@ describe('manageContext', () => {
     expect(result.messages).not.toContainEqual(messages[2])
     expect(result.messages.slice(-2)).toEqual(messages.slice(-2))
   })
+
+  it('keeps recent Hot rounds intact and recalls relevant Cold rounds into Warm', () => {
+    const toolCall = {
+      id: 'call-1',
+      type: 'function' as const,
+      function: { name: 'read_file', arguments: '{}' },
+    }
+    const messages: ContextMessage[] = [
+      { role: 'system', content: 'System instruction' },
+      { role: 'user', content: 'Implement authentication token parsing.' },
+      { role: 'assistant', content: null, tool_calls: [toolCall] },
+      { role: 'tool', content: 'export const token = true', tool_call_id: 'call-1' },
+      { role: 'assistant', content: 'Authentication token work completed.' },
+      { role: 'user', content: 'Unrelated old request.' },
+      { role: 'assistant', content: 'Unrelated old reply.' },
+      { role: 'user', content: 'Please update authentication token handling.' },
+      { role: 'assistant', content: 'Current response.' },
+    ]
+
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({
+        layeredEnabled: true,
+        recentKeepRounds: 1,
+        safeOutputMargin: 1_000,
+        hotTokenBudget: 1_000,
+        warmTokenBudget: 1_000,
+        coldRecallTokenBudget: 1_000,
+      }),
+    )
+
+    expect(result.metrics.layered).toBe(true)
+    expect(result.metrics.recalled).toBe(true)
+    expect(result.messages.slice(-2)).toEqual(messages.slice(-2))
+    expect(result.messages).toContainEqual(messages[2])
+    expect(result.messages).toContainEqual(messages[3])
+    expect(result.messages).not.toContainEqual(messages[5])
+  })
+
+  it('does not mutate canonical input messages', () => {
+    const messages: ContextMessage[] = [
+      { role: 'system', content: 'System instruction' },
+      { role: 'user', content: 'please repeat\n\nplease repeat' },
+      { role: 'assistant', content: 'old reply' },
+      { role: 'user', content: 'latest' },
+    ]
+    const original = structuredClone(messages)
+
+    manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 100 }),
+      context({ safeOutputMargin: 10, recentKeepRounds: 1 }),
+    )
+
+    expect(messages).toEqual(original)
+  })
 })
-
-

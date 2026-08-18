@@ -8,6 +8,7 @@ import {
   DialogTitle,
   Field,
   Select,
+  Switch,
   FluentProvider,
   Input,
   Textarea,
@@ -18,9 +19,10 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
-import type { AppLanguage } from '../../shared/types'
+import type { AppLanguage, ContextManagementConfig } from '../../shared/types'
 import {
   defaultAppConfig,
+  defaultContextManagementConfig,
   defaultModelConfig,
   type AssistantMessageBlock,
   type ModelConfig,
@@ -55,6 +57,14 @@ class MarkdownErrorBoundary extends Component<{ fallback: ReactNode; children: R
 
 function copyText(content: string): void {
   void navigator.clipboard?.writeText(content)
+}
+
+function isValidContextConfig(value: ContextManagementConfig): boolean {
+  return Number.isInteger(value.safeOutputMargin) && value.safeOutputMargin >= 1 &&
+    Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
+    Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
+    Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
+    Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
 }
 
 type TurnResult = 'processing' | 'normal' | 'timeout' | 'other'
@@ -132,6 +142,100 @@ function AssistantContent({ content }: { content: string }): React.JSX.Element {
     </div>
   )
 }
+function ContextSettingsFields({
+  value,
+  disabled = false,
+  onChange,
+}: {
+  value: ContextManagementConfig
+  disabled?: boolean
+  onChange: (patch: Partial<ContextManagementConfig>) => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+
+  return (
+    <div className="context-settings-fields">
+      <Switch
+        checked={value.layeredEnabled}
+        disabled={disabled}
+        label={t('layeredContext')}
+        onChange={(_, data) => onChange({ layeredEnabled: data.checked })}
+      />
+      <Switch
+        checked={value.filterEnabled}
+        disabled={disabled}
+        label={t('contextFilter')}
+        onChange={(_, data) => onChange({ filterEnabled: data.checked })}
+      />
+      <Switch
+        checked={value.rewriteEnabled}
+        disabled={disabled}
+        label={t('contextRewrite')}
+        onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
+      />
+      <Switch
+        checked={value.truncateEnabled}
+        disabled={disabled}
+        label={t('contextTruncate')}
+        onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
+      />
+      <Field label={t('outputTokenMargin')} required>
+        <Input
+          disabled={disabled}
+          min={1}
+          step={1000}
+          type="number"
+          value={String(value.safeOutputMargin)}
+          onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
+        />
+      </Field>
+      <Field label={t('recentRounds')} required>
+        <Input
+          disabled={disabled}
+          max={20}
+          min={1}
+          type="number"
+          value={String(value.recentKeepRounds)}
+          onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
+        />
+      </Field>
+      {value.layeredEnabled && (
+        <div className="context-budgets">
+          <Field label={t('hotTokenBudget')} required>
+            <Input
+              disabled={disabled}
+              min={1000}
+              step={1000}
+              type="number"
+              value={String(value.hotTokenBudget)}
+              onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
+            />
+          </Field>
+          <Field label={t('warmTokenBudget')} required>
+            <Input
+              disabled={disabled}
+              min={0}
+              step={1000}
+              type="number"
+              value={String(value.warmTokenBudget)}
+              onChange={(_, data) => onChange({ warmTokenBudget: Number(data.value) })}
+            />
+          </Field>
+          <Field label={t('coldRecallTokenBudget')} required>
+            <Input
+              disabled={disabled}
+              min={0}
+              step={1000}
+              type="number"
+              value={String(value.coldRecallTokenBudget)}
+              onChange={(_, data) => onChange({ coldRecallTokenBudget: Number(data.value) })}
+            />
+          </Field>
+        </div>
+      )}
+    </div>
+  )
+}
 export function App(): React.JSX.Element {
   const { t } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
@@ -141,6 +245,11 @@ export function App(): React.JSX.Element {
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [contextDialogOpen, setContextDialogOpen] = useState(false)
+  const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
+  const [contextProjectId, setContextProjectId] = useState('')
+  const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
+  const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
@@ -166,6 +275,8 @@ export function App(): React.JSX.Element {
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
   const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
+  const effectiveContextConfig = activeConversation?.contextConfigOverride ??
+    activeProject?.contextConfigOverride ?? config.contextManagement
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
   const context = activeConversation?.context
   const contextStatus = context
@@ -251,6 +362,60 @@ export function App(): React.JSX.Element {
     setSettingsOpen(true)
   }
 
+  function updateAppContextConfig(patch: Partial<ContextManagementConfig>): void {
+    setConfigDraft((current) => ({
+      ...current,
+      contextManagement: { ...current.contextManagement, ...patch },
+    }))
+  }
+
+  function updateContextDraft(patch: Partial<ContextManagementConfig>): void {
+    setContextDraft((current) => ({ ...current, ...patch }))
+  }
+
+  function openContextSettings(scope: 'project' | 'conversation', project = activeProject): void {
+    if (!project || sending) {
+      return
+    }
+    const override = scope === 'project'
+      ? project.contextConfigOverride
+      : activeConversation?.contextConfigOverride
+    const inherited = scope === 'project'
+      ? config.contextManagement
+      : project.contextConfigOverride ?? config.contextManagement
+    setContextScope(scope)
+    setContextProjectId(project.id)
+    setContextOverrideEnabled(Boolean(override))
+    setContextDraft({ ...(override ?? inherited) })
+    setSettingsError('')
+    setContextDialogOpen(true)
+    setOpenProjectMenuId(null)
+  }
+
+  async function saveContextSettings(): Promise<void> {
+    const targetProject = projects.find((project) => project.id === contextProjectId)
+    if (!targetProject || sending) {
+      return
+    }
+    setSaving(true)
+    setSettingsError('')
+    try {
+      const value = contextOverrideEnabled ? contextDraft : null
+      const updated = contextScope === 'project'
+        ? await window.codey.setProjectContextConfig(targetProject.id, value)
+        : activeConversation
+          ? await window.codey.setConversationContextConfig(targetProject.id, activeConversation.id, value)
+          : null
+      if (updated) {
+        replaceProject(updated)
+      }
+      setContextDialogOpen(false)
+    } catch {
+      setSettingsError(t('unableChangeContextConfig'))
+    } finally {
+      setSaving(false)
+    }
+  }
   function updateSelectedModel(patch: Partial<ModelConfig>): void {
     const selectedId = configDraft.activeModelConfigId
     if (!selectedId) {
@@ -487,12 +652,12 @@ export function App(): React.JSX.Element {
     !model.baseUrl.trim() ||
     !model.apiKey.trim() ||
     !model.modelName.trim() ||
-    model.modelMaxContext < 1_000 ||
-    model.safeOutputMargin < 1 ||
-    model.safeOutputMargin >= model.modelMaxContext ||
-    model.recentKeepRounds < 1 ||
-    model.recentKeepRounds > 20,
+    model.modelMaxContext < 1_000,
   )
+  const minimumModelContext = Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext))
+  const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement) ||
+    configDraft.contextManagement.safeOutputMargin >= minimumModelContext
+  const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -554,6 +719,9 @@ export function App(): React.JSX.Element {
                           ))}
                         </Select>
                       </label>
+                      <Button appearance="subtle" size="small" disabled={sending} onClick={() => openContextSettings('project', project)}>
+                        {t('contextSettings')}
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -629,6 +797,11 @@ export function App(): React.JSX.Element {
                 </label>
               ) : (
                 <span className="status">{t('notConfigured')}</span>
+              )}
+              {activeConversation && (
+                <Button appearance="subtle" size="small" disabled={sending} onClick={() => openContextSettings('conversation')}>
+                  {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
+                </Button>
               )}
               {context && contextStatus && (
                 <span
@@ -887,24 +1060,14 @@ export function App(): React.JSX.Element {
                     onChange={(_, data) => updateSelectedModel({ modelMaxContext: Number(data.value) })}
                   />
                 </Field>
-                <Field label={t('outputTokenMargin')} required>
-                  <Input
-                    min={1}
-                    step={1000}
-                    type="number"
-                    value={String(selectedModel?.safeOutputMargin ?? '')}
-                    onChange={(_, data) => updateSelectedModel({ safeOutputMargin: Number(data.value) })}
-                  />
-                </Field>
-                <Field label={t('recentRounds')} required>
-                  <Input
-                    max={20}
-                    min={1}
-                    type="number"
-                    value={String(selectedModel?.recentKeepRounds ?? '')}
-                    onChange={(_, data) => updateSelectedModel({ recentKeepRounds: Number(data.value) })}
-                  />
-                </Field>
+              </section>
+              <section className="settings-group">
+                <h2>{t('contextSettings')}</h2>
+                <ContextSettingsFields
+                  disabled={sending}
+                  value={configDraft.contextManagement}
+                  onChange={updateAppContextConfig}
+                />
               </section>
               <section className="settings-group">
                 <h2>{t('languageSettings')}</h2>
@@ -930,9 +1093,41 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || saving}
+                disabled={invalidModelConfig || invalidAppContextConfig || sending || saving}
                 onClick={() => void saveSettings()}
               >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={contextDialogOpen} onOpenChange={(_, data) => setContextDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              {contextScope === 'project' ? t('projectContextSettings') : t('conversationContextSettings')}
+            </DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Switch
+                checked={contextOverrideEnabled}
+                disabled={sending}
+                label={contextScope === 'project' ? t('overrideApplicationContext') : t('overrideProjectContext')}
+                onChange={(_, data) => setContextOverrideEnabled(data.checked)}
+              />
+              <ContextSettingsFields
+                disabled={sending || !contextOverrideEnabled}
+                value={contextDraft}
+                onChange={updateContextDraft}
+              />
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setContextDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button appearance="primary" disabled={sending || saving || invalidContextOverride} onClick={() => void saveContextSettings()}>
                 {saving ? t('saving') : t('save')}
               </Button>
             </DialogActions>

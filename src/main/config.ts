@@ -7,16 +7,21 @@ import {
   defaultModelConfig,
   type AppConfig,
   type AppLanguage,
+  type ContextManagementConfig,
   type ModelConfig,
 } from '../shared/types'
+import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 
 type StoredModelConfig = Partial<ModelConfig> & {
   encrypted?: boolean
+  safeOutputMargin?: number
+  recentKeepRounds?: number
 }
 
 type StoredAppConfig = {
   modelConfigs?: StoredModelConfig[]
   activeModelConfigId?: string | null
+  contextManagement?: Partial<ContextManagementConfig>
   language?: AppLanguage
 }
 
@@ -45,8 +50,6 @@ function readModelConfig(stored: StoredModelConfig): ModelConfig {
     apiKey: apiKey ?? '',
     modelName: stored.modelName ?? '',
     modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
-    safeOutputMargin: stored.safeOutputMargin ?? defaultModelConfig.safeOutputMargin,
-    recentKeepRounds: stored.recentKeepRounds ?? defaultModelConfig.recentKeepRounds,
   }
 }
 
@@ -58,8 +61,6 @@ function normalizeModelConfig(config: ModelConfig): ModelConfig {
     apiKey: config.apiKey.trim(),
     modelName: config.modelName.trim(),
     modelMaxContext: Math.floor(config.modelMaxContext),
-    safeOutputMargin: Math.floor(config.safeOutputMargin),
-    recentKeepRounds: Math.floor(config.recentKeepRounds),
   }
 }
 
@@ -73,13 +74,7 @@ function isValidModelConfig(config: ModelConfig): boolean {
       config.apiKey &&
       config.modelName &&
       Number.isInteger(config.modelMaxContext) &&
-      Number.isInteger(config.safeOutputMargin) &&
-      Number.isInteger(config.recentKeepRounds) &&
-      config.modelMaxContext >= 1_000 &&
-      config.safeOutputMargin >= 1 &&
-      config.safeOutputMargin < config.modelMaxContext &&
-      config.recentKeepRounds >= 1 &&
-      config.recentKeepRounds <= 20
+      config.modelMaxContext >= 1_000
     )
   } catch {
     return false
@@ -112,9 +107,12 @@ export async function readConfig(): Promise<AppConfig> {
       const activeModelConfigId = modelConfigs.some((model) => model.id === stored.activeModelConfigId)
         ? (stored.activeModelConfigId ?? null)
         : (modelConfigs[0]?.id ?? null)
-      const config = { modelConfigs, activeModelConfigId, language }
-      const needsMigration = stored.modelConfigs.some((model) => !model.id || !model.name) ||
-        stored.activeModelConfigId !== activeModelConfigId
+      const legacyModel = stored.modelConfigs.find((model) => model.id === activeModelConfigId) ?? stored.modelConfigs[0]
+      const contextManagement = normalizeContextManagementConfig(stored.contextManagement, legacyModel)
+      const config = { modelConfigs, activeModelConfigId, contextManagement, language }
+      const needsMigration = !stored.contextManagement || stored.modelConfigs.some((model) =>
+        !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
+      ) || stored.activeModelConfigId !== activeModelConfigId
       if (needsMigration) {
         await writeConfig(config)
       }
@@ -123,13 +121,14 @@ export async function readConfig(): Promise<AppConfig> {
 
     const hasLegacyModel = Boolean(stored.baseUrl || stored.apiKey || stored.modelName)
     if (!hasLegacyModel) {
-      return { ...defaultAppConfig, language }
+      return { ...defaultAppConfig, contextManagement: normalizeContextManagementConfig(stored.contextManagement), language }
     }
 
     const model = readModelConfig(stored)
     const migrated = {
       modelConfigs: [model],
       activeModelConfigId: model.id,
+      contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
       language,
     }
     await writeConfig(migrated)
@@ -144,6 +143,7 @@ export async function readConfig(): Promise<AppConfig> {
 
 export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const modelConfigs = config.modelConfigs.map(normalizeModelConfig)
+  const contextManagement = normalizeContextManagementConfig(config.contextManagement)
   const ids = new Set(modelConfigs.map((model) => model.id))
   const activeModelConfigId = config.activeModelConfigId ?? modelConfigs[0]?.id ?? null
 
@@ -152,7 +152,9 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     ids.size !== modelConfigs.length ||
     modelConfigs.some((model) => !isValidModelConfig(model)) ||
     !activeModelConfigId ||
-    !ids.has(activeModelConfigId)
+    !ids.has(activeModelConfigId) ||
+    !isValidContextManagementConfig(contextManagement) ||
+    contextManagement.safeOutputMargin >= Math.min(...modelConfigs.map((model) => model.modelMaxContext))
   ) {
     throw new Error('Enter valid model and context settings')
   }
@@ -160,6 +162,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const normalized: AppConfig = {
     modelConfigs,
     activeModelConfigId,
+    contextManagement,
     language: isAppLanguage(config.language) ? config.language : defaultAppConfig.language,
   }
   await writeConfig(normalized)

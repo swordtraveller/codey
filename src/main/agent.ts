@@ -2,6 +2,7 @@ import type {
   AgentContextMessage,
   AssistantMessageBlock,
   ContextCompressionNotice,
+  ContextManagementConfig,
   ContextMetrics,
   ModelConfig,
   Project,
@@ -58,6 +59,8 @@ function mergeContextMetrics(
     ...next,
     originalTokens,
     compressionRatio: next.compressedTokens ? originalTokens / next.compressedTokens : 1,
+    layered: current.layered || next.layered,
+    recalled: current.recalled || next.recalled,
     filtered: current.filtered || next.filtered,
     rewritten: current.rewritten || next.rewritten,
     truncated: current.truncated || next.truncated,
@@ -384,6 +387,7 @@ async function requestCompletion(
 export async function develop(
   project: Project,
   config: ModelConfig,
+  contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
 ): Promise<AgentResult> {
@@ -413,7 +417,7 @@ export async function develop(
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
-  let apiMessages = [systemMessage, ...toApiMessages(agentMessages)]
+  const history = toApiMessages(agentMessages)
   let context: ContextMetrics | undefined
   const blocks: AssistantMessageBlock[] = []
   const compressionNotices: ContextCompressionNotice[] = []
@@ -422,10 +426,12 @@ export async function develop(
 
   try {
     for (let turn = 0; turn < 12; turn += 1) {
-      const managed = manageContext(apiMessages, tools, config)
-      apiMessages = managed.messages
+      const managed = manageContext([systemMessage, ...history], tools, config, contextConfig)
+      const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
+        managed.metrics.layered && managed.metrics.compressedTokens < managed.metrics.originalTokens && 'layered',
+        managed.metrics.recalled && 'cold recall',
         managed.metrics.filtered && 'filter',
         managed.metrics.rewritten && 'rewrite',
         managed.metrics.truncated && 'truncate',
@@ -443,7 +449,7 @@ export async function develop(
       }
       let response: ChatResponse
       try {
-        response = await requestCompletion(config, apiMessages, tools, (message) => {
+        response = await requestCompletion(config, requestMessages, tools, (message) => {
           onBlocks?.([...blocks, ...toMessageBlocks(message)])
         })
       } catch (error) {
@@ -475,12 +481,12 @@ export async function develop(
         const block = { type: 'content' as const, content: reply }
         blocks.push(block)
         onBlocks?.([...blocks])
-        apiMessages.push({ role: 'assistant', content: reply })
+        history.push({ role: 'assistant', content: reply })
         return {
           reply,
           blocks,
           writtenFiles,
-          agentMessages: toStoredMessages(apiMessages),
+          agentMessages: toStoredMessages(history),
           context,
           compressionNotices,
         }
@@ -489,7 +495,7 @@ export async function develop(
       const responseBlocks = toMessageBlocks(message)
       blocks.push(...responseBlocks)
       onBlocks?.([...blocks])
-      apiMessages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
+      history.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
       for (const toolCall of toolCalls) {
         let content: string
         try {
@@ -498,7 +504,7 @@ export async function develop(
         } catch (error) {
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
-        apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content })
+        history.push({ role: 'tool', tool_call_id: toolCall.id, content })
       }
     }
     throw new Error('The model exceeded the tool-call limit')
@@ -506,7 +512,7 @@ export async function develop(
     return {
       blocks,
       writtenFiles,
-      agentMessages: toStoredMessages(apiMessages),
+      agentMessages: toStoredMessages(history),
       context,
       compressionNotices,
       error: error instanceof Error ? error.message : 'Request failed',

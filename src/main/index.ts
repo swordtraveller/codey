@@ -1,8 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
-import type { AppConfig, AssistantMessageBlock, DevelopmentProgress, DevelopmentResult } from '../shared/types'
+import type {
+  AppConfig,
+  AssistantMessageBlock,
+  ContextManagementConfig,
+  DevelopmentProgress,
+  DevelopmentResult,
+} from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
+import { resolveContextManagementConfig } from './context-config'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
@@ -12,9 +19,17 @@ import {
   getProject,
   getProjects,
   saveConversationContext,
+  setConversationContextConfig,
   setConversationModelConfig,
+  setProjectContextConfig,
   setProjectModelConfig,
 } from './workspace'
+
+const activeDevelopments = new Set<string>()
+
+function developmentKey(projectId: string, conversationId: string): string {
+  return `${projectId}:${conversationId}`
+}
 
 async function validateModelConfigId(modelConfigId: string | null): Promise<void> {
   if (!modelConfigId) {
@@ -52,6 +67,12 @@ async function developProject(
   if (!modelConfig) {
     return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
   }
+  const contextConfig = structuredClone(
+    resolveContextManagementConfig(appConfig, project, conversation),
+  )
+  if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
+    return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
+  }
 
   project = await addMessage(
     projectId,
@@ -61,6 +82,7 @@ async function developProject(
     undefined,
     undefined,
     createModelConfigSnapshot(modelConfig),
+    contextConfig,
   )
   const updatedConversation = project.conversations.find((item) => item.id === conversationId)
   if (!updatedConversation) {
@@ -70,6 +92,7 @@ async function developProject(
   const result = await develop(
     project,
     modelConfig,
+    contextConfig,
     [
       ...updatedConversation.agentMessages,
       { role: 'user', content: normalizedContent },
@@ -131,7 +154,12 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
-  ipcMain.handle('config:save', (_event, config: AppConfig) => saveConfig(config))
+  ipcMain.handle('config:save', (_event, config: AppConfig) => {
+    if (activeDevelopments.size > 0) {
+      throw new Error('Context settings cannot be changed during a conversation round')
+    }
+    return saveConfig(config)
+  })
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('projects:create', async (_event, name: string) => {
     const config = await readConfig()
@@ -151,6 +179,15 @@ app.whenReady().then(() => {
       return setProjectModelConfig(projectId, modelConfigId)
     },
   )
+  ipcMain.handle(
+    'projects:set-context-config',
+    (_event, projectId: string, contextConfig: ContextManagementConfig | null) => {
+      if (activeDevelopments.size > 0) {
+        throw new Error('Context settings cannot be changed during a conversation round')
+      }
+      return setProjectContextConfig(projectId, contextConfig)
+    },
+  )
   ipcMain.handle('conversations:create', (_event, projectId: string) =>
     createConversation(projectId),
   )
@@ -167,14 +204,38 @@ app.whenReady().then(() => {
     },
   )
   ipcMain.handle(
+    'conversations:set-context-config',
+    (
+      _event,
+      projectId: string,
+      conversationId: string,
+      contextConfig: ContextManagementConfig | null,
+    ) => {
+      if (activeDevelopments.has(developmentKey(projectId, conversationId))) {
+        throw new Error('Context settings cannot be changed during a conversation round')
+      }
+      return setConversationContextConfig(projectId, conversationId, contextConfig)
+    },
+  )
+  ipcMain.handle(
     'development:send',
-    (event, projectId: string, conversationId: string, content: string) =>
-      developProject(projectId, conversationId, content, (blocks) => {
-        if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, blocks }
-          event.sender.send('development:progress', progress)
-        }
-      }),
+    async (event, projectId: string, conversationId: string, content: string) => {
+      const key = developmentKey(projectId, conversationId)
+      if (activeDevelopments.has(key)) {
+        return { writtenFiles: [], error: 'A conversation round is already running' }
+      }
+      activeDevelopments.add(key)
+      try {
+        return await developProject(projectId, conversationId, content, (blocks) => {
+          if (!event.sender.isDestroyed()) {
+            const progress: DevelopmentProgress = { projectId, conversationId, blocks }
+            event.sender.send('development:progress', progress)
+          }
+        })
+      } finally {
+        activeDevelopments.delete(key)
+      }
+    },
   )
 
   createWindow()
