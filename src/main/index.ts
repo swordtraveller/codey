@@ -9,7 +9,6 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentResult,
-  ProtectionLevel,
 } from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
@@ -19,12 +18,13 @@ import {
   demoteContext,
   getContextDebugOverview,
   getContextDebugRevision,
+  getRememberedWarmMessages,
   persistContextDebugMessages,
   readColdContextMessage,
   readContextSnapshotMessage,
   rememberSnapshot,
   searchColdContext,
-  setContextProtection,
+  setContextPin,
   simulateTokenLimit,
 } from './context-debug'
 import {
@@ -118,11 +118,20 @@ async function validateModelConfigId(modelConfigId: string | null): Promise<void
   }
 }
 
-function normalizeProtection(
+function normalizeContextMessage(
   message: Awaited<ReturnType<typeof getProject>>['conversations'][number]['agentMessages'][number],
+  now: string,
 ) {
-  if (message.role === 'tool' || message.toolCalls?.length) return 'partial' as const
-  return message.protection ?? (message.manualProtected ? 'full' as const : 'none' as const)
+  const id = message.id ?? randomUUID()
+  const { protection, manualProtected, ...current } = message
+  return {
+    ...current,
+    id,
+    createdAt: message.createdAt ?? now,
+    pinnedToHot: message.pinnedToHot === true,
+    representation: message.representation ?? 'original',
+    truthRefs: message.truthRefs?.length ? message.truthRefs : [id],
+  }
 }
 
 async function prepareContextDebugStorage(projectId: string, conversationId: string): Promise<void> {
@@ -130,16 +139,10 @@ async function prepareContextDebugStorage(projectId: string, conversationId: str
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) throw new Error('Conversation not found')
   const now = new Date().toISOString()
-  const normalized = conversation.agentMessages.map((message) => ({
-    ...message,
-    id: message.id ?? randomUUID(),
-    createdAt: message.createdAt ?? now,
-    protection: normalizeProtection(message),
-  }))
+  const normalized = conversation.agentMessages.map((message) => normalizeContextMessage(message, now))
   await updateConversationAgentMessages(projectId, conversationId, () => normalized)
   await ensureConversationMessages(projectId, conversationId, normalized)
 }
-
 async function developProject(
   projectId: string,
   conversationId: string,
@@ -189,6 +192,7 @@ async function developProject(
         conversationId,
         contextConfig,
         normalizedContent,
+        getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
   const storedHistory = persistedHistory.length > 0
@@ -205,8 +209,9 @@ async function developProject(
     onBlocks,
     (managed) => {
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
-      rememberSnapshot(projectId, conversationId, snapshot, managed.messages)
+      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
+    { conversationId },
   )
   project = await saveConversationContext(
     projectId,
@@ -215,7 +220,7 @@ async function developProject(
     result.context,
   )
   try {
-    await persistContextDebugMessages(projectId, conversationId, result.agentMessages)
+    await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
   }
@@ -369,8 +374,8 @@ app.whenReady().then(() => {
     readContextSnapshotMessage(projectId, conversationId, messageId))
   ipcMain.handle('context-debug:search', (_event, projectId: string, conversationId: string, query: string) =>
     runDebugOperation(projectId, conversationId, () => searchColdContext(projectId, conversationId, query)))
-  ipcMain.handle('context-debug:set-protection', (_event, projectId: string, conversationId: string, messageId: string, protection: ProtectionLevel) =>
-    runDebugOperation(projectId, conversationId, () => setContextProtection(projectId, conversationId, messageId, protection)))
+  ipcMain.handle('context-debug:set-pin', (_event, projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
+    runDebugOperation(projectId, conversationId, () => setContextPin(projectId, conversationId, messageId, pinnedToHot)))
   ipcMain.handle('context-debug:demote', (_event, projectId: string, conversationId: string, messageId?: string) =>
     runDebugOperation(projectId, conversationId, () => demoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:simulate', (_event, projectId: string, conversationId: string, requestTokens: number) =>

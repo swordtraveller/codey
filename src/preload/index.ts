@@ -4,7 +4,6 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
-  ProtectionLevel,
 } from '../shared/types'
 
 contextBridge.exposeInMainWorld(
@@ -75,18 +74,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:read-layer', projectId, conversationId, messageId),
     searchColdContext: (projectId: string, conversationId: string, query: string) =>
       ipcRenderer.invoke('context-debug:search', projectId, conversationId, query),
-    setContextProtection: (
-      projectId: string,
-      conversationId: string,
-      messageId: string,
-      protection: ProtectionLevel,
-    ) => ipcRenderer.invoke(
-      'context-debug:set-protection',
-      projectId,
-      conversationId,
-      messageId,
-      protection,
-    ),
+    setContextPin: (projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
+      ipcRenderer.invoke('context-debug:set-pin', projectId, conversationId, messageId, pinnedToHot),
     demoteContext: (projectId: string, conversationId: string, messageId?: string) =>
       ipcRenderer.invoke('context-debug:demote', projectId, conversationId, messageId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>

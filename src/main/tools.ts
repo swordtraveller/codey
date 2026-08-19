@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Project, ProjectFolder } from '../shared/types'
+import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
   gitAdd,
   gitCommit,
@@ -45,6 +46,8 @@ type ToolArguments = {
   message?: string
   staged?: boolean
   max_count?: number
+  ids?: string[]
+  limit?: number
 }
 
 type TreeNode = {
@@ -341,12 +344,32 @@ export async function runAgentTool(
   project: Project,
   toolCall: ToolCall,
   writtenFiles: string[],
+  runtime?: { conversationId: string },
 ): Promise<string> {
   let args: ToolArguments
   try {
     args = JSON.parse(toolCall.function.arguments) as ToolArguments
   } catch {
     throw new Error('Tool arguments must be valid JSON')
+  }
+  if (toolCall.function.name === 'context_search') {
+    if (!runtime || typeof args.query !== 'string') throw new Error('conversation context runtime and query are required')
+    const matches = await searchConversationContext(project.id, runtime.conversationId, args.query, args.limit ?? 10)
+    return stringifyResult({ matches: matches.map(({ id, kind, role, createdAt, preview, tokenCount, truthRefs, compressionMethod }) => ({ id, kind, role, createdAt, preview, tokenCount, truthRefs, compressionMethod })) })
+  }
+  if (toolCall.function.name === 'context_read') {
+    if (!runtime || !Array.isArray(args.ids) || args.ids.some((id) => typeof id !== 'string')) {
+      throw new Error('conversation context runtime and ids are required')
+    }
+    const messages = await readContextRecords(project.id, runtime.conversationId, args.ids)
+    return stringifyResult({ records: messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      representation: message.representation ?? 'original',
+      truthRefs: message.truthRefs ?? [],
+      createdAt: message.createdAt,
+    })) })
   }
   if (toolCall.function.name === 'git_status') {
     if (typeof args.folder_id !== 'string') throw new Error('folder_id is required')
@@ -511,6 +534,8 @@ export function createAgentTools(project: Project): object[] {
   }
 
   return [
+    { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
     { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },

@@ -2,7 +2,6 @@ import {
   Button,
   FluentProvider,
   Input,
-  Select,
   Spinner,
   webLightTheme,
 } from '@fluentui/react-components'
@@ -15,7 +14,6 @@ import type {
   ContextDebugMessage,
   ContextDebugOverview,
   ContextLayerItem,
-  ProtectionLevel,
   TokenLimitSimulation,
 } from '../../shared/types'
 
@@ -144,7 +142,7 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
 
   function layerCard(item: ContextLayerItem, layer: Layer): React.JSX.Element {
     const full = expanded[item.id]
-    const immutable = item.source === 'system' || item.protectionReasons.includes('tool')
+    const immutable = item.source === 'system'
     return (
       <article className="context-debug-message" key={item.id}>
         <div className="context-debug-message-head">
@@ -153,36 +151,31 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
         </div>
         <div className="context-debug-tags">
           <span>{t(item.source)}</span>
-          <span>{t(`protection_${item.protection}`)}</span>
-          {item.compressed && <span>{t('compressed')}</span>}
+          <span>{t(`region_${item.region}`)}</span>
+          <span>{t(`representation_${item.representation}`)}</span>
+          {item.pinnedToHot && <span>{t('pinnedToHot')}</span>}
           {item.pendingDemotion && <span>{t('pendingDemotion')}</span>}
         </div>
         <time>{formatTime(item.createdAt)}</time>
         <p>{item.preview || '—'}</p>
+        {item.truthRefs.length > 0 && <code className="context-debug-pointer">{t('truthReferences')}: {item.truthRefs.join(', ')}</code>}
         {full && <pre className="context-debug-full">{messageText(full)}</pre>}
         <div className="context-debug-actions">
           <Button appearance="subtle" size="small" onClick={() => void readMessage(item.id, layer)}>
-            {full ? t('collapse') : t('readOriginal')}
+            {full ? t('collapse') : t(item.representation === 'summary' ? 'readSummary' : 'readOriginal')}
           </Button>
-          <Select
-            aria-label={t('protection')}
-            disabled={!idle || busy || immutable}
-            size="small"
-            value={item.protection}
-            onChange={(_, data) => void run(() => window.codey.setContextProtection(
-              projectId,
-              conversationId,
-              item.id,
-              data.value as ProtectionLevel,
-            ))}
-          >
-            <option value="none">{t('protection_none')}</option>
-            <option value="partial">{t('protection_partial')}</option>
-            <option value="full">{t('protection_full')}</option>
-          </Select>
-          {layer === 'hot' && item.source !== 'system' && (
+          {!immutable && (
             <Button
-              disabled={!idle || busy || item.protection === 'full'}
+              size="small"
+              disabled={!idle || busy || item.representation === 'summary'}
+              onClick={() => void run(() => window.codey.setContextPin(projectId, conversationId, item.id, !item.pinnedToHot))}
+            >
+              {t(item.pinnedToHot ? 'unpinFromHot' : 'pinToHot')}
+            </Button>
+          )}
+          {layer === 'hot' && !immutable && (
+            <Button
+              disabled={!idle || busy || item.pinnedToHot || item.representation === 'summary'}
               size="small"
               onClick={() => void run(() => window.codey.demoteContext(projectId, conversationId, item.id))}
             >
@@ -219,32 +212,18 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
           <span>{item.tokenCount.toLocaleString()} {t('tokens')}</span>
         </div>
         <div className="context-debug-tags">
-          <span>{t(`protection_${item.protection}`)}</span>
+          <span>{t(`coldKind_${item.kind}`)}</span>
+          {item.kind === 'summary' && <span>{t('representation_summary')}</span>}
         </div>
         <time>{formatTime(item.createdAt)}</time>
         <p>{item.preview || '—'}</p>
         <code className="context-debug-pointer">{item.logicalPointer}</code>
+        {item.truthRefs.length > 0 && <code className="context-debug-pointer">{t('truthReferences')}: {item.truthRefs.join(', ')}</code>}
         {full && <pre className="context-debug-full">{messageText(full)}</pre>}
         <div className="context-debug-actions">
           <Button appearance="subtle" size="small" onClick={() => void readMessage(item.id, 'cold')}>
-            {full ? t('collapse') : t('readOriginal')}
+            {full ? t('collapse') : t(item.kind === 'summary' ? 'readSummary' : 'readOriginal')}
           </Button>
-          <Select
-            aria-label={t('protection')}
-            disabled={!idle || busy || item.role === 'tool'}
-            size="small"
-            value={item.protection}
-            onChange={(_, data) => void run(() => window.codey.setContextProtection(
-              projectId,
-              conversationId,
-              item.id,
-              data.value as ProtectionLevel,
-            ))}
-          >
-            <option value="none">{t('protection_none')}</option>
-            <option value="partial">{t('protection_partial')}</option>
-            <option value="full">{t('protection_full')}</option>
-          </Select>
         </div>
       </article>
     )
@@ -271,7 +250,7 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
           <section className="context-debug-metrics">
             <div><span>{t('hot')}</span><strong>{snapshot?.hotTokens.toLocaleString() ?? 0} / {snapshot?.hotTokenBudget.toLocaleString() ?? 0}</strong></div>
             <div><span>{t('warm')}</span><strong>{snapshot?.warmTokens.toLocaleString() ?? 0} / {snapshot?.warmTokenBudget.toLocaleString() ?? 0}</strong></div>
-            <div><span>{t('protectedHotTokens')}</span><strong>{snapshot?.protectedHotTokens.toLocaleString() ?? 0}</strong></div>
+            <div><span>{t('pinnedHotTokens')}</span><strong>{(snapshot?.pinnedHotTokens ?? 0).toLocaleString()}</strong></div>
             <div><span>{t('systemTokens')}</span><strong>{snapshot?.systemTokens.toLocaleString() ?? 0}</strong></div>
             <div><span>{t('toolDefinitionTokens')}</span><strong>{snapshot?.toolDefinitionTokens.toLocaleString() ?? 0}</strong></div>
             <div className={`context-debug-metric-${requestStatus}`}>
@@ -307,6 +286,7 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
                 </div>
                 <dl>
                   <div><dt>{t('persistedRecords')}</dt><dd>{overview.coldStorage.recordCount.toLocaleString()}</dd></div>
+                  <div><dt>{t('summaryRecords')}</dt><dd>{overview.coldStorage.summaryCount.toLocaleString()}</dd></div>
                   <div><dt>{t('indexedData')}</dt><dd>{formatBytes(overview.coldStorage.indexedBytes)}</dd></div>
                   <div><dt>{t('lastPersisted')}</dt><dd>{formatTime(overview.coldStorage.lastPersistedAt ?? '')}</dd></div>
                 </dl>
@@ -330,6 +310,8 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
                   {storageFileRow('messages.jsonl', overview.coldStorage.messages)}
                   {storageFileRow('index.json', overview.coldStorage.index)}
                   {storageFileRow('overrides.json', overview.coldStorage.overrides)}
+                  {storageFileRow('summaries.jsonl', overview.coldStorage.summaries)}
+                  {storageFileRow('summary-index.json', overview.coldStorage.summaryIndex)}
                 </div>
               </div>
               <div className="context-debug-list">{overview.cold.map(coldCard)}</div>

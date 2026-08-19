@@ -95,6 +95,20 @@ export type ChatMessage = {
   createdAt?: string
 }
 
+export type ContextRepresentation = 'original' | 'summary'
+
+export type ContextSource =
+  | 'live'
+  | 'hot-demotion'
+  | 'warm-recall'
+  | 'cold-summary-recall'
+  | 'cold-truth-recall'
+  | 'hot'
+  | 'warm'
+  | 'cold-recall'
+
+export type ContextRegion = 'permanent' | 'long-term' | 'newborn'
+
 export type AgentContextMessage = {
   id?: string
   createdAt?: string
@@ -102,11 +116,33 @@ export type AgentContextMessage = {
   content: string | null
   toolCalls?: unknown[]
   toolCallId?: string
-  manualProtected?: boolean
-  protection?: ProtectionLevel
+  pinnedToHot?: boolean
+  representation?: ContextRepresentation
+  truthRefs?: string[]
   contextLayer?: 'hot' | 'warm'
-  contextSource?: 'hot' | 'warm' | 'cold-recall'
+  contextRegion?: ContextRegion
+  contextSource?: ContextSource
+  recalledAtRoundId?: string
+  lastAccessedAt?: string
   manualContextLayer?: 'warm'
+  /** Legacy persisted fields, read only for migration. */
+  manualProtected?: boolean
+  /** Legacy persisted fields, read only for migration. */
+  protection?: 'none' | 'partial' | 'full'
+}
+
+export type ContextSummaryArtifact = {
+  id: string
+  role: AgentContextMessage['role']
+  content: string
+  sourceMessageIds: string[]
+  sourcePointers: string[]
+  timeRange: { from: string; to: string }
+  compressionMethod: string
+  originalTokens: number
+  compressedTokens: number
+  generation: number
+  createdAt: string
 }
 
 export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
@@ -152,16 +188,6 @@ export type DevelopmentResult = {
 
 export type ConversationRuntimeState = 'idle' | 'running' | 'debugging'
 
-export type ProtectionLevel = 'none' | 'partial' | 'full'
-
-export type ProtectionReason =
-  | 'system'
-  | 'tool'
-  | 'code'
-  | 'error'
-  | 'log'
-  | 'recent'
-  | 'manual'
 
 export type ContextLayerItem = {
   id: string
@@ -169,10 +195,11 @@ export type ContextLayerItem = {
   tokenCount: number
   createdAt: string
   preview: string
-  protection: ProtectionLevel
-  protectionReasons: ProtectionReason[]
-  source: 'system' | 'hot' | 'hot-demotion' | 'cold-recall'
-  compressed: boolean
+  pinnedToHot: boolean
+  representation: ContextRepresentation
+  truthRefs: string[]
+  region: ContextRegion
+  source: 'system' | ContextSource
   pendingDemotion: boolean
 }
 
@@ -188,7 +215,7 @@ export type ContextDebugSnapshot = {
   hotTokenBudget: number
   warmTokens: number
   warmTokenBudget: number
-  protectedHotTokens: number
+  pinnedHotTokens: number
   requestTokens: number
   config: ContextManagementConfig
   hot: ContextLayerItem[]
@@ -197,14 +224,21 @@ export type ContextDebugSnapshot = {
 
 export type ColdIndexItem = {
   id: string
+  kind: 'truth' | 'summary'
   role: AgentContextMessage['role']
   tokenCount: number
   createdAt: string
   preview: string
   logicalPointer: string
-  protection: ProtectionLevel
   terms: string[]
+  truthRefs: string[]
+  compressionMethod?: string
+  originalTokens?: number
+  compressedTokens?: number
+  contextRegion?: ContextRegion
   manualContextLayer?: 'warm'
+  pinnedToHot?: boolean
+  protection?: 'none' | 'partial' | 'full'
 }
 
 export type ColdStorageFile = {
@@ -219,7 +253,10 @@ export type ColdStorageOverview = {
   messages: ColdStorageFile
   index: ColdStorageFile
   overrides: ColdStorageFile
+  summaries: ColdStorageFile
+  summaryIndex: ColdStorageFile
   recordCount: number
+  summaryCount: number
   indexedBytes: number
   indexStatus: 'empty' | 'consistent' | 'mismatch'
   lastPersistedAt: string | null
@@ -236,9 +273,9 @@ export type ContextAuditEvent = {
     | 'hot_to_warm'
     | 'warm_to_cold'
     | 'cold_recall'
-    | 'protection_changed'
+    | 'pin_changed'
     | 'manual_demotion'
-    | 'protected_ratio_warning'
+    | 'pinned_ratio_warning'
     | 'token_simulation'
   messageIds: string[]
   tokenDelta?: number

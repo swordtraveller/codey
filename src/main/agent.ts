@@ -44,6 +44,7 @@ type AgentResult = {
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
   compressionNotices: ContextCompressionNotice[]
+  summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
   error?: string
 }
 
@@ -76,9 +77,14 @@ function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
     content: message.content,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
-    protection: message.protection,
+    pinnedToHot: message.pinnedToHot,
+    representation: message.representation,
+    truthRefs: message.truthRefs,
     contextLayer: message.contextLayer,
+    contextRegion: message.contextRegion,
     contextSource: message.contextSource,
+    recalledAtRoundId: message.recalledAtRoundId,
+    lastAccessedAt: message.lastAccessedAt,
     manualContextLayer: message.manualContextLayer,
   }))
 }
@@ -95,9 +101,14 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       content: message.content,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
-      protection: message.protection,
+      pinnedToHot: message.pinnedToHot,
+      representation: message.representation,
+      truthRefs: message.truthRefs,
       contextLayer: message.contextLayer,
+      contextRegion: message.contextRegion,
       contextSource: message.contextSource,
+      recalledAtRoundId: message.recalledAtRoundId,
+      lastAccessedAt: message.lastAccessedAt,
       manualContextLayer: message.manualContextLayer,
     }))
 }
@@ -404,12 +415,14 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
+  runtime?: { conversationId: string },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
       writtenFiles: [],
       agentMessages,
       compressionNotices: [],
+      summaryArtifacts: [],
       error: 'Add a project folder before sending a request',
     }
   }
@@ -429,7 +442,11 @@ export async function develop(
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
-      'Tool calls and tool results are critical context: never rewrite them, and only remove them as part of an oldest complete round during fallback truncation.',
+      'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
+      'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+      'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
+      'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
+      'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
@@ -437,12 +454,29 @@ export async function develop(
   let context: ContextMetrics | undefined
   const blocks: AssistantMessageBlock[] = []
   const compressionNotices: ContextCompressionNotice[] = []
+  const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
+  const coldMessageIds = new Set<string>()
 
   let completedToolCalls = 0
 
   try {
     for (let turn = 0; turn < 12; turn += 1) {
-      const managed = manageContext([systemMessage, ...history], tools, config, contextConfig)
+      const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
+      for (const message of [...managed.messages, ...managed.warmMessages]) {
+        const stored = history.find((candidate) => candidate.id === message.id)
+        if (!stored) continue
+        stored.contextLayer = message.contextLayer
+        stored.contextRegion = message.contextRegion
+        stored.contextSource = message.contextSource
+        stored.pinnedToHot = message.pinnedToHot
+        stored.representation = message.representation
+        stored.truthRefs = message.truthRefs
+      }
+      for (const summary of managed.summaryArtifacts) {
+        if (!summaryArtifacts.some((candidate) => candidate.id === summary.id)) summaryArtifacts.push(summary)
+        for (const id of summary.sourceMessageIds) coldMessageIds.add(id)
+      }
       onContextSnapshot?.(managed)
       const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
@@ -453,6 +487,9 @@ export async function develop(
         managed.metrics.rewritten && 'rewrite',
         managed.metrics.truncated && 'truncate',
       ].filter((method): method is string => Boolean(method))
+      if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
+        throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
+      }
       if (methods.length > 0) {
         compressionNotices.push({
           originalTokens: managed.metrics.originalTokens,
@@ -460,9 +497,6 @@ export async function develop(
           compressionRatio: managed.metrics.compressionRatio,
           method: methods.join(', '),
         })
-      }
-      if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
-        throw new Error('Recent conversation exceeds the configured input budget')
       }
       let response: ChatResponse
       try {
@@ -506,6 +540,7 @@ export async function develop(
           agentMessages: toStoredMessages(history),
           context,
           compressionNotices,
+          summaryArtifacts,
         }
       }
 
@@ -518,12 +553,13 @@ export async function develop(
         tool_calls: toolCalls,
         id: randomUUID(),
         createdAt: new Date().toISOString(),
-        protection: 'partial',
+        representation: 'original',
+        contextSource: 'live',
       })
       for (const toolCall of toolCalls) {
         let content: string
         try {
-          content = await runAgentTool(project, toolCall, writtenFiles)
+          content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
         } catch (error) {
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
@@ -534,7 +570,8 @@ export async function develop(
           content,
           id: randomUUID(),
           createdAt: new Date().toISOString(),
-          protection: 'partial',
+          representation: 'original',
+          contextSource: 'live',
         })
       }
     }
@@ -546,6 +583,7 @@ export async function develop(
       agentMessages: toStoredMessages(history),
       context,
       compressionNotices,
+      summaryArtifacts,
       error: error instanceof Error ? error.message : 'Request failed',
     }
   }
