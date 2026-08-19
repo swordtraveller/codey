@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppConfig, ContextManagementConfig, DevelopmentProgress } from '../shared/types'
+import type {
+  AppConfig,
+  ContextManagementConfig,
+  ConversationStateChange,
+  DevelopmentProgress,
+  ProtectionLevel,
+} from '../shared/types'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -51,5 +57,39 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('development:progress', handler)
       return () => ipcRenderer.removeListener('development:progress', handler)
     },
+    onConversationStateChange: (listener: (change: ConversationStateChange) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, change: ConversationStateChange) =>
+        listener(change)
+      ipcRenderer.on('conversation:state-change', handler)
+      return () => ipcRenderer.removeListener('conversation:state-change', handler)
+    },
+    openContextDebug: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:open', projectId, conversationId),
+    getContextDebugOverview: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:overview', projectId, conversationId),
+    getContextDebugRevision: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:revision', projectId, conversationId),
+    readColdMessage: (projectId: string, conversationId: string, messageId: string) =>
+      ipcRenderer.invoke('context-debug:read-cold', projectId, conversationId, messageId),
+    readContextLayerMessage: (projectId: string, conversationId: string, messageId: string) =>
+      ipcRenderer.invoke('context-debug:read-layer', projectId, conversationId, messageId),
+    searchColdContext: (projectId: string, conversationId: string, query: string) =>
+      ipcRenderer.invoke('context-debug:search', projectId, conversationId, query),
+    setContextProtection: (
+      projectId: string,
+      conversationId: string,
+      messageId: string,
+      protection: ProtectionLevel,
+    ) => ipcRenderer.invoke(
+      'context-debug:set-protection',
+      projectId,
+      conversationId,
+      messageId,
+      protection,
+    ),
+    demoteContext: (projectId: string, conversationId: string, messageId?: string) =>
+      ipcRenderer.invoke('context-debug:demote', projectId, conversationId, messageId),
+    simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
+      ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
   }),
 )

@@ -1,12 +1,18 @@
 import { getEncoding } from 'js-tiktoken'
-import type { ContextManagementConfig, ContextMetrics, ModelConfig } from '../shared/types'
+import type { ContextManagementConfig, ContextMetrics, ModelConfig, ProtectionLevel } from '../shared/types'
 import type { ToolCall } from './tools'
 
 export type ContextMessage = {
+  id?: string
+  createdAt?: string
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null
   tool_calls?: ToolCall[]
   tool_call_id?: string
+  protection?: ProtectionLevel
+  contextLayer?: 'hot' | 'warm'
+  contextSource?: 'hot' | 'warm' | 'cold-recall'
+  manualContextLayer?: 'warm'
 }
 
 type TextPart = { text: string; protected: boolean }
@@ -14,12 +20,13 @@ type TextPart = { text: string; protected: boolean }
 export type ContextResult = {
   messages: ContextMessage[]
   metrics: ContextMetrics
+  toolDefinitionTokens: number
 }
 
 const encoder = getEncoding('o200k_base')
 const protectedBlockPattern = /```[\s\S]*?```|Traceback \(most recent call last\):[\s\S]*?(?=\n\n|$)|(?:^|\n)(?:Error|Exception|Caused by):[^\n]*(?:\n\s+at [^\n]*)*|(?:^|\n)(?:(?:\d{4}-\d{2}-\d{2}[T ][^\n]*)|(?:(?:\[[^\]\n]+\]\s*)?(?:DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b[^\n]*))/g
 
-function countTokens(value: unknown): number {
+export function countContextTokens(value: unknown): number {
   return encoder.encode(JSON.stringify(value)).length
 }
 
@@ -67,7 +74,7 @@ function transformMessage(
   message: ContextMessage,
   transform: (text: string) => string,
 ): ContextMessage {
-  if (!message.content || message.role === 'system' || message.role === 'tool' || message.tool_calls) {
+  if (!message.content || message.role === 'system' || message.role === 'tool' || message.tool_calls || message.protection === 'full') {
     return message
   }
 
@@ -112,7 +119,7 @@ function selectRecentRounds(rounds: ContextMessage[][], budget: number): {
   let tokens = 0
   let start = rounds.length
   while (start > 0) {
-    const roundTokens = countTokens(rounds[start - 1])
+    const roundTokens = countContextTokens(rounds[start - 1])
     if (tokens + roundTokens > budget) {
       break
     }
@@ -156,7 +163,7 @@ function recallRounds(
   let tokens = 0
   const selected: typeof ranked = []
   for (const candidate of ranked) {
-    const roundTokens = countTokens(candidate.round)
+    const roundTokens = countContextTokens(candidate.round)
     if (tokens + roundTokens <= budget) {
       selected.push(candidate)
       tokens += roundTokens
@@ -189,7 +196,7 @@ function manageSingleLayer(
   contextConfig: ContextManagementConfig,
 ): ContextResult {
   const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
-  const count = (items: ContextMessage[]) => countTokens({ messages: items, tools })
+  const count = (items: ContextMessage[]) => countContextTokens({ messages: items, tools })
   const originalTokens = count(messages)
   let managed = messages
   let filtered = false
@@ -235,6 +242,7 @@ function manageSingleLayer(
       rewritten,
       truncated,
     }),
+    toolDefinitionTokens: countContextTokens(tools),
   }
 }
 
@@ -245,50 +253,117 @@ function manageLayered(
   contextConfig: ContextManagementConfig,
 ): ContextResult {
   const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
-  const count = (items: ContextMessage[]) => countTokens({ messages: items, tools })
+  const count = (items: ContextMessage[]) => countContextTokens({ messages: items, tools })
   const originalTokens = count(messages)
   const recentStart = getRecentStart(messages, contextConfig.recentKeepRounds)
-  const system = messages.slice(0, 1)
-  const hot = messages.slice(recentStart)
-  const coldRounds = splitRounds(messages.slice(1, recentStart))
+  const system = messages.slice(0, 1).map((message) => ({
+    ...message,
+    protection: 'full' as const,
+    contextLayer: 'hot' as const,
+    contextSource: 'hot' as const,
+  }))
+  const normalizeProtection = (message: ContextMessage): ContextMessage =>
+    message.role === 'tool' || message.tool_calls?.length
+      ? { ...message, protection: 'partial' }
+      : message
+  const older = messages.slice(1, recentStart).map(normalizeProtection)
+  const recent = messages.slice(recentStart).map(normalizeProtection)
+  const recentRounds = splitRounds(recent)
+  const manuallyWarm = [...older, ...recent].filter(
+    (message) => message.manualContextLayer === 'warm' && message.protection !== 'full',
+  )
+  const manuallyWarmIds = new Set(manuallyWarm.map((message) => message.id))
+  const protectedOlder = older.filter((message) => message.protection === 'full')
+  const protectedOlderIds = new Set(protectedOlder.map((message) => message.id))
+  let hot = [...protectedOlder, ...recent]
+    .filter((message) => !manuallyWarmIds.has(message.id))
+    .map((message) => ({
+      ...message,
+      contextLayer: 'hot' as const,
+      contextSource: 'hot' as const,
+    }))
+  const coldRounds = splitRounds(older.filter(
+    (message) => !manuallyWarmIds.has(message.id) && !protectedOlderIds.has(message.id),
+  ))
   const reservedHotTokens = Math.max(
-    countTokens(hot),
+    countContextTokens(hot),
     Math.min(contextConfig.hotTokenBudget, triggerThreshold),
   )
   const warmBudget = Math.min(
     contextConfig.warmTokenBudget,
-    Math.max(0, triggerThreshold - countTokens({ messages: system, tools }) - reservedHotTokens),
+    Math.max(0, triggerThreshold - countContextTokens({ messages: system, tools }) - reservedHotTokens),
   )
-  const recallBudget = Math.min(contextConfig.coldRecallTokenBudget, warmBudget)
-  const warmSelection = selectRecentRounds(coldRounds, Math.max(0, warmBudget - recallBudget))
+  const manuallyWarmTokens = countContextTokens(manuallyWarm)
+  const recallBudget = Math.min(
+    contextConfig.coldRecallTokenBudget,
+    Math.max(0, warmBudget - manuallyWarmTokens),
+  )
+  const warmSelection = selectRecentRounds(
+    coldRounds,
+    Math.max(0, warmBudget - manuallyWarmTokens - recallBudget),
+  )
   const recalledRounds = recallRounds(warmSelection.remaining, queryTerms(hot), recallBudget)
-  let warm = [...recalledRounds, ...warmSelection.selected].flat()
-  let managed = [...system, ...warm, ...hot]
+  const recalledIds = new Set(recalledRounds.flat().map((message) => message.id))
+  const messageOrder = new Map(messages.map((message, index) => [message.id, index]))
+  let warm: ContextMessage[] = [
+    ...manuallyWarm,
+    ...recalledRounds.flat(),
+    ...warmSelection.selected.flat(),
+  ]
+    .sort((left, right) => (messageOrder.get(left.id) ?? 0) - (messageOrder.get(right.id) ?? 0))
+    .map((message) => ({
+      ...message,
+      contextLayer: 'warm' as const,
+      contextSource: recalledIds.has(message.id) || message.contextSource === 'cold-recall'
+        ? 'cold-recall' as const
+        : 'warm' as const,
+    }))
+  let managed: ContextMessage[] = [...system, ...warm, ...hot]
   let filtered = false
   let rewritten = false
   let truncated = false
 
-  if (count(managed) >= triggerThreshold && contextConfig.filterEnabled) {
-    const transformed = warm.map((message) => transformMessage(message, filterNaturalLanguage))
-    filtered = count(transformed) < count(warm)
-    warm = transformed
+  const compactWarm = (): void => {
     managed = [...system, ...warm, ...hot]
-  }
-
-  if (count(managed) >= triggerThreshold && contextConfig.rewriteEnabled) {
-    const beforeRewrite = count(managed)
-    warm = warm.map((message) => transformMessage(message, rewriteNaturalLanguage))
-    managed = [...system, ...warm, ...hot]
-    rewritten = count(managed) < beforeRewrite
-  }
-
-  if (contextConfig.truncateEnabled) {
-    const warmRounds = splitRounds(warm)
-    while (count(managed) >= triggerThreshold && warmRounds.length > 0) {
-      warmRounds.shift()
-      managed = [...system, ...warmRounds.flat(), ...hot]
-      truncated = true
+    if (count(managed) >= triggerThreshold && contextConfig.filterEnabled) {
+      const beforeFilter = count(warm)
+      warm = warm.map((message) => transformMessage(message, filterNaturalLanguage))
+      filtered ||= count(warm) < beforeFilter
+      managed = [...system, ...warm, ...hot]
     }
+
+    if (count(managed) >= triggerThreshold && contextConfig.rewriteEnabled) {
+      const beforeRewrite = count(managed)
+      warm = warm.map((message) => transformMessage(message, rewriteNaturalLanguage))
+      managed = [...system, ...warm, ...hot]
+      rewritten ||= count(managed) < beforeRewrite
+    }
+
+    if (contextConfig.truncateEnabled) {
+      const warmRounds = splitRounds(warm)
+      while (count(managed) >= triggerThreshold && warmRounds.length > 0) {
+        warmRounds.shift()
+        warm = warmRounds.flat()
+        managed = [...system, ...warm, ...hot]
+        truncated = true
+      }
+    }
+  }
+
+  compactWarm()
+
+  for (const round of recentRounds.slice(0, -1)) {
+    if (count(managed) < triggerThreshold) break
+    if (round.some((message) => message.protection === 'full' || manuallyWarmIds.has(message.id))) continue
+
+    const ids = new Set(round.map((message) => message.id))
+    hot = hot.filter((message) => !ids.has(message.id))
+    warm = [...warm, ...round.map((message) => ({
+      ...message,
+      contextLayer: 'warm' as const,
+      contextSource: 'warm' as const,
+    }))].sort((left, right) => (messageOrder.get(left.id) ?? 0) - (messageOrder.get(right.id) ?? 0))
+    compactWarm()
   }
 
   const compressedTokens = count(managed)
@@ -296,11 +371,12 @@ function manageLayered(
     messages: managed,
     metrics: metrics(originalTokens, compressedTokens, modelConfig, contextConfig, {
       layered: true,
-      recalled: recalledRounds.length > 0,
+      recalled: recalledRounds.length > 0 || warm.some((message) => message.contextSource === 'cold-recall'),
       filtered,
       rewritten,
       truncated,
     }),
+    toolDefinitionTokens: countContextTokens(tools),
   }
 }
 

@@ -19,7 +19,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
-import type { AppLanguage, ContextManagementConfig } from '../../shared/types'
+import type { AppLanguage, ContextManagementConfig, ConversationRuntimeState } from '../../shared/types'
 import {
   defaultAppConfig,
   defaultContextManagementConfig,
@@ -254,6 +254,7 @@ export function App(): React.JSX.Element {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [sending, setSending] = useState(false)
+  const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
   const [conversationTurn, setConversationTurn] = useState<ConversationTurn | null>(null)
   const [saving, setSaving] = useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
@@ -282,7 +283,11 @@ export function App(): React.JSX.Element {
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
     : ''
-  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation)
+  const activeConversationState = activeProject && activeConversation
+    ? conversationStates[`${activeProject.id}:${activeConversation.id}`] ?? 'idle'
+    : 'idle'
+  const interactionLocked = sending || activeConversationState !== 'idle'
+  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
   const liveBlocks =
     liveResponse?.projectId === activeProjectId &&
     liveResponse.conversationId === activeConversationId
@@ -316,6 +321,34 @@ export function App(): React.JSX.Element {
     setLiveResponse(progress)
   }), [])
 
+  useEffect(() => window.codey.onConversationStateChange((change) => {
+    setConversationStates((current) => ({
+      ...current,
+      [`${change.projectId}:${change.conversationId}`]: change.state,
+    }))
+  }), [])
+
+  useEffect(() => {
+    function openDebugger(event: KeyboardEvent): void {
+      if (
+        config.developerMode &&
+        activeProjectId &&
+        activeConversationId &&
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === 'd'
+      ) {
+        event.preventDefault()
+        void window.codey.openContextDebug(activeProjectId, activeConversationId).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : t('unableOpenContextDebugger'))
+        })
+      }
+    }
+
+    window.addEventListener('keydown', openDebugger)
+    return () => window.removeEventListener('keydown', openDebugger)
+  }, [activeConversationId, activeProjectId, config.developerMode, t])
+
   function updateScrollButton(): void {
     const element = conversationRef.current
     if (element) {
@@ -331,7 +364,7 @@ export function App(): React.JSX.Element {
     })
   }
 
-  useEffect(updateScrollButton, [activeConversation?.messages, liveResponse, sending])
+  useEffect(updateScrollButton, [activeConversation?.messages, liveResponse, interactionLocked])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -374,7 +407,7 @@ export function App(): React.JSX.Element {
   }
 
   function openContextSettings(scope: 'project' | 'conversation', project = activeProject): void {
-    if (!project || sending) {
+    if (!project || interactionLocked) {
       return
     }
     const override = scope === 'project'
@@ -394,7 +427,7 @@ export function App(): React.JSX.Element {
 
   async function saveContextSettings(): Promise<void> {
     const targetProject = projects.find((project) => project.id === contextProjectId)
-    if (!targetProject || sending) {
+    if (!targetProject || interactionLocked) {
       return
     }
     setSaving(true)
@@ -501,7 +534,7 @@ export function App(): React.JSX.Element {
   }
 
   async function changeProjectModelConfig(projectId: string, modelConfigId: string): Promise<void> {
-    if (sending) {
+    if (interactionLocked) {
       return
     }
 
@@ -514,7 +547,7 @@ export function App(): React.JSX.Element {
   }
 
   async function changeConversationModelConfig(modelConfigId: string): Promise<void> {
-    if (!activeProject || !activeConversation || sending) {
+    if (!activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -551,7 +584,7 @@ export function App(): React.JSX.Element {
     event.preventDefault()
 
     const content = draft.trim()
-    if (!content || !canSend || !activeProject || !activeConversation || sending) {
+    if (!content || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -668,7 +701,7 @@ export function App(): React.JSX.Element {
             Codey
           </div>
 
-          <Button appearance="primary" disabled={sending} onClick={openProjectDialog}>
+          <Button appearance="primary" disabled={interactionLocked} onClick={openProjectDialog}>
             {t('newProject')}
           </Button>
 
@@ -680,7 +713,7 @@ export function App(): React.JSX.Element {
                   <div className="project-nav-row">
                     <Button
                       appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
-                      disabled={sending}
+                      disabled={interactionLocked}
                       onClick={() => selectProject(project)}
                     >
                       {project.name}
@@ -690,7 +723,7 @@ export function App(): React.JSX.Element {
                       size="small"
                       aria-expanded={openProjectMenuId === project.id}
                       aria-label={t('projectOptions')}
-                      disabled={sending}
+                      disabled={interactionLocked}
                       onClick={() => setOpenProjectMenuId((current) =>
                         current === project.id ? null : project.id
                       )}
@@ -704,7 +737,7 @@ export function App(): React.JSX.Element {
                         <span>{t('projectDefaultModel')}</span>
                         <Select
                           aria-label={t('projectDefaultModel')}
-                          disabled={sending || config.modelConfigs.length === 0}
+                          disabled={interactionLocked || config.modelConfigs.length === 0}
                           value={project.defaultModelConfigId ?? ''}
                           onChange={(_, data) => {
                             setOpenProjectMenuId(null)
@@ -719,7 +752,7 @@ export function App(): React.JSX.Element {
                           ))}
                         </Select>
                       </label>
-                      <Button appearance="subtle" size="small" disabled={sending} onClick={() => openContextSettings('project', project)}>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>
                         {t('contextSettings')}
                       </Button>
                     </div>
@@ -735,7 +768,7 @@ export function App(): React.JSX.Element {
                 <p className="section-label">{t('conversations')}</p>
                 <Button
                   appearance="subtle"
-                  disabled={sending}
+                  disabled={interactionLocked}
                   size="small"
                   onClick={() => void startNewConversation()}
                 >
@@ -748,7 +781,7 @@ export function App(): React.JSX.Element {
                     appearance={
                       conversation.id === activeConversationId ? 'secondary' : 'subtle'
                     }
-                    disabled={sending}
+                    disabled={interactionLocked}
                     key={conversation.id}
                     onClick={() => {
                       setActiveConversationId(conversation.id)
@@ -783,7 +816,7 @@ export function App(): React.JSX.Element {
                   </span>
                   <select
                     aria-label={t('conversationModel')}
-                    disabled={sending}
+                    disabled={interactionLocked}
                     value={activeConversation.modelConfigId ?? ''}
                     onChange={(event) => void changeConversationModelConfig(event.target.value)}
                   >
@@ -799,7 +832,7 @@ export function App(): React.JSX.Element {
                 <span className="status">{t('notConfigured')}</span>
               )}
               {activeConversation && (
-                <Button appearance="subtle" size="small" disabled={sending} onClick={() => openContextSettings('conversation')}>
+                <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('conversation')}>
                   {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
                 </Button>
               )}
@@ -810,6 +843,20 @@ export function App(): React.JSX.Element {
                 >
                   {contextStatus}
                 </span>
+              )}
+              {config.developerMode && activeProject && activeConversation && (
+                <Button
+                  appearance="subtle"
+                  size="small"
+                  title={t('contextDebuggerShortcut')}
+                  onClick={() => void window.codey
+                    .openContextDebug(activeProject.id, activeConversation.id)
+                    .catch((reason) => setError(
+                      reason instanceof Error ? reason.message : t('unableOpenContextDebugger'),
+                    ))}
+                >
+                  {t('openContextDebugger')}
+                </Button>
               )}
             </div>
           </header>
@@ -827,7 +874,7 @@ export function App(): React.JSX.Element {
                   ))
                 )}
               </div>
-              <Button disabled={sending} size="small" onClick={() => void addFolder()}>
+              <Button disabled={interactionLocked} size="small" onClick={() => void addFolder()}>
                 {t('addFolder')}
               </Button>
             </div>
@@ -840,7 +887,7 @@ export function App(): React.JSX.Element {
               aria-label={t('conversation')}
               onScroll={updateScrollButton}
             >
-            {!activeConversation || (activeConversation.messages.length === 0 && !sending) ? (
+            {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
                 <span className="welcome-mark">C</span>
                 <h1>{emptyTitle}</h1>
@@ -930,7 +977,7 @@ export function App(): React.JSX.Element {
             <Textarea
               aria-label={t('developmentRequest')}
               className="message-input"
-              disabled={!canSend || sending}
+              disabled={!canSend || interactionLocked}
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
@@ -950,7 +997,7 @@ export function App(): React.JSX.Element {
             />
             <Button
               appearance="primary"
-              disabled={!canSend || !draft.trim() || sending}
+              disabled={!canSend || !draft.trim() || interactionLocked}
               size="large"
               type="submit"
             >
@@ -1064,7 +1111,7 @@ export function App(): React.JSX.Element {
               <section className="settings-group">
                 <h2>{t('contextSettings')}</h2>
                 <ContextSettingsFields
-                  disabled={sending}
+                  disabled={interactionLocked}
                   value={configDraft.contextManagement}
                   onChange={updateAppContextConfig}
                 />
@@ -1085,6 +1132,18 @@ export function App(): React.JSX.Element {
                   </Select>
                 </Field>
               </section>
+              <section className="settings-group">
+                <h2>{t('developerSettings')}</h2>
+                <Switch
+                  checked={configDraft.developerMode}
+                  label={t('developerMode')}
+                  onChange={(_, data) => setConfigDraft((current) => ({
+                    ...current,
+                    developerMode: data.checked,
+                  }))}
+                />
+                <p className="settings-description">{t('developerModeDescription')}</p>
+              </section>
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -1093,7 +1152,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || invalidAppContextConfig || sending || saving}
+                disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -1112,12 +1171,12 @@ export function App(): React.JSX.Element {
             <DialogContent className="dialog-fields">
               <Switch
                 checked={contextOverrideEnabled}
-                disabled={sending}
+                disabled={interactionLocked}
                 label={contextScope === 'project' ? t('overrideApplicationContext') : t('overrideProjectContext')}
                 onChange={(_, data) => setContextOverrideEnabled(data.checked)}
               />
               <ContextSettingsFields
-                disabled={sending || !contextOverrideEnabled}
+                disabled={interactionLocked || !contextOverrideEnabled}
                 value={contextDraft}
                 onChange={updateContextDraft}
               />
@@ -1127,7 +1186,7 @@ export function App(): React.JSX.Element {
               <Button appearance="secondary" onClick={() => setContextDialogOpen(false)}>
                 {t('cancel')}
               </Button>
-              <Button appearance="primary" disabled={sending || saving || invalidContextOverride} onClick={() => void saveContextSettings()}>
+              <Button appearance="primary" disabled={interactionLocked || saving || invalidContextOverride} onClick={() => void saveContextSettings()}>
                 {saving ? t('saving') : t('save')}
               </Button>
             </DialogActions>

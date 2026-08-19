@@ -35,6 +35,7 @@ const config: AppConfig = {
   activeModelConfigId: 'app',
   contextManagement: context(false),
   language: 'en',
+  developerMode: false,
 }
 const project: Project = {
   id: 'project',

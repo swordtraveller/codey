@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
   AssistantMessageBlock,
@@ -7,7 +8,7 @@ import type {
   ModelConfig,
   Project,
 } from '../shared/types'
-import { manageContext, type ContextMessage } from './context'
+import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
 import { truncateOutput } from './sandbox'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -69,10 +70,16 @@ function mergeContextMetrics(
 
 function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
   return messages.map((message) => ({
+    id: message.id ?? randomUUID(),
+    createdAt: message.createdAt ?? new Date().toISOString(),
     role: message.role,
     content: message.content,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
+    protection: message.protection,
+    contextLayer: message.contextLayer,
+    contextSource: message.contextSource,
+    manualContextLayer: message.manualContextLayer,
   }))
 }
 
@@ -82,10 +89,16 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       message.role !== 'system',
     )
     .map((message) => ({
+      id: message.id ?? randomUUID(),
+      createdAt: message.createdAt ?? new Date().toISOString(),
       role: message.role,
       content: message.content,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
+      protection: message.protection,
+      contextLayer: message.contextLayer,
+      contextSource: message.contextSource,
+      manualContextLayer: message.manualContextLayer,
     }))
 }
 
@@ -390,6 +403,7 @@ export async function develop(
   contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onContextSnapshot?: (result: ContextResult) => void,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
@@ -403,6 +417,8 @@ export async function develop(
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
   const systemMessage: ContextMessage = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
     role: 'system',
     content: [
       'You are a coding agent working in the project folders below.',
@@ -413,7 +429,7 @@ export async function develop(
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
-      'Tool calls and tool results are critical context and must be retained verbatim if conversation context is ever compacted.',
+      'Tool calls and tool results are critical context: never rewrite them, and only remove them as part of an oldest complete round during fallback truncation.',
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
@@ -427,6 +443,7 @@ export async function develop(
   try {
     for (let turn = 0; turn < 12; turn += 1) {
       const managed = manageContext([systemMessage, ...history], tools, config, contextConfig)
+      onContextSnapshot?.(managed)
       const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
@@ -481,7 +498,7 @@ export async function develop(
         const block = { type: 'content' as const, content: reply }
         blocks.push(block)
         onBlocks?.([...blocks])
-        history.push({ role: 'assistant', content: reply })
+        history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
           reply,
           blocks,
@@ -495,7 +512,14 @@ export async function develop(
       const responseBlocks = toMessageBlocks(message)
       blocks.push(...responseBlocks)
       onBlocks?.([...blocks])
-      history.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
+      history.push({
+        role: 'assistant',
+        content: message.content ?? null,
+        tool_calls: toolCalls,
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        protection: 'partial',
+      })
       for (const toolCall of toolCalls) {
         let content: string
         try {
@@ -504,7 +528,14 @@ export async function develop(
         } catch (error) {
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
-        history.push({ role: 'tool', tool_call_id: toolCall.id, content })
+        history.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content,
+          id: randomUUID(),
+          createdAt: new Date().toISOString(),
+          protection: 'partial',
+        })
       }
     }
     throw new Error('The model exceeded the tool-call limit')

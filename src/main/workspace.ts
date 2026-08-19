@@ -272,3 +272,15 @@ export async function saveConversationContext(
   await saveProjects()
   return project
 }
+
+export async function updateConversationAgentMessages(
+  projectId: string,
+  conversationId: string,
+  update: (messages: Conversation['agentMessages']) => Conversation['agentMessages'],
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const conversation = findConversation(project, conversationId)
+  conversation.agentMessages = update(conversation.agentMessages)
+  await saveProjects()
+  return project
+}

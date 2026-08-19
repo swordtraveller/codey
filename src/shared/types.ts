@@ -47,6 +47,7 @@ export type AppConfig = {
   activeModelConfigId: string | null
   contextManagement: ContextManagementConfig
   language: AppLanguage
+  developerMode: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -54,6 +55,7 @@ export const defaultAppConfig: AppConfig = {
   activeModelConfigId: null,
   contextManagement: defaultContextManagementConfig,
   language: 'system',
+  developerMode: false,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -90,13 +92,25 @@ export type ChatMessage = {
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
   contextConfig?: ContextManagementConfig
+  createdAt?: string
 }
 
 export type AgentContextMessage = {
+  id?: string
+  createdAt?: string
   role: ChatMessage['role'] | 'tool'
   content: string | null
   toolCalls?: unknown[]
   toolCallId?: string
+  manualProtected?: boolean
+  protection?: ProtectionLevel
+  contextLayer?: 'hot' | 'warm'
+  contextSource?: 'hot' | 'warm' | 'cold-recall'
+  manualContextLayer?: 'warm'
+}
+
+export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
+  role: AgentContextMessage['role'] | 'system'
 }
 
 export type Conversation = {
@@ -134,4 +148,131 @@ export type DevelopmentResult = {
   project?: Project
   writtenFiles: string[]
   error?: string
+}
+
+export type ConversationRuntimeState = 'idle' | 'running' | 'debugging'
+
+export type ProtectionLevel = 'none' | 'partial' | 'full'
+
+export type ProtectionReason =
+  | 'system'
+  | 'tool'
+  | 'code'
+  | 'error'
+  | 'log'
+  | 'recent'
+  | 'manual'
+
+export type ContextLayerItem = {
+  id: string
+  role: AgentContextMessage['role'] | 'system'
+  tokenCount: number
+  createdAt: string
+  preview: string
+  protection: ProtectionLevel
+  protectionReasons: ProtectionReason[]
+  source: 'system' | 'hot' | 'hot-demotion' | 'cold-recall'
+  compressed: boolean
+  pendingDemotion: boolean
+}
+
+export type ContextDebugSnapshot = {
+  requestId: string
+  roundId: string
+  createdAt: string
+  modelMaxContext: number
+  triggerThreshold: number
+  systemTokens: number
+  toolDefinitionTokens: number
+  hotTokens: number
+  hotTokenBudget: number
+  warmTokens: number
+  warmTokenBudget: number
+  protectedHotTokens: number
+  requestTokens: number
+  config: ContextManagementConfig
+  hot: ContextLayerItem[]
+  warm: ContextLayerItem[]
+}
+
+export type ColdIndexItem = {
+  id: string
+  role: AgentContextMessage['role']
+  tokenCount: number
+  createdAt: string
+  preview: string
+  logicalPointer: string
+  protection: ProtectionLevel
+  terms: string[]
+  manualContextLayer?: 'warm'
+}
+
+export type ColdStorageFile = {
+  path: string
+  exists: boolean
+  sizeBytes: number
+  modifiedAt: string | null
+}
+
+export type ColdStorageOverview = {
+  folderPath: string
+  messages: ColdStorageFile
+  index: ColdStorageFile
+  overrides: ColdStorageFile
+  recordCount: number
+  indexedBytes: number
+  indexStatus: 'empty' | 'consistent' | 'mismatch'
+  lastPersistedAt: string | null
+}
+
+export type ContextAuditEvent = {
+  id: string
+  timestamp: string
+  projectId: string
+  conversationId: string
+  roundId?: string
+  requestId?: string
+  type:
+    | 'hot_to_warm'
+    | 'warm_to_cold'
+    | 'cold_recall'
+    | 'protection_changed'
+    | 'manual_demotion'
+    | 'protected_ratio_warning'
+    | 'token_simulation'
+  messageIds: string[]
+  tokenDelta?: number
+  description: string
+  simulated: boolean
+}
+
+export type ContextDebugOverview = {
+  projectId: string
+  conversationId: string
+  conversationTitle: string
+  revision: string
+  runtimeState: ConversationRuntimeState
+  snapshot: ContextDebugSnapshot | null
+  coldStorage: ColdStorageOverview
+  cold: ColdIndexItem[]
+  coldTotal: number
+  audit: ContextAuditEvent[]
+}
+
+export type ColdRecallPreview = {
+  query: string
+  matches: ColdIndexItem[]
+}
+
+export type TokenLimitSimulation = {
+  requestTokens: number
+  triggerThreshold: number
+  modelMaxContext: number
+  status: 'normal' | 'warning' | 'exceeded'
+}
+
+export type ConversationStateChange = {
+  projectId: string
+  conversationId: string
+  state: ConversationRuntimeState
 }

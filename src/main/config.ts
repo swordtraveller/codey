@@ -23,6 +23,7 @@ type StoredAppConfig = {
   activeModelConfigId?: string | null
   contextManagement?: Partial<ContextManagementConfig>
   language?: AppLanguage
+  developerMode?: boolean
 }
 
 type LegacyStoredConfig = StoredModelConfig & {
@@ -109,8 +110,9 @@ export async function readConfig(): Promise<AppConfig> {
         : (modelConfigs[0]?.id ?? null)
       const legacyModel = stored.modelConfigs.find((model) => model.id === activeModelConfigId) ?? stored.modelConfigs[0]
       const contextManagement = normalizeContextManagementConfig(stored.contextManagement, legacyModel)
-      const config = { modelConfigs, activeModelConfigId, contextManagement, language }
-      const needsMigration = !stored.contextManagement || stored.modelConfigs.some((model) =>
+      const developerMode = stored.developerMode === true
+      const config = { modelConfigs, activeModelConfigId, contextManagement, language, developerMode }
+      const needsMigration = stored.developerMode === undefined || !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
       ) || stored.activeModelConfigId !== activeModelConfigId
       if (needsMigration) {
@@ -121,7 +123,7 @@ export async function readConfig(): Promise<AppConfig> {
 
     const hasLegacyModel = Boolean(stored.baseUrl || stored.apiKey || stored.modelName)
     if (!hasLegacyModel) {
-      return { ...defaultAppConfig, contextManagement: normalizeContextManagementConfig(stored.contextManagement), language }
+      return { ...defaultAppConfig, contextManagement: normalizeContextManagementConfig(stored.contextManagement), language, developerMode: stored.developerMode === true }
     }
 
     const model = readModelConfig(stored)
@@ -130,6 +132,7 @@ export async function readConfig(): Promise<AppConfig> {
       activeModelConfigId: model.id,
       contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
       language,
+      developerMode: stored.developerMode === true,
     }
     await writeConfig(migrated)
     return migrated
@@ -164,6 +167,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     activeModelConfigId,
     contextManagement,
     language: isAppLanguage(config.language) ? config.language : defaultAppConfig.language,
+    developerMode: config.developerMode === true,
   }
   await writeConfig(normalized)
   return normalized

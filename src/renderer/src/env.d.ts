@@ -1,9 +1,15 @@
 import type {
   AppConfig,
+  ColdRecallPreview,
+  ContextDebugMessage,
+  ContextDebugOverview,
   ContextManagementConfig,
+  ConversationStateChange,
   DevelopmentProgress,
   DevelopmentResult,
   Project,
+  ProtectionLevel,
+  TokenLimitSimulation,
 } from '../../shared/types'
 
 interface RuntimeInfo {
@@ -41,6 +47,25 @@ declare global {
         content: string,
       ): Promise<DevelopmentResult>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
+      onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
+      openContextDebug(projectId: string, conversationId: string): Promise<void>
+      getContextDebugOverview(projectId: string, conversationId: string): Promise<ContextDebugOverview>
+      getContextDebugRevision(projectId: string, conversationId: string): Promise<string>
+      readColdMessage(projectId: string, conversationId: string, messageId: string): Promise<ContextDebugMessage>
+      readContextLayerMessage(projectId: string, conversationId: string, messageId: string): Promise<ContextDebugMessage>
+      searchColdContext(projectId: string, conversationId: string, query: string): Promise<ColdRecallPreview>
+      setContextProtection(
+        projectId: string,
+        conversationId: string,
+        messageId: string,
+        protection: ProtectionLevel,
+      ): Promise<void>
+      demoteContext(projectId: string, conversationId: string, messageId?: string): Promise<void>
+      simulateTokenLimit(
+        projectId: string,
+        conversationId: string,
+        requestTokens: number,
+      ): Promise<TokenLimitSimulation>
     }
   }
 }
