@@ -277,22 +277,22 @@ export function App(): React.JSX.Element {
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
-  const [sending, setSending] = useState(false)
-  const [stopping, setStopping] = useState(false)
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
-  const [conversationTurn, setConversationTurn] = useState<ConversationTurn | null>(null)
+  const [stoppingConversations, setStoppingConversations] = useState<Record<string, boolean>>({})
+  const [conversationTurns, setConversationTurns] = useState<Record<string, ConversationTurn>>({})
   const [saving, setSaving] = useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [projectError, setProjectError] = useState('')
-  const [liveResponse, setLiveResponse] = useState<{
+  const [liveResponses, setLiveResponses] = useState<Record<string, {
     projectId: string
     conversationId: string
     timeline: DevelopmentTimelineItem[]
-  } | null>(null)
+  }>>({})
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const activeConversationKeyRef = useRef('')
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const activeConversation = activeProject?.conversations.find(
@@ -308,17 +308,21 @@ export function App(): React.JSX.Element {
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
     : ''
-  const activeConversationState = activeProject && activeConversation
-    ? conversationStates[`${activeProject.id}:${activeConversation.id}`] ?? 'idle'
+  const activeConversationKey = activeProject && activeConversation
+    ? `${activeProject.id}:${activeConversation.id}`
+    : ''
+  const activeConversationState = activeConversationKey
+    ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
-  const interactionLocked = sending || activeConversationState !== 'idle'
-  const conversationWorking = sending || activeConversationState === 'running'
+  const interactionLocked = activeConversationState !== 'idle'
+  const conversationWorking = activeConversationState === 'running'
+  const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
+  const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
-  const liveTimeline =
-    liveResponse?.projectId === activeProjectId &&
-    liveResponse.conversationId === activeConversationId
-      ? liveResponse.timeline
-      : []
+  const liveTimeline = activeConversationKey
+    ? liveResponses[activeConversationKey]?.timeline ?? []
+    : []
+  activeConversationKeyRef.current = activeConversationKey
 
   useEffect(() => {
     void window.codey
@@ -344,7 +348,8 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
-    setLiveResponse(progress)
+    const key = `${progress.projectId}:${progress.conversationId}`
+    setLiveResponses((current) => ({ ...current, [key]: progress }))
   }), [])
 
   useEffect(() => window.codey.onConversationStateChange((change) => {
@@ -390,7 +395,7 @@ export function App(): React.JSX.Element {
     })
   }
 
-  useEffect(updateScrollButton, [activeConversation?.messages, liveResponse, interactionLocked])
+  useEffect(updateScrollButton, [activeConversation?.messages, liveTimeline, interactionLocked])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -402,7 +407,6 @@ export function App(): React.JSX.Element {
     setActiveProjectId(project.id)
     setActiveConversationId(project.conversations[0]?.id ?? '')
     setOpenProjectMenuId(null)
-    setConversationTurn(null)
     setDraft('')
     setError('')
   }
@@ -534,7 +538,6 @@ export function App(): React.JSX.Element {
       setProjects((current) => [...current, project])
       setActiveProjectId(project.id)
       setActiveConversationId(project.conversations[0]?.id ?? '')
-      setConversationTurn(null)
       setProjectName('')
       setProjectDialogOpen(false)
     } catch {
@@ -598,7 +601,6 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.createConversation(activeProject.id)
       replaceProject(updated)
       setActiveConversationId(updated.conversations.at(-1)?.id ?? '')
-      setConversationTurn(null)
       setDraft('')
       setError('')
     } catch {
@@ -614,13 +616,16 @@ export function App(): React.JSX.Element {
       return
     }
 
+    const projectId = activeProject.id
+    const conversationId = activeConversation.id
+    const conversationKey = `${projectId}:${conversationId}`
     setDraft('')
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
       ...activeProject,
       conversations: activeProject.conversations.map((conversation) =>
-        conversation.id === activeConversation.id
+        conversation.id === conversationId
           ? {
               ...conversation,
               messages: [
@@ -632,85 +637,107 @@ export function App(): React.JSX.Element {
       ),
     }
     replaceProject(optimisticProject)
-    setLiveResponse({
-      projectId: activeProject.id,
-      conversationId: activeConversation.id,
-      timeline: [],
-    })
-    setConversationTurn({
-      projectId: activeProject.id,
-      conversationId: activeConversation.id,
-      userMessageId,
-      startedAt: Date.now(),
-      result: 'processing',
-    })
-    setStopping(false)
-    setSending(true)
+    setLiveResponses((current) => ({
+      ...current,
+      [conversationKey]: {
+        projectId,
+        conversationId,
+        timeline: [],
+      },
+    }))
+    setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
+    setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
+    setConversationTurns((current) => ({
+      ...current,
+      [conversationKey]: {
+        projectId,
+        conversationId,
+        userMessageId,
+        startedAt: Date.now(),
+        result: 'processing',
+      },
+    }))
 
     try {
-      const result = await window.codey.develop(
-        activeProject.id,
-        activeConversation.id,
-        content,
-      )
+      const result = await window.codey.develop(projectId, conversationId, content)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
-          (conversation) => conversation.id === activeConversation.id,
+          (conversation) => conversation.id === conversationId,
         )
         const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
           .reverse()
           .find((message) => message.role === 'user' && message.content === content)
-        setConversationTurn((current) => current ? {
+        setConversationTurns((current) => ({
           ...current,
-          userMessageId: updatedUserMessage?.id ?? current.userMessageId,
-        } : current)
+          [conversationKey]: {
+            ...current[conversationKey],
+            userMessageId: updatedUserMessage?.id ?? current[conversationKey]?.userMessageId ?? userMessageId,
+          },
+        }))
         replaceProject(result.project)
-        setLiveResponse(null)
       }
-      setConversationTurn((current) => current ? {
+      setConversationTurns((current) => ({
         ...current,
-        endedAt: Date.now(),
-        result: result.stopped
-          ? 'stopped'
-          : result.error
-            ? /timed out/i.test(result.error) ? 'timeout' : 'other'
-            : 'normal',
-        error: result.stopped ? undefined : result.error,
-      } : current)
-      if (result.error) {
+        [conversationKey]: {
+          ...current[conversationKey],
+          endedAt: Date.now(),
+          result: result.stopped
+            ? 'stopped'
+            : result.error
+              ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+              : 'normal',
+          error: result.stopped ? undefined : result.error,
+        },
+      }))
+      setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
+      if (result.error && conversationKey === activeConversationKeyRef.current) {
         const files = result.writtenFiles.length
           ? t('filesWritten', { count: result.writtenFiles.length })
           : ''
         setError(`${result.error}${files}`)
       }
     } catch {
-      setConversationTurn((current) => current ? {
+      setConversationTurns((current) => ({
         ...current,
-        endedAt: Date.now(),
-        result: 'other',
-        error: t('requestFailed'),
-      } : current)
-      setError(t('unableProcessRequest'))
+        [conversationKey]: {
+          ...current[conversationKey],
+          endedAt: Date.now(),
+          result: 'other',
+          error: t('requestFailed'),
+        },
+      }))
+      setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
+      if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
     } finally {
-      setSending(false)
-      setStopping(false)
+      setLiveResponses((current) => {
+        if (!current[conversationKey]) return current
+        const next = { ...current }
+        delete next[conversationKey]
+        return next
+      })
+      setStoppingConversations((current) => {
+        if (!current[conversationKey]) return current
+        const next = { ...current }
+        delete next[conversationKey]
+        return next
+      })
     }
   }
-
   async function stopMessage(): Promise<void> {
     if (!activeProject || !activeConversation || !conversationWorking || stopping) {
       return
     }
 
-    setStopping(true)
+    const conversationKey = `${activeProject.id}:${activeConversation.id}`
+    setStoppingConversations((current) => ({ ...current, [conversationKey]: true }))
     try {
       const accepted = await window.codey.stopDevelopment(activeProject.id, activeConversation.id)
       if (!accepted) {
-        setStopping(false)
+        setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
       }
     } catch {
-      setStopping(false)
-      setError(t('unableStopRequest'))
+      setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
+      if (conversationKey === activeConversationKeyRef.current) setError(t('unableStopRequest'))
     }
   }
 
@@ -748,7 +775,7 @@ export function App(): React.JSX.Element {
             Codey
           </div>
 
-          <Button appearance="primary" disabled={interactionLocked} onClick={openProjectDialog}>
+          <Button appearance="primary" onClick={openProjectDialog}>
             {t('newProject')}
           </Button>
 
@@ -760,7 +787,6 @@ export function App(): React.JSX.Element {
                   <div className="project-nav-row">
                     <Button
                       appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
-                      disabled={interactionLocked}
                       onClick={() => selectProject(project)}
                     >
                       {project.name}
@@ -770,7 +796,6 @@ export function App(): React.JSX.Element {
                       size="small"
                       aria-expanded={openProjectMenuId === project.id}
                       aria-label={t('projectOptions')}
-                      disabled={interactionLocked}
                       onClick={() => setOpenProjectMenuId((current) =>
                         current === project.id ? null : project.id
                       )}
@@ -815,7 +840,6 @@ export function App(): React.JSX.Element {
                 <p className="section-label">{t('conversations')}</p>
                 <Button
                   appearance="subtle"
-                  disabled={interactionLocked}
                   size="small"
                   onClick={() => void startNewConversation()}
                 >
@@ -828,11 +852,9 @@ export function App(): React.JSX.Element {
                     appearance={
                       conversation.id === activeConversationId ? 'secondary' : 'subtle'
                     }
-                    disabled={interactionLocked}
                     key={conversation.id}
                     onClick={() => {
                       setActiveConversationId(conversation.id)
-                      setConversationTurn(null)
                       setDraft('')
                       setError('')
                     }}
