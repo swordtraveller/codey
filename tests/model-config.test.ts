@@ -36,6 +36,8 @@ const config: AppConfig = {
   contextManagement: context(false),
   language: 'en',
   developerMode: false,
+  keepAwakeEnabled: false,
+  keepAwakeOnlyWhileWorking: true,
 }
 const project: Project = {
   id: 'project',

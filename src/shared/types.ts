@@ -48,6 +48,8 @@ export type AppConfig = {
   contextManagement: ContextManagementConfig
   language: AppLanguage
   developerMode: boolean
+  keepAwakeEnabled: boolean
+  keepAwakeOnlyWhileWorking: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -56,6 +58,8 @@ export const defaultAppConfig: AppConfig = {
   contextManagement: defaultContextManagementConfig,
   language: 'system',
   developerMode: false,
+  keepAwakeEnabled: false,
+  keepAwakeOnlyWhileWorking: true,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>

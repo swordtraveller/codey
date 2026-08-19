@@ -1211,6 +1211,30 @@ export function App(): React.JSX.Element {
                 </Field>
               </section>
               <section className="settings-group">
+                <h2>{t('powerSettings')}</h2>
+                <Switch
+                  checked={configDraft.keepAwakeEnabled}
+                  label={t('keepAwakeComputer')}
+                  onChange={(_, data) => setConfigDraft((current) => ({
+                    ...current,
+                    keepAwakeEnabled: data.checked,
+                  }))}
+                />
+                {configDraft.keepAwakeEnabled && (
+                  <p className="settings-warning" role="alert">{t('keepAwakeWarning')}</p>
+                )}
+                <Switch
+                  checked={configDraft.keepAwakeOnlyWhileWorking}
+                  className="nested-setting"
+                  disabled={!configDraft.keepAwakeEnabled}
+                  label={t('keepAwakeOnlyWhileWorking')}
+                  onChange={(_, data) => setConfigDraft((current) => ({
+                    ...current,
+                    keepAwakeOnlyWhileWorking: data.checked,
+                  }))}
+                />
+              </section>
+              <section className="settings-group">
                 <h2>{t('developerSettings')}</h2>
                 <Switch
                   checked={configDraft.developerMode}

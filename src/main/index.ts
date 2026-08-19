@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import type {
   AppConfig,
@@ -56,6 +56,27 @@ const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
 let mainWindow: BrowserWindow | null = null
+let keepAwakeBlockerId: number | null = null
+let keepAwakeEnabled = false
+let keepAwakeOnlyWhileWorking = true
+
+function updateKeepAwake(config?: AppConfig): void {
+  if (config) {
+    keepAwakeEnabled = config.keepAwakeEnabled
+    keepAwakeOnlyWhileWorking = config.keepAwakeOnlyWhileWorking
+  }
+
+  const conversationActive = [...conversationStates.values()].some((state) => state !== 'idle')
+  const shouldKeepAwake = keepAwakeEnabled && (!keepAwakeOnlyWhileWorking || conversationActive)
+  if (shouldKeepAwake && keepAwakeBlockerId === null) {
+    keepAwakeBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    log.debug('power.keep-awake.started', { mode: 'prevent-app-suspension' })
+  } else if (!shouldKeepAwake && keepAwakeBlockerId !== null) {
+    powerSaveBlocker.stop(keepAwakeBlockerId)
+    keepAwakeBlockerId = null
+    log.debug('power.keep-awake.stopped', {})
+  }
+}
 
 function conversationKey(projectId: string, conversationId: string): string {
   return `${projectId}:${conversationId}`
@@ -76,6 +97,7 @@ function setConversationState(
   } else {
     conversationStates.set(key, state)
   }
+  updateKeepAwake()
   const change: ConversationStateChange = { projectId, conversationId, state }
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.webContents.isDestroyed()) {
@@ -337,9 +359,11 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
-  ipcMain.handle('config:save', (_event, config: AppConfig) => {
+  ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
-    return saveConfig(config)
+    const saved = await saveConfig(config)
+    updateKeepAwake(saved)
+    return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('projects:create', async (_event, name: string) => {
@@ -418,6 +442,10 @@ app.whenReady().then(() => {
     runDebugOperation(projectId, conversationId, () => demoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:simulate', (_event, projectId: string, conversationId: string, requestTokens: number) =>
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
+
+  void readConfig()
+    .then(updateKeepAwake)
+    .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
   createMainWindow()
   app.on('activate', () => {
