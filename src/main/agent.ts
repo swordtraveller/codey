@@ -45,6 +45,7 @@ type AgentResult = {
   context?: ContextMetrics
   compressionNotices: ContextCompressionNotice[]
   summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
+  stopped?: boolean
   error?: string
 }
 
@@ -131,6 +132,16 @@ const modelRequestTimeoutMs = 180_000
 const maxNetworkAttempts = 2
 
 type CompletionError = Error & { partial?: ResponseMessage }
+
+function abortError(): Error {
+  const error = new Error('Operation stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
 
 function errorDetails(error: unknown): { name?: string; message: string; cause?: unknown } {
   if (!(error instanceof Error)) {
@@ -348,11 +359,15 @@ async function requestCompletion(
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
+    throwIfAborted(signal)
     const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
@@ -378,10 +393,13 @@ async function requestCompletion(
       const failure = createCompletionError(
         error,
         bestPartial,
-        timedOut
-          ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
-          : details.message,
+        signal?.aborted
+          ? 'Operation stopped'
+          : timedOut
+            ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
+            : details.message,
       )
+      if (signal?.aborted) throw failure
       log.error('model.request.failed', {
         attempt,
         maxAttempts: maxNetworkAttempts,
@@ -402,6 +420,7 @@ async function requestCompletion(
       throw failure
     } finally {
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -415,7 +434,7 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string },
+  runtime?: { conversationId: string; signal?: AbortSignal },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
@@ -461,6 +480,7 @@ export async function develop(
 
   try {
     for (let turn = 0; turn < 12; turn += 1) {
+      throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
       for (const message of [...managed.messages, ...managed.warmMessages]) {
@@ -478,6 +498,7 @@ export async function develop(
         for (const id of summary.sourceMessageIds) coldMessageIds.add(id)
       }
       onContextSnapshot?.(managed)
+      throwIfAborted(runtime?.signal)
       const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
@@ -502,7 +523,7 @@ export async function develop(
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
           onBlocks?.([...blocks, ...toMessageBlocks(message)])
-        })
+        }, runtime?.signal)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
@@ -510,11 +531,13 @@ export async function develop(
           blocks.push(...partialBlocks)
           onBlocks?.([...blocks])
         }
+        if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
           ? `Model connection interrupted after ${completedToolCalls} tool operation(s). Files already written were kept.`
           : error instanceof Error ? error.message : 'Request failed'
         throw new Error(message)
       }
+      throwIfAborted(runtime?.signal)
       const message = response.choices?.[0]?.message
       if (!message) {
         throw new Error('The model returned an empty response')
@@ -556,12 +579,28 @@ export async function develop(
         representation: 'original',
         contextSource: 'live',
       })
-      for (const toolCall of toolCalls) {
+      for (let index = 0; index < toolCalls.length; index += 1) {
+        const toolCall = toolCalls[index]
         let content: string
         try {
+          throwIfAborted(runtime?.signal)
           content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
         } catch (error) {
+          if (runtime?.signal?.aborted) {
+            for (const pending of toolCalls.slice(index)) {
+              history.push({
+                role: 'tool',
+                tool_call_id: pending.id,
+                content: 'Stopped by user before completion',
+                id: randomUUID(),
+                createdAt: new Date().toISOString(),
+                representation: 'original',
+                contextSource: 'live',
+              })
+            }
+            throw error
+          }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
         history.push({
@@ -573,10 +612,25 @@ export async function develop(
           representation: 'original',
           contextSource: 'live',
         })
+        if (runtime?.signal?.aborted) {
+          for (const pending of toolCalls.slice(index + 1)) {
+            history.push({
+              role: 'tool',
+              tool_call_id: pending.id,
+              content: 'Stopped by user before completion',
+              id: randomUUID(),
+              createdAt: new Date().toISOString(),
+              representation: 'original',
+              contextSource: 'live',
+            })
+          }
+          throw abortError()
+        }
       }
     }
     throw new Error('The model exceeded the tool-call limit')
   } catch (error) {
+    const stopped = runtime?.signal?.aborted === true
     return {
       blocks,
       writtenFiles,
@@ -584,7 +638,8 @@ export async function develop(
       context,
       compressionNotices,
       summaryArtifacts,
-      error: error instanceof Error ? error.message : 'Request failed',
+      stopped,
+      error: stopped ? undefined : error instanceof Error ? error.message : 'Request failed',
     }
   }
 }

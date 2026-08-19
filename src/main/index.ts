@@ -50,6 +50,7 @@ import {
 } from './workspace'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
+const conversationControllers = new Map<string, AbortController>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
 let mainWindow: BrowserWindow | null = null
 
@@ -148,6 +149,7 @@ async function developProject(
   conversationId: string,
   content: string,
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  signal?: AbortSignal,
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
@@ -211,7 +213,7 @@ async function developProject(
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
-    { conversationId },
+    { conversationId, signal },
   )
   project = await saveConversationContext(
     projectId,
@@ -236,7 +238,7 @@ async function developProject(
       result.blocks,
     )
   }
-  return { project, writtenFiles: result.writtenFiles, error: result.error }
+  return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
 function loadRenderer(window: BrowserWindow, query?: Record<string, string>): void {
@@ -349,6 +351,9 @@ app.whenReady().then(() => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
+    const key = conversationKey(projectId, conversationId)
+    const controller = new AbortController()
+    conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
       return await developProject(projectId, conversationId, content, (blocks) => {
@@ -356,10 +361,19 @@ app.whenReady().then(() => {
           const progress: DevelopmentProgress = { projectId, conversationId, blocks }
           event.sender.send('development:progress', progress)
         }
-      })
+      }, controller.signal)
     } finally {
+      if (conversationControllers.get(key) === controller) {
+        conversationControllers.delete(key)
+      }
       setConversationState(projectId, conversationId, 'idle')
     }
+  })
+  ipcMain.handle('development:stop', (_event, projectId: string, conversationId: string) => {
+    const controller = conversationControllers.get(conversationKey(projectId, conversationId))
+    if (!controller) return false
+    controller.abort()
+    return true
   })
 
   ipcMain.handle('context-debug:open', (_event, projectId: string, conversationId: string) =>

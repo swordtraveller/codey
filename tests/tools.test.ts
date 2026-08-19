@@ -106,6 +106,20 @@ describe('agent tools', () => {
     expect(await readFile(target, 'utf8')).toBe('same\nsame\n')
   })
 
+  it('does not start a file operation after the round is stopped', async () => {
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(runAgentTool(
+      project,
+      toolCall('write_file', { folder_id: 'root', path: 'stopped.txt', content: 'should not be written' }),
+      [],
+      { conversationId: 'conversation', signal: controller.signal },
+    )).rejects.toThrow('Operation stopped')
+
+    await expect(readFile(join(root, 'stopped.txt'), 'utf8')).rejects.toThrow()
+  })
+
   it('rejects path traversal before file access', async () => {
     await expect(runAgentTool(
       project,

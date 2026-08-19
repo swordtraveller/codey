@@ -183,6 +183,7 @@ export type DevelopmentProgress = {
 export type DevelopmentResult = {
   project?: Project
   writtenFiles: string[]
+  stopped?: boolean
   error?: string
 }
 

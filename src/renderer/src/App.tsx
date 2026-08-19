@@ -67,7 +67,7 @@ function isValidContextConfig(value: ContextManagementConfig): boolean {
     Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
 }
 
-type TurnResult = 'processing' | 'normal' | 'timeout' | 'other'
+type TurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
 
 type ConversationTurn = {
   projectId: string
@@ -99,11 +99,13 @@ function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.
   })
   const result = turn.result === 'processing'
     ? ''
-    : turn.result === 'normal'
-      ? t('normal')
-      : turn.result === 'timeout'
-        ? t('timeout')
-        : t('otherError', { error: turn.error ?? 'Unknown' })
+    : turn.result === 'stopped'
+      ? t('stopped')
+      : turn.result === 'normal'
+        ? t('normal')
+        : turn.result === 'timeout'
+          ? t('timeout')
+          : t('otherError', { error: turn.error ?? 'Unknown' })
 
   return (
     <p className="turn-stopwatch">
@@ -254,6 +256,7 @@ export function App(): React.JSX.Element {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
   const [conversationTurn, setConversationTurn] = useState<ConversationTurn | null>(null)
   const [saving, setSaving] = useState(false)
@@ -287,6 +290,7 @@ export function App(): React.JSX.Element {
     ? conversationStates[`${activeProject.id}:${activeConversation.id}`] ?? 'idle'
     : 'idle'
   const interactionLocked = sending || activeConversationState !== 'idle'
+  const conversationWorking = sending || activeConversationState === 'running'
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
   const liveBlocks =
     liveResponse?.projectId === activeProjectId &&
@@ -618,6 +622,7 @@ export function App(): React.JSX.Element {
       startedAt: Date.now(),
       result: 'processing',
     })
+    setStopping(false)
     setSending(true)
 
     try {
@@ -643,10 +648,12 @@ export function App(): React.JSX.Element {
       setConversationTurn((current) => current ? {
         ...current,
         endedAt: Date.now(),
-        result: result.error
-          ? /timed out/i.test(result.error) ? 'timeout' : 'other'
-          : 'normal',
-        error: result.error,
+        result: result.stopped
+          ? 'stopped'
+          : result.error
+            ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+            : 'normal',
+        error: result.stopped ? undefined : result.error,
       } : current)
       if (result.error) {
         const files = result.writtenFiles.length
@@ -664,6 +671,24 @@ export function App(): React.JSX.Element {
       setError(t('unableProcessRequest'))
     } finally {
       setSending(false)
+      setStopping(false)
+    }
+  }
+
+  async function stopMessage(): Promise<void> {
+    if (!activeProject || !activeConversation || !conversationWorking || stopping) {
+      return
+    }
+
+    setStopping(true)
+    try {
+      const accepted = await window.codey.stopDevelopment(activeProject.id, activeConversation.id)
+      if (!accepted) {
+        setStopping(false)
+      }
+    } catch {
+      setStopping(false)
+      setError(t('unableStopRequest'))
     }
   }
 
@@ -995,14 +1020,26 @@ export function App(): React.JSX.Element {
                     : t('describeTask')
               }
             />
-            <Button
-              appearance="primary"
-              disabled={!canSend || !draft.trim() || interactionLocked}
-              size="large"
-              type="submit"
-            >
-              {t('send')}
-            </Button>
+            {conversationWorking ? (
+              <Button
+                appearance="primary"
+                disabled={stopping || !activeProject || !activeConversation}
+                onClick={() => void stopMessage()}
+                size="large"
+                type="button"
+              >
+                {t('stop')}
+              </Button>
+            ) : (
+              <Button
+                appearance="primary"
+                disabled={!canSend || !draft.trim() || interactionLocked}
+                size="large"
+                type="submit"
+              >
+                {t('send')}
+              </Button>
+            )}
           </form>
         </section>
       </main>
