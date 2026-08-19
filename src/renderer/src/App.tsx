@@ -24,6 +24,7 @@ import type {
   ContextCompressionNotice,
   ContextManagementConfig,
   ConversationRuntimeState,
+  ConversationTurnRecord,
   DevelopmentTimelineItem,
 } from '../../shared/types'
 import {
@@ -72,19 +73,13 @@ function isValidContextConfig(value: ContextManagementConfig): boolean {
     Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
 }
 
-type TurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
-
-type ConversationTurn = {
+type ConversationTurn = ConversationTurnRecord & {
   projectId: string
   conversationId: string
   userMessageId: string
-  startedAt: number
-  endedAt?: number
-  result: TurnResult
-  error?: string
 }
 
-function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.Element {
+function ConversationStopwatch({ turn }: { turn: ConversationTurnRecord }): React.JSX.Element {
   const { t } = useTranslation()
   const [now, setNow] = useState(Date.now())
 
@@ -974,33 +969,39 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
-                {activeConversation.messages.map((message) => (
-                  <Fragment key={message.id}>
-                    <div className={`message ${message.role}`}>
-                      {message.compression ? (
-                        <CompressionMessage compression={message.compression} />
-                      ) : message.role === 'assistant' && message.blocks?.length ? (
-                        message.blocks.map((block, index) =>
-                          block.type === 'content' ? (
-                            <AssistantContent content={block.content} key={`${message.id}-${index}`} />
-                          ) : (
-                            <details className="function-call" key={block.id}>
-                              <summary>{block.name}</summary>
-                              <pre>{formatToolParameters(block.parameters)}</pre>
-                            </details>
-                          ),
-                        )
-                      ) : message.role === 'assistant' ? (
-                        <AssistantContent content={message.content} />
-                      ) : (
-                        <p>{message.content}</p>
-                      )}
-                    </div>
-                    {conversationTurn && conversationTurn.userMessageId === message.id && (
-                      <ConversationStopwatch turn={conversationTurn} />
-                    )}
-                  </Fragment>
-                ))}
+                {activeConversation.messages.map((message) => {
+                  const messageTurn = message.turn ?? (
+                    conversationTurn && conversationTurn.userMessageId === message.id
+                      ? conversationTurn
+                      : undefined
+                  )
+
+                  return (
+                    <Fragment key={message.id}>
+                      <div className={`message ${message.role}`}>
+                        {message.compression ? (
+                          <CompressionMessage compression={message.compression} />
+                        ) : message.role === 'assistant' && message.blocks?.length ? (
+                          message.blocks.map((block, index) =>
+                            block.type === 'content' ? (
+                              <AssistantContent content={block.content} key={`${message.id}-${index}`} />
+                            ) : (
+                              <details className="function-call" key={block.id}>
+                                <summary>{block.name}</summary>
+                                <pre>{formatToolParameters(block.parameters)}</pre>
+                              </details>
+                            ),
+                          )
+                        ) : message.role === 'assistant' ? (
+                          <AssistantContent content={message.content} />
+                        ) : (
+                          <p>{message.content}</p>
+                        )}
+                      </div>
+                      {messageTurn && <ConversationStopwatch turn={messageTurn} />}
+                    </Fragment>
+                  )
+                })}
                 {liveTimeline.length > 0 && (
                   <div className="message assistant live-response">
                     {liveTimeline.map((item, index) =>

@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   ContextCompressionNotice,
   ContextManagementConfig,
+  ConversationTurnRecord,
   Conversation,
   ModelConfigSnapshot,
   Project,
@@ -247,14 +248,31 @@ export async function addMessage(
   compression?: ContextCompressionNotice,
   modelConfig?: ModelConfigSnapshot,
   contextConfig?: ContextManagementConfig,
+  turn?: ConversationTurnRecord,
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
 
-  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig, turn })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }
+  await saveProjects()
+  return project
+}
+
+export async function updateConversationTurn(
+  projectId: string,
+  conversationId: string,
+  messageId: string,
+  turn: ConversationTurnRecord,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const message = findConversation(project, conversationId).messages.find((item) => item.id === messageId)
+  if (!message) {
+    throw new Error('Conversation message not found')
+  }
+  message.turn = turn
   await saveProjects()
   return project
 }

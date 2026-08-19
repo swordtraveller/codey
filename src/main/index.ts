@@ -7,6 +7,7 @@ import type {
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
+  ConversationTurnRecord,
   DevelopmentProgress,
   DevelopmentResult,
   DevelopmentTimelineItem,
@@ -48,6 +49,7 @@ import {
   setProjectContextConfig,
   setProjectModelConfig,
   updateConversationAgentMessages,
+  updateConversationTurn,
 } from './workspace'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
@@ -151,6 +153,7 @@ async function developProject(
   content: string,
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   signal?: AbortSignal,
+  startedAt = Date.now(),
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
@@ -184,9 +187,13 @@ async function developProject(
     undefined,
     createModelConfigSnapshot(modelConfig),
     contextConfig,
+    { startedAt, result: 'processing' },
   )
   const updatedConversation = project.conversations.find((item) => item.id === conversationId)
   if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
+
+  const userMessageId = updatedConversation.messages.at(-1)?.id
+  if (!userMessageId) return { project, writtenFiles: [], error: 'Conversation message not found' }
 
   const roundId = randomUUID()
   const persistedHistory = contextConfig.layeredEnabled
@@ -247,6 +254,13 @@ async function developProject(
     project = await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
   }
   await savePendingBlocks()
+  const turn: ConversationTurnRecord = {
+    startedAt,
+    endedAt: Date.now(),
+    result: result.stopped ? 'stopped' : result.error ? (/timed out|timeout/i.test(result.error) ? 'timeout' : 'other') : 'normal',
+    error: result.stopped ? undefined : result.error,
+  }
+  project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -362,6 +376,7 @@ app.whenReady().then(() => {
     }
     const key = conversationKey(projectId, conversationId)
     const controller = new AbortController()
+    const startedAt = Date.now()
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
@@ -370,7 +385,7 @@ app.whenReady().then(() => {
           const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)
         }
-      }, controller.signal)
+      }, controller.signal, startedAt)
     } finally {
       if (conversationControllers.get(key) === controller) {
         conversationControllers.delete(key)

@@ -88,6 +88,15 @@ export type DevelopmentTimelineItem =
   | { type: 'block'; block: AssistantMessageBlock }
   | { type: 'compression'; compression: ContextCompressionNotice }
 
+export type ConversationTurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
+
+export type ConversationTurnRecord = {
+  startedAt: number
+  endedAt?: number
+  result: ConversationTurnResult
+  error?: string
+}
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
@@ -96,6 +105,7 @@ export type ChatMessage = {
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
   contextConfig?: ContextManagementConfig
+  turn?: ConversationTurnRecord
   createdAt?: string
 }
 
