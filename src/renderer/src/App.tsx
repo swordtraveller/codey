@@ -19,12 +19,17 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
-import type { AppLanguage, ContextManagementConfig, ConversationRuntimeState } from '../../shared/types'
+import type {
+  AppLanguage,
+  ContextCompressionNotice,
+  ContextManagementConfig,
+  ConversationRuntimeState,
+  DevelopmentTimelineItem,
+} from '../../shared/types'
 import {
   defaultAppConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
-  type AssistantMessageBlock,
   type ModelConfig,
   type Project,
 } from '../../shared/types'
@@ -115,6 +120,23 @@ function ConversationStopwatch({ turn }: { turn: ConversationTurn }): React.JSX.
     </p>
   )
 }
+function CompressionMessage({ compression }: { compression: ContextCompressionNotice }): React.JSX.Element {
+  const { t } = useTranslation()
+
+  return (
+    <div className="compression-message">
+      <p>
+        {t('contextCompressed', {
+          original: compression.originalTokens.toLocaleString(),
+          compressed: compression.compressedTokens.toLocaleString(),
+          ratio: compression.compressionRatio.toFixed(2),
+        })}
+      </p>
+      <p>{t('method', { method: compression.method })}</p>
+    </div>
+  )
+}
+
 function AssistantContent({ content }: { content: string }): React.JSX.Element {
   const { t } = useTranslation()
   const fallback = <p>{content}</p>
@@ -267,7 +289,7 @@ export function App(): React.JSX.Element {
   const [liveResponse, setLiveResponse] = useState<{
     projectId: string
     conversationId: string
-    blocks: AssistantMessageBlock[]
+    timeline: DevelopmentTimelineItem[]
   } | null>(null)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
@@ -292,10 +314,10 @@ export function App(): React.JSX.Element {
   const interactionLocked = sending || activeConversationState !== 'idle'
   const conversationWorking = sending || activeConversationState === 'running'
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
-  const liveBlocks =
+  const liveTimeline =
     liveResponse?.projectId === activeProjectId &&
     liveResponse.conversationId === activeConversationId
-      ? liveResponse.blocks
+      ? liveResponse.timeline
       : []
 
   useEffect(() => {
@@ -613,7 +635,7 @@ export function App(): React.JSX.Element {
     setLiveResponse({
       projectId: activeProject.id,
       conversationId: activeConversation.id,
-      blocks: [],
+      timeline: [],
     })
     setConversationTurn({
       projectId: activeProject.id,
@@ -934,16 +956,7 @@ export function App(): React.JSX.Element {
                   <Fragment key={message.id}>
                     <div className={`message ${message.role}`}>
                       {message.compression ? (
-                        <div className="compression-message">
-                          <p>
-                            {t('contextCompressed', {
-                              original: message.compression.originalTokens.toLocaleString(),
-                              compressed: message.compression.compressedTokens.toLocaleString(),
-                              ratio: message.compression.compressionRatio.toFixed(2),
-                            })}
-                          </p>
-                          <p>{t('method', { method: message.compression.method })}</p>
-                        </div>
+                        <CompressionMessage compression={message.compression} />
                       ) : message.role === 'assistant' && message.blocks?.length ? (
                         message.blocks.map((block, index) =>
                           block.type === 'content' ? (
@@ -966,15 +979,20 @@ export function App(): React.JSX.Element {
                     )}
                   </Fragment>
                 ))}
-                {liveBlocks.length > 0 && (
+                {liveTimeline.length > 0 && (
                   <div className="message assistant live-response">
-                    {liveBlocks.map((block, index) =>
-                      block.type === 'content' ? (
-                        <AssistantContent content={block.content} key={`live-${index}`} />
+                    {liveTimeline.map((item, index) =>
+                      item.type === 'compression' ? (
+                        <CompressionMessage
+                          compression={item.compression}
+                          key={`live-compression-${index}`}
+                        />
+                      ) : item.block.type === 'content' ? (
+                        <AssistantContent content={item.block.content} key={`live-block-${index}`} />
                       ) : (
-                        <details className="function-call" key={block.id}>
-                          <summary>{block.name}</summary>
-                          <pre>{formatToolParameters(block.parameters)}</pre>
+                        <details className="function-call" key={item.block.id || `live-block-${index}`}>
+                          <summary>{item.block.name}</summary>
+                          <pre>{formatToolParameters(item.block.parameters)}</pre>
                         </details>
                       ),
                     )}

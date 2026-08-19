@@ -84,6 +84,10 @@ export type ContextCompressionNotice = {
   method: string
 }
 
+export type DevelopmentTimelineItem =
+  | { type: 'block'; block: AssistantMessageBlock }
+  | { type: 'compression'; compression: ContextCompressionNotice }
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
@@ -177,7 +181,7 @@ export type Project = {
 export type DevelopmentProgress = {
   projectId: string
   conversationId: string
-  blocks: AssistantMessageBlock[]
+  timeline: DevelopmentTimelineItem[]
 }
 
 export type DevelopmentResult = {

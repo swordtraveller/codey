@@ -9,6 +9,7 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentResult,
+  DevelopmentTimelineItem,
 } from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
@@ -148,7 +149,7 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
-  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   signal?: AbortSignal,
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
@@ -208,7 +209,7 @@ async function developProject(
       ...storedHistory,
       { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
     ],
-    onBlocks,
+    onProgress,
     (managed) => {
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
@@ -226,18 +227,26 @@ async function developProject(
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
   }
-  for (const compression of result.compressionNotices) {
-    project = await addMessage(projectId, conversationId, 'assistant', '', undefined, compression)
+  let pendingBlocks: AssistantMessageBlock[] = []
+  const savePendingBlocks = async (): Promise<void> => {
+    if (pendingBlocks.length === 0) return
+    const messageBlocks = pendingBlocks
+    const content = messageBlocks
+      .filter((block) => block.type === 'content')
+      .map((block) => block.content)
+      .join('\n\n')
+    pendingBlocks = []
+    project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks)
   }
-  if (result.reply || result.blocks?.length) {
-    project = await addMessage(
-      projectId,
-      conversationId,
-      'assistant',
-      result.reply ?? '',
-      result.blocks,
-    )
+  for (const item of result.timeline) {
+    if (item.type === 'block') {
+      pendingBlocks.push(item.block)
+      continue
+    }
+    await savePendingBlocks()
+    project = await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
   }
+  await savePendingBlocks()
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -356,9 +365,9 @@ app.whenReady().then(() => {
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, (blocks) => {
+      return await developProject(projectId, conversationId, content, (timeline) => {
         if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, blocks }
+          const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)
         }
       }, controller.signal)

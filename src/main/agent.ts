@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
   AssistantMessageBlock,
-  ContextCompressionNotice,
   ContextManagementConfig,
   ContextMetrics,
+  DevelopmentTimelineItem,
   ModelConfig,
   Project,
 } from '../shared/types'
@@ -38,12 +38,10 @@ type ChatChunk = {
 }
 
 type AgentResult = {
-  reply?: string
-  blocks?: AssistantMessageBlock[]
   writtenFiles: string[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
-  compressionNotices: ContextCompressionNotice[]
+  timeline: DevelopmentTimelineItem[]
   summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
   stopped?: boolean
   error?: string
@@ -432,7 +430,7 @@ export async function develop(
   config: ModelConfig,
   contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
-  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
   runtime?: { conversationId: string; signal?: AbortSignal },
 ): Promise<AgentResult> {
@@ -440,7 +438,7 @@ export async function develop(
     return {
       writtenFiles: [],
       agentMessages,
-      compressionNotices: [],
+      timeline: [],
       summaryArtifacts: [],
       error: 'Add a project folder before sending a request',
     }
@@ -471,8 +469,7 @@ export async function develop(
   }
   const history = toApiMessages(agentMessages)
   let context: ContextMetrics | undefined
-  const blocks: AssistantMessageBlock[] = []
-  const compressionNotices: ContextCompressionNotice[] = []
+  const timeline: DevelopmentTimelineItem[] = []
   const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
   const coldMessageIds = new Set<string>()
 
@@ -512,24 +509,31 @@ export async function develop(
         throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
       }
       if (methods.length > 0) {
-        compressionNotices.push({
-          originalTokens: managed.metrics.originalTokens,
-          compressedTokens: managed.metrics.compressedTokens,
-          compressionRatio: managed.metrics.compressionRatio,
-          method: methods.join(', '),
+        timeline.push({
+          type: 'compression',
+          compression: {
+            originalTokens: managed.metrics.originalTokens,
+            compressedTokens: managed.metrics.compressedTokens,
+            compressionRatio: managed.metrics.compressionRatio,
+            method: methods.join(', '),
+          },
         })
+        onProgress?.([...timeline])
       }
       let response: ChatResponse
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
-          onBlocks?.([...blocks, ...toMessageBlocks(message)])
+          onProgress?.([
+            ...timeline,
+            ...toMessageBlocks(message).map((block) => ({ type: 'block' as const, block })),
+          ])
         }, runtime?.signal)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
         if (partialBlocks.length > 0) {
-          blocks.push(...partialBlocks)
-          onBlocks?.([...blocks])
+          timeline.push(...partialBlocks.map((block) => ({ type: 'block' as const, block })))
+          onProgress?.([...timeline])
         }
         if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
@@ -553,23 +557,21 @@ export async function develop(
           throw new Error('The model returned an empty response')
         }
         const block = { type: 'content' as const, content: reply }
-        blocks.push(block)
-        onBlocks?.([...blocks])
+        timeline.push({ type: 'block', block })
+        onProgress?.([...timeline])
         history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
-          reply,
-          blocks,
           writtenFiles,
           agentMessages: toStoredMessages(history),
           context,
-          compressionNotices,
+          timeline,
           summaryArtifacts,
         }
       }
 
       const responseBlocks = toMessageBlocks(message)
-      blocks.push(...responseBlocks)
-      onBlocks?.([...blocks])
+      timeline.push(...responseBlocks.map((block) => ({ type: 'block' as const, block })))
+      onProgress?.([...timeline])
       history.push({
         role: 'assistant',
         content: message.content ?? null,
@@ -632,11 +634,10 @@ export async function develop(
   } catch (error) {
     const stopped = runtime?.signal?.aborted === true
     return {
-      blocks,
       writtenFiles,
       agentMessages: toStoredMessages(history),
       context,
-      compressionNotices,
+      timeline,
       summaryArtifacts,
       stopped,
       error: stopped ? undefined : error instanceof Error ? error.message : 'Request failed',
