@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppConfig, DevelopmentProgress } from '../shared/types'
+import type {
+  AppConfig,
+  ContextManagementConfig,
+  ConversationStateChange,
+  DevelopmentProgress,
+} from '../shared/types'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -17,6 +22,10 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('projects:add-folder', projectId),
     setProjectModelConfig: (projectId: string, modelConfigId: string | null) =>
       ipcRenderer.invoke('projects:set-model-config', projectId, modelConfigId),
+    setProjectContextConfig: (
+      projectId: string,
+      contextConfig: ContextManagementConfig | null,
+    ) => ipcRenderer.invoke('projects:set-context-config', projectId, contextConfig),
     createConversation: (projectId: string) =>
       ipcRenderer.invoke('conversations:create', projectId),
     setConversationModelConfig: (
@@ -29,6 +38,16 @@ contextBridge.exposeInMainWorld(
       conversationId,
       modelConfigId,
     ),
+    setConversationContextConfig: (
+      projectId: string,
+      conversationId: string,
+      contextConfig: ContextManagementConfig | null,
+    ) => ipcRenderer.invoke(
+      'conversations:set-context-config',
+      projectId,
+      conversationId,
+      contextConfig,
+    ),
     develop: (projectId: string, conversationId: string, content: string) =>
       ipcRenderer.invoke('development:send', projectId, conversationId, content),
     onDevelopmentProgress: (listener: (progress: DevelopmentProgress) => void) => {
@@ -37,5 +56,29 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('development:progress', handler)
       return () => ipcRenderer.removeListener('development:progress', handler)
     },
+    onConversationStateChange: (listener: (change: ConversationStateChange) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, change: ConversationStateChange) =>
+        listener(change)
+      ipcRenderer.on('conversation:state-change', handler)
+      return () => ipcRenderer.removeListener('conversation:state-change', handler)
+    },
+    openContextDebug: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:open', projectId, conversationId),
+    getContextDebugOverview: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:overview', projectId, conversationId),
+    getContextDebugRevision: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:revision', projectId, conversationId),
+    readColdMessage: (projectId: string, conversationId: string, messageId: string) =>
+      ipcRenderer.invoke('context-debug:read-cold', projectId, conversationId, messageId),
+    readContextLayerMessage: (projectId: string, conversationId: string, messageId: string) =>
+      ipcRenderer.invoke('context-debug:read-layer', projectId, conversationId, messageId),
+    searchColdContext: (projectId: string, conversationId: string, query: string) =>
+      ipcRenderer.invoke('context-debug:search', projectId, conversationId, query),
+    setContextPin: (projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
+      ipcRenderer.invoke('context-debug:set-pin', projectId, conversationId, messageId, pinnedToHot),
+    demoteContext: (projectId: string, conversationId: string, messageId?: string) =>
+      ipcRenderer.invoke('context-debug:demote', projectId, conversationId, messageId),
+    simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
+      ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
   }),
 )

@@ -23,6 +23,7 @@ describe('agent tools', () => {
       id: 'project',
       name: 'Project',
       defaultModelConfigId: null,
+      contextConfigOverride: null,
       folders: [{ id: 'root', path: root }],
       pythonEnvironmentFolderId: 'root',
       conversations: [],

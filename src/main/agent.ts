@@ -1,12 +1,14 @@
+import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
   AssistantMessageBlock,
   ContextCompressionNotice,
+  ContextManagementConfig,
   ContextMetrics,
   ModelConfig,
   Project,
 } from '../shared/types'
-import { manageContext, type ContextMessage } from './context'
+import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
 import { truncateOutput } from './sandbox'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -42,6 +44,7 @@ type AgentResult = {
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
   compressionNotices: ContextCompressionNotice[]
+  summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
   error?: string
 }
 
@@ -58,6 +61,8 @@ function mergeContextMetrics(
     ...next,
     originalTokens,
     compressionRatio: next.compressedTokens ? originalTokens / next.compressedTokens : 1,
+    layered: current.layered || next.layered,
+    recalled: current.recalled || next.recalled,
     filtered: current.filtered || next.filtered,
     rewritten: current.rewritten || next.rewritten,
     truncated: current.truncated || next.truncated,
@@ -66,10 +71,21 @@ function mergeContextMetrics(
 
 function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
   return messages.map((message) => ({
+    id: message.id ?? randomUUID(),
+    createdAt: message.createdAt ?? new Date().toISOString(),
     role: message.role,
     content: message.content,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
+    pinnedToHot: message.pinnedToHot,
+    representation: message.representation,
+    truthRefs: message.truthRefs,
+    contextLayer: message.contextLayer,
+    contextRegion: message.contextRegion,
+    contextSource: message.contextSource,
+    recalledAtRoundId: message.recalledAtRoundId,
+    lastAccessedAt: message.lastAccessedAt,
+    manualContextLayer: message.manualContextLayer,
   }))
 }
 
@@ -79,10 +95,21 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       message.role !== 'system',
     )
     .map((message) => ({
+      id: message.id ?? randomUUID(),
+      createdAt: message.createdAt ?? new Date().toISOString(),
       role: message.role,
       content: message.content,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
+      pinnedToHot: message.pinnedToHot,
+      representation: message.representation,
+      truthRefs: message.truthRefs,
+      contextLayer: message.contextLayer,
+      contextRegion: message.contextRegion,
+      contextSource: message.contextSource,
+      recalledAtRoundId: message.recalledAtRoundId,
+      lastAccessedAt: message.lastAccessedAt,
+      manualContextLayer: message.manualContextLayer,
     }))
 }
 
@@ -384,14 +411,18 @@ async function requestCompletion(
 export async function develop(
   project: Project,
   config: ModelConfig,
+  contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
   onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onContextSnapshot?: (result: ContextResult) => void,
+  runtime?: { conversationId: string },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
       writtenFiles: [],
       agentMessages,
       compressionNotices: [],
+      summaryArtifacts: [],
       error: 'Add a project folder before sending a request',
     }
   }
@@ -399,6 +430,8 @@ export async function develop(
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
   const systemMessage: ContextMessage = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
     role: 'system',
     content: [
       'You are a coding agent working in the project folders below.',
@@ -409,27 +442,54 @@ export async function develop(
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
-      'Tool calls and tool results are critical context and must be retained verbatim if conversation context is ever compacted.',
+      'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
+      'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+      'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
+      'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
+      'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
-  let apiMessages = [systemMessage, ...toApiMessages(agentMessages)]
+  const history = toApiMessages(agentMessages)
   let context: ContextMetrics | undefined
   const blocks: AssistantMessageBlock[] = []
   const compressionNotices: ContextCompressionNotice[] = []
+  const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
+  const coldMessageIds = new Set<string>()
 
   let completedToolCalls = 0
 
   try {
     for (let turn = 0; turn < 12; turn += 1) {
-      const managed = manageContext(apiMessages, tools, config)
-      apiMessages = managed.messages
+      const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
+      for (const message of [...managed.messages, ...managed.warmMessages]) {
+        const stored = history.find((candidate) => candidate.id === message.id)
+        if (!stored) continue
+        stored.contextLayer = message.contextLayer
+        stored.contextRegion = message.contextRegion
+        stored.contextSource = message.contextSource
+        stored.pinnedToHot = message.pinnedToHot
+        stored.representation = message.representation
+        stored.truthRefs = message.truthRefs
+      }
+      for (const summary of managed.summaryArtifacts) {
+        if (!summaryArtifacts.some((candidate) => candidate.id === summary.id)) summaryArtifacts.push(summary)
+        for (const id of summary.sourceMessageIds) coldMessageIds.add(id)
+      }
+      onContextSnapshot?.(managed)
+      const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
+        managed.metrics.layered && managed.metrics.compressedTokens < managed.metrics.originalTokens && 'layered',
+        managed.metrics.recalled && 'cold recall',
         managed.metrics.filtered && 'filter',
         managed.metrics.rewritten && 'rewrite',
         managed.metrics.truncated && 'truncate',
       ].filter((method): method is string => Boolean(method))
+      if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
+        throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
+      }
       if (methods.length > 0) {
         compressionNotices.push({
           originalTokens: managed.metrics.originalTokens,
@@ -438,12 +498,9 @@ export async function develop(
           method: methods.join(', '),
         })
       }
-      if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
-        throw new Error('Recent conversation exceeds the configured input budget')
-      }
       let response: ChatResponse
       try {
-        response = await requestCompletion(config, apiMessages, tools, (message) => {
+        response = await requestCompletion(config, requestMessages, tools, (message) => {
           onBlocks?.([...blocks, ...toMessageBlocks(message)])
         })
       } catch (error) {
@@ -475,30 +532,47 @@ export async function develop(
         const block = { type: 'content' as const, content: reply }
         blocks.push(block)
         onBlocks?.([...blocks])
-        apiMessages.push({ role: 'assistant', content: reply })
+        history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
           reply,
           blocks,
           writtenFiles,
-          agentMessages: toStoredMessages(apiMessages),
+          agentMessages: toStoredMessages(history),
           context,
           compressionNotices,
+          summaryArtifacts,
         }
       }
 
       const responseBlocks = toMessageBlocks(message)
       blocks.push(...responseBlocks)
       onBlocks?.([...blocks])
-      apiMessages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
+      history.push({
+        role: 'assistant',
+        content: message.content ?? null,
+        tool_calls: toolCalls,
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        representation: 'original',
+        contextSource: 'live',
+      })
       for (const toolCall of toolCalls) {
         let content: string
         try {
-          content = await runAgentTool(project, toolCall, writtenFiles)
+          content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
         } catch (error) {
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
-        apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content })
+        history.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content,
+          id: randomUUID(),
+          createdAt: new Date().toISOString(),
+          representation: 'original',
+          contextSource: 'live',
+        })
       }
     }
     throw new Error('The model exceeded the tool-call limit')
@@ -506,9 +580,10 @@ export async function develop(
     return {
       blocks,
       writtenFiles,
-      agentMessages: toStoredMessages(apiMessages),
+      agentMessages: toStoredMessages(history),
       context,
       compressionNotices,
+      summaryArtifacts,
       error: error instanceof Error ? error.message : 'Request failed',
     }
   }
