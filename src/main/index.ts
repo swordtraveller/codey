@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import type {
+  AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
   ContextManagementConfig,
@@ -44,6 +45,7 @@ import {
   getProject,
   getProjects,
   saveConversationContext,
+  setConversationAgentLimits,
   setConversationContextConfig,
   setConversationModelConfig,
   setProjectContextConfig,
@@ -195,6 +197,7 @@ async function developProject(
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  const agentLimits = structuredClone(conversation.agentLimits)
   if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
   }
@@ -234,6 +237,7 @@ async function developProject(
     project,
     modelConfig,
     contextConfig,
+    agentLimits,
     [
       ...storedHistory,
       { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
@@ -393,6 +397,10 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-context-config', (_event, projectId: string, conversationId: string, contextConfig: ContextManagementConfig | null) => {
     ensureIdle(projectId, conversationId)
     return setConversationContextConfig(projectId, conversationId, contextConfig)
+  })
+  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
   ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {

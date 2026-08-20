@@ -42,6 +42,18 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   coldRecallTokenBudget: 8_000,
 }
 
+export const maximumAgentLimit = 100
+
+export type AgentLimitsConfig = {
+  modelRequestsPerRound: number
+  toolCallsPerRequest: number
+}
+
+export const defaultAgentLimitsConfig: AgentLimitsConfig = {
+  modelRequestsPerRound: 12,
+  toolCallsPerRequest: 20,
+}
+
 export type AppConfig = {
   modelConfigs: ModelConfig[]
   activeModelConfigId: string | null
@@ -172,6 +184,7 @@ export type Conversation = {
   title: string
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  agentLimits: AgentLimitsConfig
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics

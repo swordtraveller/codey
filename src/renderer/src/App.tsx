@@ -20,6 +20,7 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
 import type {
+  AgentLimitsConfig,
   AppLanguage,
   ContextCompressionNotice,
   ContextManagementConfig,
@@ -28,9 +29,11 @@ import type {
   DevelopmentTimelineItem,
 } from '../../shared/types'
 import {
+  defaultAgentLimitsConfig,
   defaultAppConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
+  maximumAgentLimit,
   type ModelConfig,
   type Project,
 } from '../../shared/types'
@@ -71,6 +74,12 @@ function isValidContextConfig(value: ContextManagementConfig): boolean {
     Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
     Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
     Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
+}
+function isValidAgentLimits(value: AgentLimitsConfig): boolean {
+  return Number.isInteger(value.modelRequestsPerRound) &&
+    value.modelRequestsPerRound >= 1 && value.modelRequestsPerRound <= maximumAgentLimit &&
+    Number.isInteger(value.toolCallsPerRequest) &&
+    value.toolCallsPerRequest >= 1 && value.toolCallsPerRequest <= maximumAgentLimit
 }
 
 type ConversationTurn = ConversationTurnRecord & {
@@ -269,6 +278,10 @@ export function App(): React.JSX.Element {
   const [contextProjectId, setContextProjectId] = useState('')
   const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
   const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
+  const [agentLimitsDialogOpen, setAgentLimitsDialogOpen] = useState(false)
+  const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
+  const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
+  const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
@@ -474,6 +487,38 @@ export function App(): React.JSX.Element {
       setSaving(false)
     }
   }
+  function openAgentLimitsSettings(): void {
+    if (!activeProject || !activeConversation || interactionLocked) {
+      return
+    }
+    setAgentLimitsProjectId(activeProject.id)
+    setAgentLimitsConversationId(activeConversation.id)
+    setAgentLimitsDraft({ ...activeConversation.agentLimits })
+    setSettingsError('')
+    setAgentLimitsDialogOpen(true)
+  }
+
+  async function saveAgentLimitsSettings(): Promise<void> {
+    if (interactionLocked || !isValidAgentLimits(agentLimitsDraft)) {
+      return
+    }
+    setSaving(true)
+    setSettingsError('')
+    try {
+      const updated = await window.codey.setConversationAgentLimits(
+        agentLimitsProjectId,
+        agentLimitsConversationId,
+        agentLimitsDraft,
+      )
+      replaceProject(updated)
+      setAgentLimitsDialogOpen(false)
+    } catch {
+      setSettingsError(t('unableChangeAgentLimits'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   function updateSelectedModel(patch: Partial<ModelConfig>): void {
     const selectedId = configDraft.activeModelConfigId
     if (!selectedId) {
@@ -900,6 +945,11 @@ export function App(): React.JSX.Element {
                   {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
                 </Button>
               )}
+              {activeConversation && (
+                <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
+                  {t('agentLimits')}
+                </Button>
+              )}
               {context && contextStatus && (
                 <span
                   className="context-status"
@@ -1256,6 +1306,55 @@ export function App(): React.JSX.Element {
                 appearance="primary"
                 disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
                 onClick={() => void saveSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={agentLimitsDialogOpen} onOpenChange={(_, data) => setAgentLimitsDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('conversationAgentLimits')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
+                <Input
+                  disabled={interactionLocked}
+                  min={1}
+                  max={maximumAgentLimit}
+                  type="number"
+                  value={String(agentLimitsDraft.modelRequestsPerRound)}
+                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
+                    ...current,
+                    modelRequestsPerRound: Number(data.value),
+                  }))}
+                />
+              </Field>
+              <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
+                <Input
+                  disabled={interactionLocked}
+                  min={1}
+                  max={maximumAgentLimit}
+                  type="number"
+                  value={String(agentLimitsDraft.toolCallsPerRequest)}
+                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
+                    ...current,
+                    toolCallsPerRequest: Number(data.value),
+                  }))}
+                />
+              </Field>
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setAgentLimitsDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !isValidAgentLimits(agentLimitsDraft)}
+                onClick={() => void saveAgentLimitsSettings()}
               >
                 {saving ? t('saving') : t('save')}
               </Button>

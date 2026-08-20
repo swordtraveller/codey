@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AgentLimitsConfig,
   AppConfig,
   ContextManagementConfig,
   ConversationStateChange,
@@ -47,6 +48,16 @@ contextBridge.exposeInMainWorld(
       projectId,
       conversationId,
       contextConfig,
+    ),
+    setConversationAgentLimits: (
+      projectId: string,
+      conversationId: string,
+      agentLimits: AgentLimitsConfig,
+    ) => ipcRenderer.invoke(
+      'conversations:set-agent-limits',
+      projectId,
+      conversationId,
+      agentLimits,
     ),
     develop: (projectId: string, conversationId: string, content: string) =>
       ipcRenderer.invoke('development:send', projectId, conversationId, content),

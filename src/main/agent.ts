@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
+  AgentLimitsConfig,
   AssistantMessageBlock,
   ContextManagementConfig,
   ContextMetrics,
@@ -429,6 +430,7 @@ export async function develop(
   project: Project,
   config: ModelConfig,
   contextConfig: ContextManagementConfig,
+  agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
@@ -476,7 +478,7 @@ export async function develop(
   let completedToolCalls = 0
 
   try {
-    for (let turn = 0; turn < 12; turn += 1) {
+    for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
@@ -548,8 +550,8 @@ export async function develop(
       }
 
       const toolCalls = message.tool_calls ?? []
-      if (toolCalls.length > 20) {
-        throw new Error('The model returned too many tool calls')
+      if (toolCalls.length > agentLimits.toolCallsPerRequest) {
+        throw new Error('The model exceeded the configured per-request tool-call limit')
       }
       if (toolCalls.length === 0) {
         const reply = message.content?.trim()
@@ -630,7 +632,7 @@ export async function develop(
         }
       }
     }
-    throw new Error('The model exceeded the tool-call limit')
+    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
     const stopped = runtime?.signal?.aborted === true
     return {
