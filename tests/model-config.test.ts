@@ -6,6 +6,7 @@ import {
 } from '../src/main/context-config'
 import { createModelConfigSnapshot, resolveModelConfig } from '../src/main/model-config'
 import {
+  defaultAgentLimitsConfig,
   defaultContextManagementConfig,
   type AppConfig,
   type ContextManagementConfig,
@@ -36,6 +37,8 @@ const config: AppConfig = {
   contextManagement: context(false),
   language: 'en',
   developerMode: false,
+  keepAwakeEnabled: false,
+  keepAwakeOnlyWhileWorking: true,
 }
 const project: Project = {
   id: 'project',
@@ -51,6 +54,7 @@ const conversation: Conversation = {
   title: 'Conversation',
   modelConfigId: null,
   contextConfigOverride: null,
+  agentLimits: defaultAgentLimitsConfig,
   messages: [],
   agentMessages: [],
 }

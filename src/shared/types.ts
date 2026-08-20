@@ -42,12 +42,26 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   coldRecallTokenBudget: 8_000,
 }
 
+export const maximumAgentLimit = 100
+
+export type AgentLimitsConfig = {
+  modelRequestsPerRound: number
+  toolCallsPerRequest: number
+}
+
+export const defaultAgentLimitsConfig: AgentLimitsConfig = {
+  modelRequestsPerRound: 12,
+  toolCallsPerRequest: 20,
+}
+
 export type AppConfig = {
   modelConfigs: ModelConfig[]
   activeModelConfigId: string | null
   contextManagement: ContextManagementConfig
   language: AppLanguage
   developerMode: boolean
+  keepAwakeEnabled: boolean
+  keepAwakeOnlyWhileWorking: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -56,6 +70,8 @@ export const defaultAppConfig: AppConfig = {
   contextManagement: defaultContextManagementConfig,
   language: 'system',
   developerMode: false,
+  keepAwakeEnabled: false,
+  keepAwakeOnlyWhileWorking: true,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -84,6 +100,19 @@ export type ContextCompressionNotice = {
   method: string
 }
 
+export type DevelopmentTimelineItem =
+  | { type: 'block'; block: AssistantMessageBlock }
+  | { type: 'compression'; compression: ContextCompressionNotice }
+
+export type ConversationTurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
+
+export type ConversationTurnRecord = {
+  startedAt: number
+  endedAt?: number
+  result: ConversationTurnResult
+  error?: string
+}
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
@@ -92,6 +121,7 @@ export type ChatMessage = {
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
   contextConfig?: ContextManagementConfig
+  turn?: ConversationTurnRecord
   createdAt?: string
 }
 
@@ -154,6 +184,7 @@ export type Conversation = {
   title: string
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  agentLimits: AgentLimitsConfig
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
@@ -177,12 +208,13 @@ export type Project = {
 export type DevelopmentProgress = {
   projectId: string
   conversationId: string
-  blocks: AssistantMessageBlock[]
+  timeline: DevelopmentTimelineItem[]
 }
 
 export type DevelopmentResult = {
   project?: Project
   writtenFiles: string[]
+  stopped?: boolean
   error?: string
 }
 

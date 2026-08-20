@@ -2,22 +2,27 @@ import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type {
-  AssistantMessageBlock,
-  ChatMessage,
-  ContextCompressionNotice,
-  ContextManagementConfig,
-  Conversation,
-  ModelConfigSnapshot,
-  Project,
-  ProjectFolder,
+import {
+  defaultAgentLimitsConfig,
+  type AgentLimitsConfig,
+  type AssistantMessageBlock,
+  type ChatMessage,
+  type ContextCompressionNotice,
+  type ContextManagementConfig,
+  type ConversationTurnRecord,
+  type Conversation,
+  type ModelConfigSnapshot,
+  type Project,
+  type ProjectFolder,
 } from '../shared/types'
+import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 
-type StoredConversation = Omit<Conversation, 'agentMessages' | 'modelConfigId' | 'contextConfigOverride'> & {
+type StoredConversation = Omit<Conversation, 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits'> & {
   agentMessages?: Conversation['agentMessages']
   modelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
+  agentLimits?: Partial<AgentLimitsConfig>
 }
 
 type StoredProject = Omit<
@@ -41,6 +46,15 @@ function normalizeOverride(
   value: Partial<ContextManagementConfig> | null | undefined,
 ): ContextManagementConfig | null {
   return value ? normalizeContextManagementConfig(value) : null
+}
+
+function normalizeStoredAgentLimits(
+  value: Partial<AgentLimitsConfig> | undefined,
+): AgentLimitsConfig {
+  const normalized = normalizeAgentLimitsConfig(value)
+  return isValidAgentLimitsConfig(normalized)
+    ? normalized
+    : { ...defaultAgentLimitsConfig }
 }
 
 function validateOverride(contextConfig: ContextManagementConfig | null): ContextManagementConfig | null {
@@ -68,6 +82,7 @@ function normalizeProject(value: StoredProject): Project {
       ...conversation,
       modelConfigId: conversation.modelConfigId ?? null,
       contextConfigOverride: normalizeOverride(conversation.contextConfigOverride),
+      agentLimits: normalizeStoredAgentLimits(conversation.agentLimits),
       agentMessages:
         conversation.agentMessages ??
         conversation.messages.map(({ role, content }) => ({ role, content })),
@@ -93,6 +108,7 @@ async function loadProjects(): Promise<Project[]> {
       project.conversations.some((conversation) =>
         conversation.modelConfigId === undefined ||
         conversation.contextConfigOverride === undefined ||
+        conversation.agentLimits === undefined ||
         !conversation.agentMessages,
       ),
     )
@@ -120,6 +136,7 @@ function createConversationRecord(index: number): Conversation {
     title: `Conversation ${index}`,
     modelConfigId: null,
     contextConfigOverride: null,
+    agentLimits: { ...defaultAgentLimitsConfig },
     messages: [],
     agentMessages: [],
   }
@@ -238,6 +255,21 @@ export async function setConversationContextConfig(
   return project
 }
 
+export async function setConversationAgentLimits(
+  projectId: string,
+  conversationId: string,
+  agentLimits: AgentLimitsConfig,
+): Promise<Project> {
+  const normalized = normalizeAgentLimitsConfig(agentLimits)
+  if (!isValidAgentLimitsConfig(normalized)) {
+    throw new Error('Enter valid Agent limits')
+  }
+  const project = await findProject(projectId)
+  findConversation(project, conversationId).agentLimits = normalized
+  await saveProjects()
+  return project
+}
+
 export async function addMessage(
   projectId: string,
   conversationId: string,
@@ -247,14 +279,31 @@ export async function addMessage(
   compression?: ContextCompressionNotice,
   modelConfig?: ModelConfigSnapshot,
   contextConfig?: ContextManagementConfig,
+  turn?: ConversationTurnRecord,
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
 
-  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig })
+  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig, turn })
   if (role === 'user' && conversation.messages.length === 1) {
     conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
   }
+  await saveProjects()
+  return project
+}
+
+export async function updateConversationTurn(
+  projectId: string,
+  conversationId: string,
+  messageId: string,
+  turn: ConversationTurnRecord,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const message = findConversation(project, conversationId).messages.find((item) => item.id === messageId)
+  if (!message) {
+    throw new Error('Conversation message not found')
+  }
+  message.turn = turn
   await saveProjects()
   return project
 }

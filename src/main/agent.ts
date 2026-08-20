@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
+  AgentLimitsConfig,
   AssistantMessageBlock,
-  ContextCompressionNotice,
   ContextManagementConfig,
   ContextMetrics,
+  DevelopmentTimelineItem,
   ModelConfig,
   Project,
 } from '../shared/types'
@@ -38,13 +39,12 @@ type ChatChunk = {
 }
 
 type AgentResult = {
-  reply?: string
-  blocks?: AssistantMessageBlock[]
   writtenFiles: string[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
-  compressionNotices: ContextCompressionNotice[]
+  timeline: DevelopmentTimelineItem[]
   summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
+  stopped?: boolean
   error?: string
 }
 
@@ -131,6 +131,16 @@ const modelRequestTimeoutMs = 180_000
 const maxNetworkAttempts = 2
 
 type CompletionError = Error & { partial?: ResponseMessage }
+
+function abortError(): Error {
+  const error = new Error('Operation stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
 
 function errorDetails(error: unknown): { name?: string; message: string; cause?: unknown } {
   if (!(error instanceof Error)) {
@@ -348,11 +358,15 @@ async function requestCompletion(
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
+    throwIfAborted(signal)
     const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
@@ -378,10 +392,13 @@ async function requestCompletion(
       const failure = createCompletionError(
         error,
         bestPartial,
-        timedOut
-          ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
-          : details.message,
+        signal?.aborted
+          ? 'Operation stopped'
+          : timedOut
+            ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
+            : details.message,
       )
+      if (signal?.aborted) throw failure
       log.error('model.request.failed', {
         attempt,
         maxAttempts: maxNetworkAttempts,
@@ -402,6 +419,7 @@ async function requestCompletion(
       throw failure
     } finally {
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -412,16 +430,17 @@ export async function develop(
   project: Project,
   config: ModelConfig,
   contextConfig: ContextManagementConfig,
+  agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
-  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string },
+  runtime?: { conversationId: string; signal?: AbortSignal },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
       writtenFiles: [],
       agentMessages,
-      compressionNotices: [],
+      timeline: [],
       summaryArtifacts: [],
       error: 'Add a project folder before sending a request',
     }
@@ -452,15 +471,15 @@ export async function develop(
   }
   const history = toApiMessages(agentMessages)
   let context: ContextMetrics | undefined
-  const blocks: AssistantMessageBlock[] = []
-  const compressionNotices: ContextCompressionNotice[] = []
+  const timeline: DevelopmentTimelineItem[] = []
   const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
   const coldMessageIds = new Set<string>()
 
   let completedToolCalls = 0
 
   try {
-    for (let turn = 0; turn < 12; turn += 1) {
+    for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
+      throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
       for (const message of [...managed.messages, ...managed.warmMessages]) {
@@ -478,6 +497,7 @@ export async function develop(
         for (const id of summary.sourceMessageIds) coldMessageIds.add(id)
       }
       onContextSnapshot?.(managed)
+      throwIfAborted(runtime?.signal)
       const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
@@ -491,38 +511,47 @@ export async function develop(
         throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
       }
       if (methods.length > 0) {
-        compressionNotices.push({
-          originalTokens: managed.metrics.originalTokens,
-          compressedTokens: managed.metrics.compressedTokens,
-          compressionRatio: managed.metrics.compressionRatio,
-          method: methods.join(', '),
+        timeline.push({
+          type: 'compression',
+          compression: {
+            originalTokens: managed.metrics.originalTokens,
+            compressedTokens: managed.metrics.compressedTokens,
+            compressionRatio: managed.metrics.compressionRatio,
+            method: methods.join(', '),
+          },
         })
+        onProgress?.([...timeline])
       }
       let response: ChatResponse
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
-          onBlocks?.([...blocks, ...toMessageBlocks(message)])
-        })
+          onProgress?.([
+            ...timeline,
+            ...toMessageBlocks(message).map((block) => ({ type: 'block' as const, block })),
+          ])
+        }, runtime?.signal)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
         if (partialBlocks.length > 0) {
-          blocks.push(...partialBlocks)
-          onBlocks?.([...blocks])
+          timeline.push(...partialBlocks.map((block) => ({ type: 'block' as const, block })))
+          onProgress?.([...timeline])
         }
+        if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
           ? `Model connection interrupted after ${completedToolCalls} tool operation(s). Files already written were kept.`
           : error instanceof Error ? error.message : 'Request failed'
         throw new Error(message)
       }
+      throwIfAborted(runtime?.signal)
       const message = response.choices?.[0]?.message
       if (!message) {
         throw new Error('The model returned an empty response')
       }
 
       const toolCalls = message.tool_calls ?? []
-      if (toolCalls.length > 20) {
-        throw new Error('The model returned too many tool calls')
+      if (toolCalls.length > agentLimits.toolCallsPerRequest) {
+        throw new Error('The model exceeded the configured per-request tool-call limit')
       }
       if (toolCalls.length === 0) {
         const reply = message.content?.trim()
@@ -530,23 +559,21 @@ export async function develop(
           throw new Error('The model returned an empty response')
         }
         const block = { type: 'content' as const, content: reply }
-        blocks.push(block)
-        onBlocks?.([...blocks])
+        timeline.push({ type: 'block', block })
+        onProgress?.([...timeline])
         history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
-          reply,
-          blocks,
           writtenFiles,
           agentMessages: toStoredMessages(history),
           context,
-          compressionNotices,
+          timeline,
           summaryArtifacts,
         }
       }
 
       const responseBlocks = toMessageBlocks(message)
-      blocks.push(...responseBlocks)
-      onBlocks?.([...blocks])
+      timeline.push(...responseBlocks.map((block) => ({ type: 'block' as const, block })))
+      onProgress?.([...timeline])
       history.push({
         role: 'assistant',
         content: message.content ?? null,
@@ -556,12 +583,28 @@ export async function develop(
         representation: 'original',
         contextSource: 'live',
       })
-      for (const toolCall of toolCalls) {
+      for (let index = 0; index < toolCalls.length; index += 1) {
+        const toolCall = toolCalls[index]
         let content: string
         try {
+          throwIfAborted(runtime?.signal)
           content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
         } catch (error) {
+          if (runtime?.signal?.aborted) {
+            for (const pending of toolCalls.slice(index)) {
+              history.push({
+                role: 'tool',
+                tool_call_id: pending.id,
+                content: 'Stopped by user before completion',
+                id: randomUUID(),
+                createdAt: new Date().toISOString(),
+                representation: 'original',
+                contextSource: 'live',
+              })
+            }
+            throw error
+          }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
         history.push({
@@ -573,18 +616,33 @@ export async function develop(
           representation: 'original',
           contextSource: 'live',
         })
+        if (runtime?.signal?.aborted) {
+          for (const pending of toolCalls.slice(index + 1)) {
+            history.push({
+              role: 'tool',
+              tool_call_id: pending.id,
+              content: 'Stopped by user before completion',
+              id: randomUUID(),
+              createdAt: new Date().toISOString(),
+              representation: 'original',
+              contextSource: 'live',
+            })
+          }
+          throw abortError()
+        }
       }
     }
-    throw new Error('The model exceeded the tool-call limit')
+    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
+    const stopped = runtime?.signal?.aborted === true
     return {
-      blocks,
       writtenFiles,
       agentMessages: toStoredMessages(history),
       context,
-      compressionNotices,
+      timeline,
       summaryArtifacts,
-      error: error instanceof Error ? error.message : 'Request failed',
+      stopped,
+      error: stopped ? undefined : error instanceof Error ? error.message : 'Request failed',
     }
   }
 }

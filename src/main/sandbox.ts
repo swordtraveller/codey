@@ -309,6 +309,16 @@ function killChild(child: ChildProcess): void {
   }
 }
 
+function abortError(): Error {
+  const error = new Error('Operation stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
+
 function runProcess(
   command: string,
   args: string[],
@@ -316,8 +326,13 @@ function runProcess(
   timeoutMs: number,
   env?: NodeJS.ProcessEnv,
   input?: string,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   return new Promise((resolveProcess, rejectProcess) => {
+    if (signal?.aborted) {
+      rejectProcess(abortError())
+      return
+    }
     const startedAt = Date.now()
     const child = spawn(command, args, {
       cwd,
@@ -329,13 +344,25 @@ function runProcess(
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let aborted = false
     let settled = false
+    const onAbort = (): void => {
+      if (!settled) {
+        aborted = true
+        killChild(child)
+      }
+    }
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
     const timer = setTimeout(() => {
       if (!settled) {
         timedOut = true
         killChild(child)
       }
     }, timeoutMs)
+    signal?.addEventListener('abort', onAbort, { once: true })
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
       stdout = appendOutput(stdout, chunk)
@@ -346,16 +373,18 @@ function runProcess(
     child.once('error', (error) => {
       if (!settled) {
         settled = true
-        clearTimeout(timer)
-        rejectProcess(error)
+        cleanup()
+        rejectProcess(aborted ? abortError() : error)
       }
     })
     child.once('close', (exitCode) => {
-      if (settled) {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (aborted) {
+        rejectProcess(abortError())
         return
       }
-      settled = true
-      clearTimeout(timer)
       resolveProcess({
         exitCode,
         stdout: truncateOutput(stdout),
@@ -364,9 +393,7 @@ function runProcess(
         durationMs: Date.now() - startedAt,
       })
     })
-    if (input !== undefined) {
-      child.stdin?.end(input)
-    }
+    if (input !== undefined) child.stdin?.end(input)
   })
 }
 
@@ -392,7 +419,7 @@ function runnerPath(projectRoot: string): string {
   return safeResolvePath(venvPath(projectRoot), '.codey_runner.py')
 }
 
-async function createVenv(projectRoot: string): Promise<void> {
+async function createVenv(projectRoot: string, signal?: AbortSignal): Promise<void> {
   const candidates = process.platform === 'win32'
     ? [{ command: 'py', args: ['-3'] }, { command: 'python', args: [] }]
     : [{ command: 'python3', args: [] }, { command: 'python', args: [] }]
@@ -404,6 +431,9 @@ async function createVenv(projectRoot: string): Promise<void> {
         [...candidate.args, '-m', 'venv', venvPath(projectRoot)],
         projectRoot,
         defaultTimeoutMs,
+        undefined,
+        undefined,
+        signal,
       )
       if (!result.timedOut && result.exitCode === 0) {
         return
@@ -418,13 +448,13 @@ async function createVenv(projectRoot: string): Promise<void> {
   )
 }
 
-async function initializePythonEnvironment(projectRoot: string): Promise<void> {
+async function initializePythonEnvironment(projectRoot: string, signal?: AbortSignal): Promise<void> {
   try {
     await safeResolveExistingPath(projectRoot, 'agent_venv')
     await access(pythonPath(projectRoot))
     await access(pipPath(projectRoot))
   } catch {
-    await createVenv(projectRoot)
+    await createVenv(projectRoot, signal)
     await safeResolveExistingPath(projectRoot, 'agent_venv')
     await access(pythonPath(projectRoot))
     await access(pipPath(projectRoot))
@@ -433,15 +463,19 @@ async function initializePythonEnvironment(projectRoot: string): Promise<void> {
   await writeFile(runnerPath(projectRoot), runnerSource, 'utf8')
 }
 
-export async function ensurePythonEnvironment(projectRoot: string): Promise<void> {
+export async function ensurePythonEnvironment(projectRoot: string, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
   const root = await safeResolveExistingPath(projectRoot, '.')
   const existingTask = environmentTasks.get(root)
   if (existingTask) {
-    return existingTask
+    await existingTask
+    throwIfAborted(signal)
+    return
   }
-  const task = initializePythonEnvironment(root).finally(() => environmentTasks.delete(root))
+  const task = initializePythonEnvironment(root, signal).finally(() => environmentTasks.delete(root))
   environmentTasks.set(root, task)
-  return task
+  await task
+  throwIfAborted(signal)
 }
 
 function normalizeTimeout(timeoutSeconds: number): number {
@@ -480,9 +514,11 @@ async function runSandboxMode(
   timeoutMs: number,
   cwd: string,
   input?: string,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
-  await ensurePythonEnvironment(root)
+  await ensurePythonEnvironment(root, signal)
+  throwIfAborted(signal)
   await mkdir(temporaryDirectory, { recursive: true })
   return runProcess(
     pythonPath(root),
@@ -500,6 +536,7 @@ async function runSandboxMode(
       XDG_CACHE_HOME: temporaryDirectory,
     },
     input,
+    signal,
   )
 }
 
@@ -522,6 +559,7 @@ export async function executePythonCode(
   workingRoot: string,
   code: string,
   timeoutSeconds: number,
+  signal?: AbortSignal,
 ): Promise<PythonExecutionResult> {
   const root = await safeResolveExistingPath(projectRoot, '.')
   const roots = await projectRoots(projectFolders)
@@ -530,7 +568,7 @@ export async function executePythonCode(
     throw new Error('Working directory is outside the project folders')
   }
   const timeoutMs = normalizeTimeout(timeoutSeconds)
-  const result = await runSandboxMode(root, roots, 'code', [], timeoutMs, workingDirectory, code)
+  const result = await runSandboxMode(root, roots, 'code', [], timeoutMs, workingDirectory, code, signal)
   return executionResult(result, timeoutMs)
 }
 
@@ -541,6 +579,7 @@ export async function runPythonScript(
   filePath: string,
   argv: string[],
   timeoutSeconds: number,
+  signal?: AbortSignal,
 ): Promise<PythonExecutionResult> {
   if (!filePath.toLowerCase().endsWith('.py')) {
     throw new Error('file_path must reference a .py file')
@@ -553,7 +592,7 @@ export async function runPythonScript(
     throw new Error('Script folder is outside the project folders')
   }
   const timeoutMs = normalizeTimeout(timeoutSeconds)
-  const result = await runSandboxMode(root, roots, 'script', [script, ...argv], timeoutMs, selectedRoot)
+  const result = await runSandboxMode(root, roots, 'script', [script, ...argv], timeoutMs, selectedRoot, undefined, signal)
   return executionResult(result, timeoutMs)
 }
 
@@ -568,13 +607,15 @@ function distributionName(specifier: string): string {
 export async function installPythonPackages(
   projectRoot: string,
   packages: string[],
+  signal?: AbortSignal,
 ): Promise<PythonInstallResult> {
   if (packages.length === 0 || packages.length > 20 || packages.some((item) => !isPackageName(item))) {
     throw new Error('Provide 1 to 20 valid Python package names')
   }
   const root = await safeResolveExistingPath(projectRoot, '.')
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
-  await ensurePythonEnvironment(root)
+  await ensurePythonEnvironment(root, signal)
+  throwIfAborted(signal)
   await mkdir(temporaryDirectory, { recursive: true })
   const result = await runProcess(
     pipPath(root),
@@ -582,6 +623,8 @@ export async function installPythonPackages(
     root,
     defaultTimeoutMs,
     { ...process.env, TEMP: temporaryDirectory, TMP: temporaryDirectory, TMPDIR: temporaryDirectory },
+    undefined,
+    signal,
   )
   const roots = [root]
   const names = packages.map(distributionName)
@@ -593,6 +636,7 @@ export async function installPythonPackages(
     30_000,
     root,
     JSON.stringify(names),
+    signal,
   )
   let installedVersions: Record<string, string> = {}
   try {
@@ -610,9 +654,10 @@ export async function installPythonPackages(
 
 export async function getPythonEnvironmentInfo(
   projectRoot: string,
+  signal?: AbortSignal,
 ): Promise<PythonEnvironmentInfo> {
   const root = await safeResolveExistingPath(projectRoot, '.')
-  const result = await runSandboxMode(root, [root], 'env_info', [], 30_000, root)
+  const result = await runSandboxMode(root, [root], 'env_info', [], 30_000, root, undefined, signal)
   if (result.timedOut || result.exitCode !== 0) {
     throw new Error(result.stderr || 'Unable to inspect Python environment')
   }
@@ -623,6 +668,7 @@ export async function listPythonSymbols(
   projectRoot: string,
   fileRoot: string,
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<PythonSymbolsResult> {
   if (!filePath.toLowerCase().endsWith('.py')) {
     throw new Error('file_path must reference a .py file')
@@ -630,7 +676,7 @@ export async function listPythonSymbols(
   const root = await safeResolveExistingPath(projectRoot, '.')
   const selectedRoot = await safeResolveExistingPath(fileRoot, '.')
   const target = await safeResolveExistingPath(selectedRoot, filePath)
-  const result = await runSandboxMode(root, [selectedRoot], 'symbols', [target], 30_000, selectedRoot)
+  const result = await runSandboxMode(root, [selectedRoot], 'symbols', [target], 30_000, selectedRoot, undefined, signal)
   if (result.timedOut || result.exitCode !== 0) {
     throw new Error(result.stderr || 'Unable to parse Python symbols')
   }

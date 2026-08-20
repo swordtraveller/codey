@@ -1,4 +1,5 @@
 import type {
+  AgentLimitsConfig,
   AppConfig,
   ColdRecallPreview,
   ContextDebugMessage,
@@ -40,11 +41,17 @@ declare global {
         conversationId: string,
         contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
+      setConversationAgentLimits(
+        projectId: string,
+        conversationId: string,
+        agentLimits: AgentLimitsConfig,
+      ): Promise<Project>
       develop(
         projectId: string,
         conversationId: string,
         content: string,
       ): Promise<DevelopmentResult>
+      stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
       onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
       openContextDebug(projectId: string, conversationId: string): Promise<void>

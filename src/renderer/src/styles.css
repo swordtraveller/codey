@@ -492,6 +492,16 @@ h1 {
   font-weight: 600;
 }
 
+.settings-warning {
+  margin: 0;
+  color: #9a6700;
+  font-size: 13px;
+}
+
+.nested-setting {
+  margin-left: 20px;
+}
+
 .dialog-error {
   margin: 0;
   color: #bc2f32;

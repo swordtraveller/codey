@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } from 'electron'
 import { join } from 'node:path'
 import type {
+  AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
+  ConversationTurnRecord,
   DevelopmentProgress,
   DevelopmentResult,
+  DevelopmentTimelineItem,
 } from '../shared/types'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
@@ -42,16 +45,40 @@ import {
   getProject,
   getProjects,
   saveConversationContext,
+  setConversationAgentLimits,
   setConversationContextConfig,
   setConversationModelConfig,
   setProjectContextConfig,
   setProjectModelConfig,
   updateConversationAgentMessages,
+  updateConversationTurn,
 } from './workspace'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
+const conversationControllers = new Map<string, AbortController>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
 let mainWindow: BrowserWindow | null = null
+let keepAwakeBlockerId: number | null = null
+let keepAwakeEnabled = false
+let keepAwakeOnlyWhileWorking = true
+
+function updateKeepAwake(config?: AppConfig): void {
+  if (config) {
+    keepAwakeEnabled = config.keepAwakeEnabled
+    keepAwakeOnlyWhileWorking = config.keepAwakeOnlyWhileWorking
+  }
+
+  const conversationActive = [...conversationStates.values()].some((state) => state !== 'idle')
+  const shouldKeepAwake = keepAwakeEnabled && (!keepAwakeOnlyWhileWorking || conversationActive)
+  if (shouldKeepAwake && keepAwakeBlockerId === null) {
+    keepAwakeBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    log.debug('power.keep-awake.started', { mode: 'prevent-app-suspension' })
+  } else if (!shouldKeepAwake && keepAwakeBlockerId !== null) {
+    powerSaveBlocker.stop(keepAwakeBlockerId)
+    keepAwakeBlockerId = null
+    log.debug('power.keep-awake.stopped', {})
+  }
+}
 
 function conversationKey(projectId: string, conversationId: string): string {
   return `${projectId}:${conversationId}`
@@ -72,6 +99,7 @@ function setConversationState(
   } else {
     conversationStates.set(key, state)
   }
+  updateKeepAwake()
   const change: ConversationStateChange = { projectId, conversationId, state }
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.webContents.isDestroyed()) {
@@ -147,7 +175,9 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
-  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  signal?: AbortSignal,
+  startedAt = Date.now(),
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
@@ -167,6 +197,7 @@ async function developProject(
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  const agentLimits = structuredClone(conversation.agentLimits)
   if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
   }
@@ -181,9 +212,13 @@ async function developProject(
     undefined,
     createModelConfigSnapshot(modelConfig),
     contextConfig,
+    { startedAt, result: 'processing' },
   )
   const updatedConversation = project.conversations.find((item) => item.id === conversationId)
   if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
+
+  const userMessageId = updatedConversation.messages.at(-1)?.id
+  if (!userMessageId) return { project, writtenFiles: [], error: 'Conversation message not found' }
 
   const roundId = randomUUID()
   const persistedHistory = contextConfig.layeredEnabled
@@ -202,16 +237,17 @@ async function developProject(
     project,
     modelConfig,
     contextConfig,
+    agentLimits,
     [
       ...storedHistory,
       { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
     ],
-    onBlocks,
+    onProgress,
     (managed) => {
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
-    { conversationId },
+    { conversationId, signal },
   )
   project = await saveConversationContext(
     projectId,
@@ -224,19 +260,34 @@ async function developProject(
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
   }
-  for (const compression of result.compressionNotices) {
-    project = await addMessage(projectId, conversationId, 'assistant', '', undefined, compression)
+  let pendingBlocks: AssistantMessageBlock[] = []
+  const savePendingBlocks = async (): Promise<void> => {
+    if (pendingBlocks.length === 0) return
+    const messageBlocks = pendingBlocks
+    const content = messageBlocks
+      .filter((block) => block.type === 'content')
+      .map((block) => block.content)
+      .join('\n\n')
+    pendingBlocks = []
+    project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks)
   }
-  if (result.reply || result.blocks?.length) {
-    project = await addMessage(
-      projectId,
-      conversationId,
-      'assistant',
-      result.reply ?? '',
-      result.blocks,
-    )
+  for (const item of result.timeline) {
+    if (item.type === 'block') {
+      pendingBlocks.push(item.block)
+      continue
+    }
+    await savePendingBlocks()
+    project = await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
   }
-  return { project, writtenFiles: result.writtenFiles, error: result.error }
+  await savePendingBlocks()
+  const turn: ConversationTurnRecord = {
+    startedAt,
+    endedAt: Date.now(),
+    result: result.stopped ? 'stopped' : result.error ? (/timed out|timeout/i.test(result.error) ? 'timeout' : 'other') : 'normal',
+    error: result.stopped ? undefined : result.error,
+  }
+  project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
+  return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
 function loadRenderer(window: BrowserWindow, query?: Record<string, string>): void {
@@ -312,9 +363,11 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
-  ipcMain.handle('config:save', (_event, config: AppConfig) => {
+  ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
-    return saveConfig(config)
+    const saved = await saveConfig(config)
+    updateKeepAwake(saved)
+    return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('projects:create', async (_event, name: string) => {
@@ -345,21 +398,38 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationContextConfig(projectId, conversationId, contextConfig)
   })
+  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationAgentLimits(projectId, conversationId, agentLimits)
+  })
   ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
+    const key = conversationKey(projectId, conversationId)
+    const controller = new AbortController()
+    const startedAt = Date.now()
+    conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, (blocks) => {
+      return await developProject(projectId, conversationId, content, (timeline) => {
         if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, blocks }
+          const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)
         }
-      })
+      }, controller.signal, startedAt)
     } finally {
+      if (conversationControllers.get(key) === controller) {
+        conversationControllers.delete(key)
+      }
       setConversationState(projectId, conversationId, 'idle')
     }
+  })
+  ipcMain.handle('development:stop', (_event, projectId: string, conversationId: string) => {
+    const controller = conversationControllers.get(conversationKey(projectId, conversationId))
+    if (!controller) return false
+    controller.abort()
+    return true
   })
 
   ipcMain.handle('context-debug:open', (_event, projectId: string, conversationId: string) =>
@@ -380,6 +450,10 @@ app.whenReady().then(() => {
     runDebugOperation(projectId, conversationId, () => demoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:simulate', (_event, projectId: string, conversationId: string, requestTokens: number) =>
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
+
+  void readConfig()
+    .then(updateKeepAwake)
+    .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
   createMainWindow()
   app.on('activate', () => {

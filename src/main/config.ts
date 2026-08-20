@@ -24,6 +24,8 @@ type StoredAppConfig = {
   contextManagement?: Partial<ContextManagementConfig>
   language?: AppLanguage
   developerMode?: boolean
+  keepAwakeEnabled?: boolean
+  keepAwakeOnlyWhileWorking?: boolean
 }
 
 type LegacyStoredConfig = StoredModelConfig & {
@@ -102,6 +104,8 @@ export async function readConfig(): Promise<AppConfig> {
   try {
     const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredAppConfig & LegacyStoredConfig
     const language = isAppLanguage(stored.language) ? stored.language : defaultAppConfig.language
+    const keepAwakeEnabled = stored.keepAwakeEnabled === true
+    const keepAwakeOnlyWhileWorking = stored.keepAwakeOnlyWhileWorking !== false
 
     if (Array.isArray(stored.modelConfigs)) {
       const modelConfigs = stored.modelConfigs.map(readModelConfig)
@@ -111,8 +115,19 @@ export async function readConfig(): Promise<AppConfig> {
       const legacyModel = stored.modelConfigs.find((model) => model.id === activeModelConfigId) ?? stored.modelConfigs[0]
       const contextManagement = normalizeContextManagementConfig(stored.contextManagement, legacyModel)
       const developerMode = stored.developerMode === true
-      const config = { modelConfigs, activeModelConfigId, contextManagement, language, developerMode }
-      const needsMigration = stored.developerMode === undefined || !stored.contextManagement || stored.modelConfigs.some((model) =>
+      const config: AppConfig = {
+        modelConfigs,
+        activeModelConfigId,
+        contextManagement,
+        language,
+        developerMode,
+        keepAwakeEnabled,
+        keepAwakeOnlyWhileWorking,
+      }
+      const needsMigration = stored.developerMode === undefined ||
+        stored.keepAwakeEnabled === undefined ||
+        stored.keepAwakeOnlyWhileWorking === undefined ||
+        !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
       ) || stored.activeModelConfigId !== activeModelConfigId
       if (needsMigration) {
@@ -123,7 +138,14 @@ export async function readConfig(): Promise<AppConfig> {
 
     const hasLegacyModel = Boolean(stored.baseUrl || stored.apiKey || stored.modelName)
     if (!hasLegacyModel) {
-      return { ...defaultAppConfig, contextManagement: normalizeContextManagementConfig(stored.contextManagement), language, developerMode: stored.developerMode === true }
+      return {
+        ...defaultAppConfig,
+        contextManagement: normalizeContextManagementConfig(stored.contextManagement),
+        language,
+        developerMode: stored.developerMode === true,
+        keepAwakeEnabled,
+        keepAwakeOnlyWhileWorking,
+      }
     }
 
     const model = readModelConfig(stored)
@@ -133,6 +155,8 @@ export async function readConfig(): Promise<AppConfig> {
       contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
       language,
       developerMode: stored.developerMode === true,
+      keepAwakeEnabled,
+      keepAwakeOnlyWhileWorking,
     }
     await writeConfig(migrated)
     return migrated
@@ -168,6 +192,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     contextManagement,
     language: isAppLanguage(config.language) ? config.language : defaultAppConfig.language,
     developerMode: config.developerMode === true,
+    keepAwakeEnabled: config.keepAwakeEnabled === true,
+    keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
   }
   await writeConfig(normalized)
   return normalized
