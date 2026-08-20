@@ -459,6 +459,7 @@ export async function develop(
       `The project Python environment is stored under folder ID ${project.pythonEnvironmentFolderId}.`,
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
+      'For JavaScript or TypeScript projects, use node_package_command for npm/pnpm dependency operations and node_package_script only for scripts explicitly defined in package.json; do not run arbitrary package-manager shell commands.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
       'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
