@@ -154,6 +154,57 @@ function simpleDiff(oldSnippet: string, newSnippet: string): string {
   )
 }
 
+function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/g, '\n')
+}
+
+function normalizeWithSourceBoundaries(value: string): { text: string; boundaries: number[] } {
+  let text = ''
+  const boundaries = [0]
+  for (let index = 0; index < value.length;) {
+    if (value[index] === '\r') {
+      const end = value[index + 1] === '\n' ? index + 2 : index + 1
+      text += '\n'
+      boundaries.push(end)
+      index = end
+      continue
+    }
+    text += value[index]
+    index += 1
+    boundaries.push(index)
+  }
+  return { text, boundaries }
+}
+
+function findUniqueSnippet(content: string, snippet: string): { start: number; end: number } | null | 'ambiguous' {
+  const exactStart = content.indexOf(snippet)
+  if (exactStart !== -1) {
+    return content.indexOf(snippet, exactStart + snippet.length) === -1
+      ? { start: exactStart, end: exactStart + snippet.length }
+      : 'ambiguous'
+  }
+
+  const normalizedContent = normalizeWithSourceBoundaries(content)
+  const normalizedSnippet = normalizeLineEndings(snippet)
+  const normalizedStart = normalizedContent.text.indexOf(normalizedSnippet)
+  if (normalizedStart === -1) return null
+  if (normalizedContent.text.indexOf(normalizedSnippet, normalizedStart + normalizedSnippet.length) !== -1) {
+    return 'ambiguous'
+  }
+  return {
+    start: normalizedContent.boundaries[normalizedStart],
+    end: normalizedContent.boundaries[normalizedStart + normalizedSnippet.length],
+  }
+}
+
+function fileLineEnding(content: string): '\r\n' | '\n' {
+  return content.includes('\r\n') ? '\r\n' : '\n'
+}
+
+function convertLineEndings(value: string, lineEnding: '\r\n' | '\n'): string {
+  return normalizeLineEndings(value).replace(/\n/g, lineEnding)
+}
+
 async function patchFile(
   folder: ProjectFolder,
   filePath: string,
@@ -174,14 +225,15 @@ async function patchFile(
     throw new Error('Target must be a writable text file no larger than 1 MB')
   }
   const content = await readFile(target, 'utf8')
-  const firstMatch = content.indexOf(oldSnippet)
-  if (firstMatch === -1) {
+  const match = findUniqueSnippet(content, oldSnippet)
+  if (match === null) {
     return { success: false, message: 'old_snippet was not found; file was not modified', diff: null }
   }
-  if (content.indexOf(oldSnippet, firstMatch + oldSnippet.length) !== -1) {
+  if (match === 'ambiguous') {
     return { success: false, message: 'old_snippet matched more than once; file was not modified', diff: null }
   }
-  const updated = `${content.slice(0, firstMatch)}${newSnippet}${content.slice(firstMatch + oldSnippet.length)}`
+  const replacement = convertLineEndings(newSnippet, fileLineEnding(content))
+  const updated = `${content.slice(0, match.start)}${replacement}${content.slice(match.end)}`
   throwIfAborted(signal)
   await writeFile(target, updated, 'utf8')
   return {
@@ -191,7 +243,6 @@ async function patchFile(
     target,
   }
 }
-
 async function buildTree(
   folder: ProjectFolder,
   rootPath: string,
