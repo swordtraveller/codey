@@ -20,6 +20,7 @@ import {
   safeResolveWritablePath,
   truncateOutput,
 } from './sandbox'
+import { runPackageManagerCommand, runPackageScript } from './node-sandbox'
 
 export type ToolCall = {
   id: string
@@ -48,6 +49,9 @@ type ToolArguments = {
   max_count?: number
   ids?: string[]
   limit?: number
+  package_manager?: 'npm' | 'pnpm'
+  command?: 'install' | 'ci' | 'update' | 'list' | 'outdated'
+  script?: string
 }
 
 type TreeNode = {
@@ -427,6 +431,58 @@ export async function runAgentTool(
     return stringifyResult(await gitGetCurrentBranch(getFolder(project, args.folder_id).path, runtime?.signal))
   }
 
+  if (toolCall.function.name === 'node_package_command') {
+    if (
+      typeof args.folder_id !== 'string' ||
+      (args.package_manager !== 'npm' && args.package_manager !== 'pnpm') ||
+      !args.command ||
+      typeof args.timeout !== 'number'
+    ) {
+      throw new Error('folder_id, package_manager, command, and timeout are required')
+    }
+    const folder = getFolder(project, args.folder_id)
+    const packageRoot = await resolveFolderPath(folder, args.path ?? '.', false)
+    const packages = args.packages ?? []
+    if (!Array.isArray(packages) || packages.some((item) => typeof item !== 'string')) {
+      throw new Error('packages must be an array of strings')
+    }
+    return stringifyResult(
+      await runPackageManagerCommand(
+        packageRoot,
+        args.package_manager,
+        args.command,
+        packages,
+        args.timeout,
+        runtime?.signal,
+      ),
+    )
+  }
+  if (toolCall.function.name === 'node_package_script') {
+    if (
+      typeof args.folder_id !== 'string' ||
+      (args.package_manager !== 'npm' && args.package_manager !== 'pnpm') ||
+      typeof args.script !== 'string' ||
+      typeof args.timeout !== 'number'
+    ) {
+      throw new Error('folder_id, package_manager, script, and timeout are required')
+    }
+    const folder = getFolder(project, args.folder_id)
+    const packageRoot = await resolveFolderPath(folder, args.path ?? '.', false)
+    const argv = args.argv ?? []
+    if (!Array.isArray(argv) || argv.some((item) => typeof item !== 'string')) {
+      throw new Error('argv must be an array of strings')
+    }
+    return stringifyResult(
+      await runPackageScript(
+        packageRoot,
+        args.package_manager,
+        args.script,
+        argv,
+        args.timeout,
+        runtime?.signal,
+      ),
+    )
+  }
   const environmentFolder = getEnvironmentFolder(project)
   const folderPaths = projectFolderPaths(project)
 
@@ -564,6 +620,8 @@ export function createAgentTools(project: Project): object[] {
     { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'node_package_command', description: 'Run a safe npm or pnpm package-manager operation in a project package root. Install, CI, and update always disable package lifecycle scripts.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, command: { type: 'string', enum: ['install', 'ci', 'update', 'list', 'outdated'] }, packages: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'command', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'node_package_script', description: 'Run a package.json script that is explicitly defined in the selected package root, with a timeout and workspace write guard.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'script', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_execute', description: 'Execute an in-memory Python code snippet without allowing file writes.', parameters: { type: 'object', properties: { code: { type: 'string' }, timeout, folder_id: { ...folderId, description: 'Optional project folder to use as the working directory.' } }, required: ['code', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_run_script', description: 'Run an existing project Python script using the project agent_venv.', parameters: { type: 'object', properties: { ...pathProperties, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: [...pathRequired, 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_install_package', description: 'Install packages into the project agent_venv environment.', parameters: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['packages'], additionalProperties: false } } },
