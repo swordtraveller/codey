@@ -1,12 +1,15 @@
+import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
+  AgentLimitsConfig,
   AssistantMessageBlock,
-  ContextCompressionNotice,
+  ContextManagementConfig,
   ContextMetrics,
+  DevelopmentTimelineItem,
+  ModelConfig,
   Project,
 } from '../shared/types'
-import { readConfig } from './config'
-import { manageContext, type ContextMessage } from './context'
+import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
 import { truncateOutput } from './sandbox'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -36,12 +39,12 @@ type ChatChunk = {
 }
 
 type AgentResult = {
-  reply?: string
-  blocks?: AssistantMessageBlock[]
   writtenFiles: string[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
-  compressionNotices: ContextCompressionNotice[]
+  timeline: DevelopmentTimelineItem[]
+  summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
+  stopped?: boolean
   error?: string
 }
 
@@ -58,6 +61,8 @@ function mergeContextMetrics(
     ...next,
     originalTokens,
     compressionRatio: next.compressedTokens ? originalTokens / next.compressedTokens : 1,
+    layered: current.layered || next.layered,
+    recalled: current.recalled || next.recalled,
     filtered: current.filtered || next.filtered,
     rewritten: current.rewritten || next.rewritten,
     truncated: current.truncated || next.truncated,
@@ -66,10 +71,21 @@ function mergeContextMetrics(
 
 function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
   return messages.map((message) => ({
+    id: message.id ?? randomUUID(),
+    createdAt: message.createdAt ?? new Date().toISOString(),
     role: message.role,
     content: message.content,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
+    pinnedToHot: message.pinnedToHot,
+    representation: message.representation,
+    truthRefs: message.truthRefs,
+    contextLayer: message.contextLayer,
+    contextRegion: message.contextRegion,
+    contextSource: message.contextSource,
+    recalledAtRoundId: message.recalledAtRoundId,
+    lastAccessedAt: message.lastAccessedAt,
+    manualContextLayer: message.manualContextLayer,
   }))
 }
 
@@ -79,10 +95,21 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       message.role !== 'system',
     )
     .map((message) => ({
+      id: message.id ?? randomUUID(),
+      createdAt: message.createdAt ?? new Date().toISOString(),
       role: message.role,
       content: message.content,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
+      pinnedToHot: message.pinnedToHot,
+      representation: message.representation,
+      truthRefs: message.truthRefs,
+      contextLayer: message.contextLayer,
+      contextRegion: message.contextRegion,
+      contextSource: message.contextSource,
+      recalledAtRoundId: message.recalledAtRoundId,
+      lastAccessedAt: message.lastAccessedAt,
+      manualContextLayer: message.manualContextLayer,
     }))
 }
 
@@ -104,6 +131,16 @@ const modelRequestTimeoutMs = 180_000
 const maxNetworkAttempts = 2
 
 type CompletionError = Error & { partial?: ResponseMessage }
+
+function abortError(): Error {
+  const error = new Error('Operation stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
 
 function errorDetails(error: unknown): { name?: string; message: string; cause?: unknown } {
   if (!(error instanceof Error)) {
@@ -156,12 +193,12 @@ function isRetryableRequestError(error: unknown): boolean {
 }
 
 async function requestCompletionAttempt(
+  config: ModelConfig,
   messages: ContextMessage[],
   tools: object[],
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
 ): Promise<ChatResponse> {
-  const config = await readConfig()
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
   }
@@ -317,14 +354,19 @@ async function requestCompletionAttempt(
 }
 
 async function requestCompletion(
+  config: ModelConfig,
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
+    throwIfAborted(signal)
     const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
@@ -341,7 +383,7 @@ async function requestCompletion(
     }
 
     try {
-      return await requestCompletionAttempt(messages, tools, controller.signal, update)
+      return await requestCompletionAttempt(config, messages, tools, controller.signal, update)
     } catch (error) {
       const details = errorDetails(error)
       const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -350,10 +392,13 @@ async function requestCompletion(
       const failure = createCompletionError(
         error,
         bestPartial,
-        timedOut
-          ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
-          : details.message,
+        signal?.aborted
+          ? 'Operation stopped'
+          : timedOut
+            ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
+            : details.message,
       )
+      if (signal?.aborted) throw failure
       log.error('model.request.failed', {
         attempt,
         maxAttempts: maxNetworkAttempts,
@@ -374,6 +419,7 @@ async function requestCompletion(
       throw failure
     } finally {
       clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
     }
   }
 
@@ -382,22 +428,29 @@ async function requestCompletion(
 
 export async function develop(
   project: Project,
+  config: ModelConfig,
+  contextConfig: ContextManagementConfig,
+  agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
-  onBlocks?: (blocks: AssistantMessageBlock[]) => void,
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onContextSnapshot?: (result: ContextResult) => void,
+  runtime?: { conversationId: string; signal?: AbortSignal },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
       writtenFiles: [],
       agentMessages,
-      compressionNotices: [],
+      timeline: [],
+      summaryArtifacts: [],
       error: 'Add a project folder before sending a request',
     }
   }
 
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
-  const config = await readConfig()
   const systemMessage: ContextMessage = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
     role: 'system',
     content: [
       'You are a coding agent working in the project folders below.',
@@ -408,63 +461,97 @@ export async function develop(
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
-      'Tool calls and tool results are critical context and must be retained verbatim if conversation context is ever compacted.',
+      'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
+      'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+      'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
+      'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
+      'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
-  let apiMessages = [systemMessage, ...toApiMessages(agentMessages)]
+  const history = toApiMessages(agentMessages)
   let context: ContextMetrics | undefined
-  const blocks: AssistantMessageBlock[] = []
-  const compressionNotices: ContextCompressionNotice[] = []
+  const timeline: DevelopmentTimelineItem[] = []
+  const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
+  const coldMessageIds = new Set<string>()
 
   let completedToolCalls = 0
 
   try {
-    for (let turn = 0; turn < 12; turn += 1) {
-      const managed = manageContext(apiMessages, tools, config)
-      apiMessages = managed.messages
+    for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
+      throwIfAborted(runtime?.signal)
+      const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
+      for (const message of [...managed.messages, ...managed.warmMessages]) {
+        const stored = history.find((candidate) => candidate.id === message.id)
+        if (!stored) continue
+        stored.contextLayer = message.contextLayer
+        stored.contextRegion = message.contextRegion
+        stored.contextSource = message.contextSource
+        stored.pinnedToHot = message.pinnedToHot
+        stored.representation = message.representation
+        stored.truthRefs = message.truthRefs
+      }
+      for (const summary of managed.summaryArtifacts) {
+        if (!summaryArtifacts.some((candidate) => candidate.id === summary.id)) summaryArtifacts.push(summary)
+        for (const id of summary.sourceMessageIds) coldMessageIds.add(id)
+      }
+      onContextSnapshot?.(managed)
+      throwIfAborted(runtime?.signal)
+      const requestMessages = managed.messages
       context = mergeContextMetrics(context, managed.metrics)
       const methods = [
+        managed.metrics.layered && managed.metrics.compressedTokens < managed.metrics.originalTokens && 'layered',
+        managed.metrics.recalled && 'cold recall',
         managed.metrics.filtered && 'filter',
         managed.metrics.rewritten && 'rewrite',
         managed.metrics.truncated && 'truncate',
       ].filter((method): method is string => Boolean(method))
-      if (methods.length > 0) {
-        compressionNotices.push({
-          originalTokens: managed.metrics.originalTokens,
-          compressedTokens: managed.metrics.compressedTokens,
-          compressionRatio: managed.metrics.compressionRatio,
-          method: methods.join(', '),
-        })
-      }
       if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
-        throw new Error('Recent conversation exceeds the configured input budget')
+        throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
+      }
+      if (methods.length > 0) {
+        timeline.push({
+          type: 'compression',
+          compression: {
+            originalTokens: managed.metrics.originalTokens,
+            compressedTokens: managed.metrics.compressedTokens,
+            compressionRatio: managed.metrics.compressionRatio,
+            method: methods.join(', '),
+          },
+        })
+        onProgress?.([...timeline])
       }
       let response: ChatResponse
       try {
-        response = await requestCompletion(apiMessages, tools, (message) => {
-          onBlocks?.([...blocks, ...toMessageBlocks(message)])
-        })
+        response = await requestCompletion(config, requestMessages, tools, (message) => {
+          onProgress?.([
+            ...timeline,
+            ...toMessageBlocks(message).map((block) => ({ type: 'block' as const, block })),
+          ])
+        }, runtime?.signal)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
         if (partialBlocks.length > 0) {
-          blocks.push(...partialBlocks)
-          onBlocks?.([...blocks])
+          timeline.push(...partialBlocks.map((block) => ({ type: 'block' as const, block })))
+          onProgress?.([...timeline])
         }
+        if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
           ? `Model connection interrupted after ${completedToolCalls} tool operation(s). Files already written were kept.`
           : error instanceof Error ? error.message : 'Request failed'
         throw new Error(message)
       }
+      throwIfAborted(runtime?.signal)
       const message = response.choices?.[0]?.message
       if (!message) {
         throw new Error('The model returned an empty response')
       }
 
       const toolCalls = message.tool_calls ?? []
-      if (toolCalls.length > 20) {
-        throw new Error('The model returned too many tool calls')
+      if (toolCalls.length > agentLimits.toolCallsPerRequest) {
+        throw new Error('The model exceeded the configured per-request tool-call limit')
       }
       if (toolCalls.length === 0) {
         const reply = message.content?.trim()
@@ -472,43 +559,90 @@ export async function develop(
           throw new Error('The model returned an empty response')
         }
         const block = { type: 'content' as const, content: reply }
-        blocks.push(block)
-        onBlocks?.([...blocks])
-        apiMessages.push({ role: 'assistant', content: reply })
+        timeline.push({ type: 'block', block })
+        onProgress?.([...timeline])
+        history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
-          reply,
-          blocks,
           writtenFiles,
-          agentMessages: toStoredMessages(apiMessages),
+          agentMessages: toStoredMessages(history),
           context,
-          compressionNotices,
+          timeline,
+          summaryArtifacts,
         }
       }
 
       const responseBlocks = toMessageBlocks(message)
-      blocks.push(...responseBlocks)
-      onBlocks?.([...blocks])
-      apiMessages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
-      for (const toolCall of toolCalls) {
+      timeline.push(...responseBlocks.map((block) => ({ type: 'block' as const, block })))
+      onProgress?.([...timeline])
+      history.push({
+        role: 'assistant',
+        content: message.content ?? null,
+        tool_calls: toolCalls,
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        representation: 'original',
+        contextSource: 'live',
+      })
+      for (let index = 0; index < toolCalls.length; index += 1) {
+        const toolCall = toolCalls[index]
         let content: string
         try {
-          content = await runAgentTool(project, toolCall, writtenFiles)
+          throwIfAborted(runtime?.signal)
+          content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
         } catch (error) {
+          if (runtime?.signal?.aborted) {
+            for (const pending of toolCalls.slice(index)) {
+              history.push({
+                role: 'tool',
+                tool_call_id: pending.id,
+                content: 'Stopped by user before completion',
+                id: randomUUID(),
+                createdAt: new Date().toISOString(),
+                representation: 'original',
+                contextSource: 'live',
+              })
+            }
+            throw error
+          }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
         }
-        apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content })
+        history.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content,
+          id: randomUUID(),
+          createdAt: new Date().toISOString(),
+          representation: 'original',
+          contextSource: 'live',
+        })
+        if (runtime?.signal?.aborted) {
+          for (const pending of toolCalls.slice(index + 1)) {
+            history.push({
+              role: 'tool',
+              tool_call_id: pending.id,
+              content: 'Stopped by user before completion',
+              id: randomUUID(),
+              createdAt: new Date().toISOString(),
+              representation: 'original',
+              contextSource: 'live',
+            })
+          }
+          throw abortError()
+        }
       }
     }
-    throw new Error('The model exceeded the tool-call limit')
+    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
+    const stopped = runtime?.signal?.aborted === true
     return {
-      blocks,
       writtenFiles,
-      agentMessages: toStoredMessages(apiMessages),
+      agentMessages: toStoredMessages(history),
       context,
-      compressionNotices,
-      error: error instanceof Error ? error.message : 'Request failed',
+      timeline,
+      summaryArtifacts,
+      stopped,
+      error: stopped ? undefined : error instanceof Error ? error.message : 'Request failed',
     }
   }
 }

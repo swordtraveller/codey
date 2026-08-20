@@ -132,7 +132,7 @@ body {
   background: #fff;
 }
 
-.topbar div {
+.topbar > div {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -147,7 +147,7 @@ body {
   color: #8a8a8a;
   font-size: 11px;
 }
-.topbar div span,
+.topbar > div > span,
 .status {
   color: #616161;
   font-size: 12px;
@@ -184,6 +184,100 @@ body {
   background: #fff;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-nav-item {
+  display: grid;
+  gap: 4px;
+}
+
+.project-nav-row {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.project-nav-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-menu-panel {
+  margin: 0 8px 4px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+  color: #707070;
+  font-size: 11px;
+}
+
+.project-menu-panel label {
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-model-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 240px;
+  min-height: 30px;
+  box-sizing: border-box;
+  border: 1px solid #d1d1d1;
+  border-radius: 4px;
+  padding: 0 28px 0 9px;
+  background: #fff;
+  color: #242424;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.conversation-model-picker:hover {
+  border-color: #adadad;
+}
+
+.conversation-model-picker:focus-within {
+  border-color: #0f6cbd;
+  box-shadow: 0 0 0 1px #0f6cbd;
+}
+
+.conversation-model-picker::after {
+  position: absolute;
+  right: 9px;
+  content: '⌄';
+  color: #616161;
+  pointer-events: none;
+}
+
+.conversation-model-picker span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-model-picker select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.conversation-model-picker select:disabled {
+  cursor: default;
+}
+
+.model-config-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.model-config-toolbar select {
+  flex: 1;
 }
 
 .conversation-container {
@@ -398,6 +492,16 @@ h1 {
   font-weight: 600;
 }
 
+.settings-warning {
+  margin: 0;
+  color: #9a6700;
+  font-size: 13px;
+}
+
+.nested-setting {
+  margin-left: 20px;
+}
+
 .dialog-error {
   margin: 0;
   color: #bc2f32;
@@ -449,5 +553,451 @@ h1 {
 
   .dialog-fields {
     min-width: 0;
+  }
+}
+
+.context-settings-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.context-budgets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.project-menu-panel > button {
+  width: 100%;
+  margin-top: 8px;
+}
+
+@media (max-width: 560px) {
+  .context-budgets {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-description {
+  margin: 0;
+  color: #707070;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.context-debug-app {
+  min-height: 100vh;
+  padding: 20px;
+  color: #242424;
+  background: #f5f5f5;
+}
+
+.context-debug-header,
+.context-debug-state,
+.context-debug-message-head,
+.context-debug-actions,
+.context-debug-inline {
+  display: flex;
+  align-items: center;
+}
+
+.context-debug-header {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.context-debug-header h1,
+.context-debug-header p,
+.context-debug-layers h2,
+.context-debug-layers p,
+.context-debug-tools h2,
+.context-debug-tools p,
+.context-debug-audit h2,
+.context-debug-audit p {
+  margin: 0;
+}
+
+.context-debug-header h1 {
+  font-size: 20px;
+}
+
+.context-debug-header p,
+.context-debug-note,
+.context-debug-layers > section > p,
+.context-debug-tools p,
+.context-debug-audit p {
+  color: #707070;
+  font-size: 12px;
+}
+
+.context-debug-state {
+  gap: 10px;
+}
+
+.context-debug-state > span {
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #e8e8e8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.context-debug-state .context-debug-state-idle {
+  color: #0e700e;
+  background: #e7f4e4;
+}
+
+.context-debug-state .context-debug-state-running,
+.context-debug-state .context-debug-state-debugging {
+  color: #8a3707;
+  background: #fff4ce;
+}
+
+.context-debug-error {
+  border: 1px solid #d13438;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #a4262c;
+  background: #fde7e9;
+}
+
+.context-debug-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.context-debug-metrics > div {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.context-debug-metrics span {
+  color: #707070;
+  font-size: 11px;
+}
+
+.context-debug-metrics strong {
+  font-size: 13px;
+}
+
+.context-debug-metric-warning {
+  border-color: #f1bb5c !important;
+}
+
+.context-debug-metric-exceeded {
+  border-color: #d13438 !important;
+  color: #a4262c;
+}
+
+.context-debug-note {
+  margin: 10px 0 16px;
+}
+
+.context-debug-layers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.context-debug-layers > section,
+.context-debug-tools > div,
+.context-debug-audit {
+  min-width: 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+}
+
+.context-debug-layers h2,
+.context-debug-tools h2,
+.context-debug-audit h2 {
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.context-debug-layers h2 small {
+  color: #707070;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.context-debug-cold-index {
+  margin-top: 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fafafa;
+}
+
+.context-debug-cold-index-head,
+.context-debug-storage-file > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-debug-cold-index-head > span {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+}
+
+.context-debug-index-empty {
+  color: #616161;
+  background: #e8e8e8;
+}
+
+.context-debug-index-consistent {
+  color: #107c10;
+  background: #dff6dd;
+}
+
+.context-debug-index-mismatch {
+  color: #a4262c;
+  background: #fde7e9;
+}
+
+.context-debug-cold-index dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.context-debug-cold-index dl > div {
+  min-width: 0;
+}
+
+.context-debug-cold-index dt,
+.context-debug-storage-label,
+.context-debug-storage-file span {
+  color: #707070;
+  font-size: 10px;
+}
+
+.context-debug-cold-index dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.context-debug-storage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.context-debug-storage-head button {
+  min-width: 24px;
+}
+
+.context-debug-storage-folder,
+.context-debug-storage-file code {
+  display: block;
+  overflow: auto;
+  margin-top: 4px;
+  color: #616161;
+  white-space: nowrap;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+}
+
+.context-debug-storage-hidden {
+  display: block;
+  margin-top: 4px;
+  color: #8a8a8a;
+  font-size: 10px;
+}
+
+.context-debug-storage-files {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.context-debug-storage-file {
+  min-width: 0;
+  border-top: 1px solid #ededed;
+  padding-top: 7px;
+  font-size: 10px;
+}
+
+.context-debug-list,
+.context-debug-search-results {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.context-debug-list {
+  max-height: 52vh;
+  overflow: auto;
+}
+
+.context-debug-message {
+  min-width: 0;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fafafa;
+}
+
+.context-debug-message-head {
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-debug-message-head span,
+.context-debug-message time {
+  color: #707070;
+  font-size: 10px;
+}
+
+.context-debug-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.context-debug-tags span {
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: #616161;
+  background: #e8e8e8;
+  font-size: 10px;
+}
+
+.context-debug-message > p {
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.context-debug-full,
+.context-debug-pointer {
+  display: block;
+  overflow: auto;
+  max-height: 280px;
+  border-radius: 4px;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f0f0f0;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+}
+
+.context-debug-pointer {
+  margin: 8px 0;
+  color: #616161;
+}
+
+.context-debug-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.context-debug-actions select {
+  min-width: 120px;
+}
+
+.context-debug-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.context-debug-inline {
+  gap: 8px;
+}
+
+.context-debug-inline > :first-child {
+  flex: 1;
+}
+
+.context-debug-search-results {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.context-debug-audit {
+  margin-top: 12px;
+}
+
+.context-debug-audit ol {
+  display: grid;
+  gap: 7px;
+  max-height: 260px;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.context-debug-audit li {
+  display: grid;
+  grid-template-columns: 150px 130px minmax(0, 1fr);
+  gap: 8px;
+  border-top: 1px solid #ededed;
+  padding-top: 7px;
+  font-size: 11px;
+}
+
+.context-debug-audit time,
+.context-debug-audit span {
+  color: #707070;
+}
+
+@media (max-width: 1100px) {
+  .context-debug-metrics {
+    grid-template-columns: repeat(3, minmax(120px, 1fr));
+  }
+
+  .context-debug-layers {
+    grid-template-columns: 1fr;
+  }
+
+  .context-debug-list {
+    max-height: 360px;
+  }
+}
+
+@media (max-width: 680px) {
+  .context-debug-app {
+    padding: 12px;
+  }
+
+  .context-debug-header,
+  .context-debug-tools {
+    grid-template-columns: 1fr;
+  }
+
+  .context-debug-header {
+    align-items: flex-start;
+  }
+
+  .context-debug-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .context-debug-tools {
+    display: grid;
+  }
+
+  .context-debug-audit li {
+    grid-template-columns: 1fr;
   }
 }

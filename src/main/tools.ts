@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Project, ProjectFolder } from '../shared/types'
+import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
   gitAdd,
   gitCommit,
@@ -45,6 +46,8 @@ type ToolArguments = {
   message?: string
   staged?: boolean
   max_count?: number
+  ids?: string[]
+  limit?: number
 }
 
 type TreeNode = {
@@ -73,6 +76,16 @@ const ignoredNames = new Set([
   'venv',
   'node_modules',
 ])
+
+function abortError(): Error {
+  const error = new Error('Operation stopped')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
 
 function assertAgentPath(inputPath: string): void {
   const segments = inputPath.split(/[\\/]+/)
@@ -142,7 +155,9 @@ async function patchFile(
   filePath: string,
   oldSnippet: string,
   newSnippet: string,
+  signal?: AbortSignal,
 ): Promise<{ success: boolean; message: string; diff: string | null; target?: string }> {
+  throwIfAborted(signal)
   if (!oldSnippet) {
     throw new Error('old_snippet is required')
   }
@@ -163,6 +178,7 @@ async function patchFile(
     return { success: false, message: 'old_snippet matched more than once; file was not modified', diff: null }
   }
   const updated = `${content.slice(0, firstMatch)}${newSnippet}${content.slice(firstMatch + oldSnippet.length)}`
+  throwIfAborted(signal)
   await writeFile(target, updated, 'utf8')
   return {
     success: true,
@@ -176,6 +192,7 @@ async function buildTree(
   folder: ProjectFolder,
   rootPath: string,
   maxDepth: number,
+  signal?: AbortSignal,
 ): Promise<{ tree: TreeNode; warnings: string[] }> {
   if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 8) {
     throw new Error('max_depth must be an integer between 0 and 8')
@@ -184,6 +201,7 @@ async function buildTree(
   let nodeCount = 0
 
   async function visit(relativePath: string, depth: number): Promise<TreeNode> {
+    throwIfAborted(signal)
     const target = await resolveFolderPath(folder, relativePath, false)
     const info = await stat(target)
     const name = relativePath === '.' ? '.' : relativePath.split(/[\\/]/).at(-1) || '.'
@@ -202,6 +220,7 @@ async function buildTree(
     const entries = await readdir(target, { withFileTypes: true })
     const children: TreeNode[] = []
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      throwIfAborted(signal)
       if (nodeCount >= maxTreeNodes) {
         break
       }
@@ -257,11 +276,14 @@ async function searchFolder(
   matcher: RegExp,
   fileMatcher: RegExp | null,
   matches: SearchMatch[],
+  signal?: AbortSignal,
 ): Promise<boolean> {
   async function visit(relativeDirectory: string): Promise<boolean> {
+    throwIfAborted(signal)
     const directory = await resolveFolderPath(folder, relativeDirectory, false)
     const entries = await readdir(directory, { withFileTypes: true })
     for (const entry of entries) {
+      throwIfAborted(signal)
       if (ignoredNames.has(entry.name.toLowerCase()) || entry.isSymbolicLink()) {
         continue
       }
@@ -308,7 +330,9 @@ async function searchProject(
   query: string,
   filePattern: string | null | undefined,
   caseSensitive: boolean,
+  signal?: AbortSignal,
 ): Promise<{ matches: SearchMatch[]; truncated: boolean }> {
+  throwIfAborted(signal)
   if (!query || query.length > 500) {
     throw new Error('query must contain 1 to 500 characters')
   }
@@ -322,7 +346,8 @@ async function searchProject(
   const matches: SearchMatch[] = []
   let truncated = false
   for (const folder of folders) {
-    if (await searchFolder(folder, matcher, fileMatcher, matches)) {
+    throwIfAborted(signal)
+    if (await searchFolder(folder, matcher, fileMatcher, matches, signal)) {
       truncated = true
       break
     }
@@ -341,6 +366,7 @@ export async function runAgentTool(
   project: Project,
   toolCall: ToolCall,
   writtenFiles: string[],
+  runtime?: { conversationId: string; signal?: AbortSignal },
 ): Promise<string> {
   let args: ToolArguments
   try {
@@ -348,37 +374,57 @@ export async function runAgentTool(
   } catch {
     throw new Error('Tool arguments must be valid JSON')
   }
+  throwIfAborted(runtime?.signal)
+  if (toolCall.function.name === 'context_search') {
+    if (!runtime || typeof args.query !== 'string') throw new Error('conversation context runtime and query are required')
+    const matches = await searchConversationContext(project.id, runtime.conversationId, args.query, args.limit ?? 10)
+    return stringifyResult({ matches: matches.map(({ id, kind, role, createdAt, preview, tokenCount, truthRefs, compressionMethod }) => ({ id, kind, role, createdAt, preview, tokenCount, truthRefs, compressionMethod })) })
+  }
+  if (toolCall.function.name === 'context_read') {
+    if (!runtime || !Array.isArray(args.ids) || args.ids.some((id) => typeof id !== 'string')) {
+      throw new Error('conversation context runtime and ids are required')
+    }
+    const messages = await readContextRecords(project.id, runtime.conversationId, args.ids)
+    return stringifyResult({ records: messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      representation: message.representation ?? 'original',
+      truthRefs: message.truthRefs ?? [],
+      createdAt: message.createdAt,
+    })) })
+  }
   if (toolCall.function.name === 'git_status') {
     if (typeof args.folder_id !== 'string') throw new Error('folder_id is required')
-    return stringifyResult(await gitStatus(getFolder(project, args.folder_id).path))
+    return stringifyResult(await gitStatus(getFolder(project, args.folder_id).path, runtime?.signal))
   }
   if (toolCall.function.name === 'git_diff') {
     if (typeof args.folder_id !== 'string' || typeof args.staged !== 'boolean') {
       throw new Error('folder_id and staged are required')
     }
-    return stringifyResult(await gitDiff(getFolder(project, args.folder_id).path, args.staged))
+    return stringifyResult(await gitDiff(getFolder(project, args.folder_id).path, args.staged, runtime?.signal))
   }
   if (toolCall.function.name === 'git_add') {
     if (typeof args.folder_id !== 'string' || !Array.isArray(args.paths)) {
       throw new Error('folder_id and paths are required')
     }
-    return stringifyResult(await gitAdd(getFolder(project, args.folder_id).path, args.paths))
+    return stringifyResult(await gitAdd(getFolder(project, args.folder_id).path, args.paths, runtime?.signal))
   }
   if (toolCall.function.name === 'git_commit') {
     if (typeof args.folder_id !== 'string' || typeof args.message !== 'string') {
       throw new Error('folder_id and message are required')
     }
-    return stringifyResult(await gitCommit(getFolder(project, args.folder_id).path, args.message))
+    return stringifyResult(await gitCommit(getFolder(project, args.folder_id).path, args.message, runtime?.signal))
   }
   if (toolCall.function.name === 'git_log') {
     if (typeof args.folder_id !== 'string' || typeof args.max_count !== 'number') {
       throw new Error('folder_id and max_count are required')
     }
-    return stringifyResult(await gitLog(getFolder(project, args.folder_id).path, args.max_count))
+    return stringifyResult(await gitLog(getFolder(project, args.folder_id).path, args.max_count, runtime?.signal))
   }
   if (toolCall.function.name === 'git_get_current_branch') {
     if (typeof args.folder_id !== 'string') throw new Error('folder_id is required')
-    return stringifyResult(await gitGetCurrentBranch(getFolder(project, args.folder_id).path))
+    return stringifyResult(await gitGetCurrentBranch(getFolder(project, args.folder_id).path, runtime?.signal))
   }
 
   const environmentFolder = getEnvironmentFolder(project)
@@ -396,15 +442,16 @@ export async function runAgentTool(
         workingFolder.path,
         args.code,
         args.timeout,
+        runtime?.signal,
       ),
     )
   }
   if (toolCall.function.name === 'python_install_package') {
     if (!Array.isArray(args.packages)) throw new Error('packages are required')
-    return stringifyResult(await installPythonPackages(environmentFolder.path, args.packages))
+    return stringifyResult(await installPythonPackages(environmentFolder.path, args.packages, runtime?.signal))
   }
   if (toolCall.function.name === 'python_env_info') {
-    return stringifyResult(await getPythonEnvironmentInfo(environmentFolder.path))
+    return stringifyResult(await getPythonEnvironmentInfo(environmentFolder.path, runtime?.signal))
   }
   if (toolCall.function.name === 'project_search_text') {
     if (typeof args.query !== 'string' || typeof args.case_sensitive !== 'boolean') {
@@ -414,7 +461,7 @@ export async function runAgentTool(
       ? project.folders
       : args.folder_ids.map((folderId) => getFolder(project, folderId))
     return stringifyResult(
-      await searchProject(folders, args.query, args.file_pattern, args.case_sensitive),
+      await searchProject(folders, args.query, args.file_pattern, args.case_sensitive, runtime?.signal),
     )
   }
 
@@ -445,6 +492,7 @@ export async function runAgentTool(
     }
     const target = await resolveFolderPath(folder, path, true)
     await mkdir(dirname(target), { recursive: true })
+    throwIfAborted(runtime?.signal)
     await writeFile(target, args.content, 'utf8')
     markWritten(writtenFiles, target)
     return stringifyResult({ success: true, message: `Wrote ${path}` })
@@ -453,7 +501,7 @@ export async function runAgentTool(
     if (typeof args.old_snippet !== 'string' || typeof args.new_snippet !== 'string') {
       throw new Error('old_snippet and new_snippet are required')
     }
-    const result = await patchFile(folder, path, args.old_snippet, args.new_snippet)
+    const result = await patchFile(folder, path, args.old_snippet, args.new_snippet, runtime?.signal)
     if (result.target) markWritten(writtenFiles, result.target)
     return stringifyResult({ success: result.success, message: result.message, diff: result.diff })
   }
@@ -476,12 +524,12 @@ export async function runAgentTool(
   }
   if (toolCall.function.name === 'python_list_symbols') {
     return stringifyResult(
-      await listPythonSymbols(environmentFolder.path, folder.path, path),
+      await listPythonSymbols(environmentFolder.path, folder.path, path, runtime?.signal),
     )
   }
   if (toolCall.function.name === 'project_tree') {
     if (typeof args.max_depth !== 'number') throw new Error('max_depth is required')
-    return stringifyResult(await buildTree(folder, path, args.max_depth))
+    return stringifyResult(await buildTree(folder, path, args.max_depth, runtime?.signal))
   }
 
   throw new Error(`Unknown tool: ${toolCall.function.name}`)
@@ -511,6 +559,8 @@ export function createAgentTools(project: Project): object[] {
   }
 
   return [
+    { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
     { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
     { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
