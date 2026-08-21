@@ -482,6 +482,7 @@ export async function develop(
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'For JavaScript or TypeScript projects, use node_package_command for npm/pnpm dependency operations and node_package_script only for scripts explicitly defined in package.json; do not run arbitrary package-manager shell commands.',
+      'When the user asks to verify JavaScript or TypeScript work, use node_validate to run the relevant package.json scripts and report its structured results; do not infer success from process creation or partial output.',
       'For frontend development servers, use frontend_start_dev_server only with an explicitly defined package.json script. Use frontend_get_dev_server_status or frontend_get_dev_server_logs to inspect it, and frontend_stop_dev_server when it is no longer needed. Do not start arbitrary long-lived shell commands.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',

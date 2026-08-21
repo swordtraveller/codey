@@ -21,6 +21,7 @@ import {
   truncateOutput,
 } from './sandbox'
 import { runPackageManagerCommand, runPackageScript } from './node-sandbox'
+import { runNodeValidation, type NodeValidationCheckInput } from './node-validation'
 import {
   getFrontendServer,
   getFrontendServerLogs,
@@ -58,6 +59,7 @@ type ToolArguments = {
   package_manager?: 'npm' | 'pnpm'
   command?: 'install' | 'ci' | 'update' | 'list' | 'outdated'
   script?: string
+  checks?: NodeValidationCheckInput[]
   server_id?: string
 }
 
@@ -541,6 +543,25 @@ export async function runAgentTool(
       ),
     )
   }
+  if (toolCall.function.name === 'node_validate') {
+    if (
+      typeof args.folder_id !== 'string' ||
+      (args.package_manager !== 'npm' && args.package_manager !== 'pnpm') ||
+      !Array.isArray(args.checks) ||
+      typeof args.timeout !== 'number'
+    ) {
+      throw new Error('folder_id, package_manager, checks, and timeout are required')
+    }
+    const folder = getFolder(project, args.folder_id)
+    const packageRoot = await resolveFolderPath(folder, args.path ?? '.', false)
+    return stringifyResult(await runNodeValidation(
+      packageRoot,
+      args.package_manager,
+      args.checks,
+      args.timeout,
+      runtime?.signal,
+    ))
+  }
   if (toolCall.function.name === 'frontend_start_dev_server') {
     if (
       !runtime ||
@@ -722,6 +743,7 @@ export function createAgentTools(project: Project): object[] {
     { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
     { type: 'function', function: { name: 'node_package_command', description: 'Run a safe npm or pnpm package-manager operation in a project package root. Install, CI, and update always disable package lifecycle scripts.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, command: { type: 'string', enum: ['install', 'ci', 'update', 'list', 'outdated'] }, packages: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'command', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'node_package_script', description: 'Run a package.json script that is explicitly defined in the selected package root, with a timeout and workspace write guard.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'script', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'node_validate', description: 'Run up to five package.json validation scripts sequentially in the Node sandbox and return structured pass, failure, timeout, duration, and bounded log results.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, checks: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'object', properties: { script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 } }, required: ['script'], additionalProperties: false } }, timeout }, required: ['folder_id', 'package_manager', 'checks', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'frontend_start_dev_server', description: 'Start a long-running package.json development script in the project sandbox. The script must be explicitly defined in package.json.', parameters: { type: 'object', properties: { ...pathProperties, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 } }, required: ['folder_id', 'package_manager', 'script'], additionalProperties: false } } },
     { type: 'function', function: { name: 'frontend_get_dev_server_status', description: 'Get the status and bounded output of a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'frontend_get_dev_server_logs', description: 'Get bounded stdout and stderr from a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },

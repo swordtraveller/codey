@@ -461,6 +461,58 @@ h1 {
   word-break: break-word;
 }
 
+.validation-result {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.validation-summary,
+.validation-check-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.validation-status {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-weight: 600;
+}
+
+.validation-passed {
+  color: #107c10;
+  background: #f1faf1;
+}
+
+.validation-failed,
+.validation-timed_out {
+  color: #a4262c;
+  background: #fdf3f4;
+}
+
+.validation-cancelled {
+  color: #605e5c;
+  background: #f0f0f0;
+}
+
+.validation-check {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+
+.validation-check-heading > span,
+.validation-logs summary {
+  color: #777;
+  font-size: 11px;
+}
+
+.validation-logs {
+  margin-top: 6px;
+}
 .message p {
   margin: 0;
   line-height: 1.5;

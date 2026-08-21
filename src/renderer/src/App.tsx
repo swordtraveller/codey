@@ -185,6 +185,71 @@ function parseFrontendServerResult(block: Extract<AssistantMessageBlock, { type:
   }
 }
 
+type NodeValidationStatus = 'passed' | 'failed' | 'timed_out' | 'cancelled'
+
+type NodeValidationResult = {
+  status: NodeValidationStatus
+  summary: {
+    total: number
+    passed: number
+    duration_ms: number
+  }
+  checks: Array<{
+    script: string
+    status: NodeValidationStatus
+    exit_code: number
+    duration_ms: number
+    stdout: string
+    stderr: string
+  }>
+}
+
+function parseNodeValidationResult(block: Extract<AssistantMessageBlock, { type: 'function_call' }>): NodeValidationResult | null {
+  if (block.name !== 'node_validate' || !block.result || block.resultError) return null
+  try {
+    const result = JSON.parse(block.result) as NodeValidationResult
+    return result && Array.isArray(result.checks) && result.summary ? result : null
+  } catch {
+    return null
+  }
+}
+
+function formatValidationDuration(durationMs: number): string {
+  return durationMs < 1_000 ? `${durationMs} ms` : `${(durationMs / 1_000).toFixed(1)} s`
+}
+
+function ValidationResultView({ result }: { result: NodeValidationResult }): React.JSX.Element {
+  const { t } = useTranslation()
+  const statusLabel = (status: NodeValidationStatus): string => t(`validationStatus_${status}`)
+
+  return (
+    <div className="validation-result">
+      <div className="validation-summary">
+        <span className={`validation-status validation-${result.status}`}>{statusLabel(result.status)}</span>
+        <span>{t('validationSummary', {
+          passed: result.summary.passed,
+          total: result.summary.total,
+          duration: formatValidationDuration(result.summary.duration_ms),
+        })}</span>
+      </div>
+      {result.checks.map((check, index) => (
+        <div className="validation-check" key={`${check.script}-${index}`}>
+          <div className="validation-check-heading">
+            <strong>{check.script}</strong>
+            <span>{statusLabel(check.status)} · {formatValidationDuration(check.duration_ms)} · {t('exitCode')} {check.exit_code}</span>
+          </div>
+          {(check.stdout || check.stderr) && (
+            <details className="validation-logs">
+              <summary>{t('validationLogs')}</summary>
+              {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
+              {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
+            </details>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
 function FunctionCallMessage({
   block,
   projectId,
@@ -197,6 +262,7 @@ function FunctionCallMessage({
   const { t } = useTranslation()
   const [previewError, setPreviewError] = useState('')
   const server = parseFrontendServerResult(block)
+  const validation = parseNodeValidationResult(block)
   const canPreview = (server?.status === 'starting' || server?.status === 'running') && Boolean(server.serverId && projectId && conversationId)
   const openPreview = async (): Promise<void> => {
     if (!projectId || !conversationId || !server?.serverId) return
@@ -211,7 +277,7 @@ function FunctionCallMessage({
 
   return (
     <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
-      <summary>{block.name}</summary>
+      <summary>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</summary>
       <div className="tool-output-section">
         <span>{t('toolParameters')}</span>
         <pre>{formatToolOutput(block.parameters)}</pre>
@@ -219,7 +285,7 @@ function FunctionCallMessage({
       {block.result !== undefined && (
         <div className="tool-output-section">
           <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
-          <pre>{formatToolOutput(block.result)}</pre>
+          {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
         </div>
       )}
       {canPreview && (
