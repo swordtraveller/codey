@@ -52,6 +52,11 @@ declare global {
         content: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
+      openFrontendPreview(
+        projectId: string,
+        conversationId: string,
+        serverId: string,
+      ): Promise<{ status: 'opened' | 'starting' | 'stopped' | 'failed' }>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
       onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
       openContextDebug(projectId: string, conversationId: string): Promise<void>

@@ -36,7 +36,8 @@ import {
   readConversationWorkingSet,
 } from './conversation-store'
 import { log } from './logger'
-import { stopAllFrontendServers } from './frontend-runtime'
+import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
+import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
@@ -58,6 +59,7 @@ import {
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
+onFrontendServerEnded(closePreviewWindow)
 let mainWindow: BrowserWindow | null = null
 let keepAwakeBlockerId: number | null = null
 let keepAwakeEnabled = false
@@ -322,6 +324,7 @@ function createMainWindow(): void {
     mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
+    closeAllPreviewWindows()
   })
   loadRenderer(window)
 }
@@ -432,6 +435,15 @@ app.whenReady().then(() => {
     controller.abort()
     return true
   })
+  ipcMain.handle('frontend:open-preview', (_event, projectId: string, conversationId: string, serverId: string) => {
+    const server = getFrontendServer(projectId, conversationId, serverId)
+    if (server.status === 'starting') return { status: 'starting' as const }
+    if (server.status === 'failed') return { status: 'failed' as const }
+    if (server.status === 'stopped') return { status: 'stopped' as const }
+    if (!server.previewUrl) return { status: 'starting' as const }
+    openPreviewWindow(server.serverId, server.previewUrl)
+    return { status: 'opened' as const }
+  })
 
   ipcMain.handle('context-debug:open', (_event, projectId: string, conversationId: string) =>
     openContextDebugWindow(projectId, conversationId))
@@ -467,6 +479,7 @@ app.on('will-quit', (event) => {
   if (frontendShutdownStarted) return
   frontendShutdownStarted = true
   event.preventDefault()
+  closeAllPreviewWindows()
   void stopAllFrontendServers().finally(() => app.quit())
 })
 

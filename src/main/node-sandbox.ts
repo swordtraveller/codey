@@ -82,6 +82,11 @@ function assertPath(value, write) {
   }
 }
 
+function isSandboxAncestor(value) {
+  const target = resolvePath(value)
+  return Boolean(target && isWithin(target, sandboxRoot))
+}
+
 function wrap(target, name, indexes, write = false) {
   const original = target[name]
   if (typeof original !== 'function') return
@@ -92,8 +97,27 @@ function wrap(target, name, indexes, write = false) {
 }
 
 for (const name of [
-  'readFile', 'readFileSync', 'readdir', 'readdirSync', 'createReadStream',
+  'readFile', 'readFileSync', 'createReadStream',
 ]) wrap(fs, name, [0])
+function wrapDirectoryRead(target, name, asynchronous) {
+  const original = target[name]
+  if (typeof original !== 'function') return
+  target[name] = function (...args) {
+    try {
+      assertPath(args[0], false)
+    } catch {
+      if (asynchronous) {
+        const callback = args.find((value) => typeof value === 'function')
+        if (callback) process.nextTick(() => callback(null, []))
+        return
+      }
+      return []
+    }
+    return original.apply(this, args)
+  }
+}
+wrapDirectoryRead(fs, 'readdir', true)
+wrapDirectoryRead(fs, 'readdirSync', false)
 function wrapProbe(target, name, fallback) {
   const original = target[name]
   if (typeof original !== 'function') return
@@ -101,6 +125,7 @@ function wrapProbe(target, name, fallback) {
     try {
       assertPath(args[0], false)
     } catch {
+      if (isSandboxAncestor(args[0])) return original.apply(this, args)
       const targetPath = resolvePath(args[0]) || String(args[0])
       const unavailable = Object.assign(new Error('Path is unavailable: ' + name + ' ' + targetPath), { code: 'ENOENT' })
       const callback = args.find((value) => typeof value === 'function')
@@ -132,13 +157,23 @@ if (originalRealpathNative) fs.realpath.native = originalRealpathNative
 if (originalRealpathSyncNative) fs.realpathSync.native = originalRealpathSyncNative
 
 const promises = fs.promises
-for (const name of ['readFile', 'readdir', 'open']) wrap(promises, name, [0])
+for (const name of ['readFile', 'open']) wrap(promises, name, [0])
+const originalPromisesReaddir = promises.readdir
+promises.readdir = function (...args) {
+  try {
+    assertPath(args[0], false)
+  } catch {
+    return Promise.resolve([])
+  }
+  return originalPromisesReaddir.apply(this, args)
+}
 for (const name of ['stat', 'lstat', 'access', 'realpath']) {
   const original = promises[name]
   promises[name] = function (...args) {
     try {
       assertPath(args[0], false)
     } catch {
+      if (isSandboxAncestor(args[0])) return original.apply(this, args)
       const targetPath = resolvePath(args[0]) || String(args[0])
       return Promise.reject(Object.assign(new Error('Path is unavailable: ' + name + ' ' + targetPath), { code: 'ENOENT' }))
     }
@@ -473,7 +508,7 @@ export async function startPackageScript(
       if (settled) return Promise.resolve()
       stopped = true
       stopPromise = (async () => {
-        const startupDelay = 250 - (Date.now() - startedAt)
+        const startupDelay = 1_000 - (Date.now() - startedAt)
         if (process.platform === 'win32' && startupDelay > 0) {
           await new Promise<void>((resolve) => setTimeout(resolve, startupDelay))
         }

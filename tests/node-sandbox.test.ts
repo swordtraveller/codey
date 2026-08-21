@@ -116,6 +116,27 @@ describe('Node package sandbox', () => {
     expect(result.stderr).toContain('Node sandbox denied access outside the package workspace')
   })
 
+  it('allows ancestor metadata probes while hiding inaccessible directories', async () => {
+    const parent = await temporaryDirectory()
+    const root = join(parent, 'package')
+    await mkdir(root)
+    await mkdir(join(root, '.git'))
+    await writeFile(join(root, 'package.json'), JSON.stringify({
+      scripts: { probe: 'node probe.cjs' },
+    }), 'utf8')
+    await writeFile(
+      join(root, 'probe.cjs'),
+      "const fs = require('node:fs'); const path = require('node:path'); console.log(JSON.stringify({ parent: fs.statSync('..').isDirectory(), git: fs.readdirSync('.git'), outside: fs.readdirSync('..') }))\n",
+      'utf8',
+    )
+
+    const result = await runPackageScript(root, 'pnpm', 'probe', [], 10)
+    const probes = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>
+
+    expect(result.success).toBe(true)
+    expect(probes).toEqual({ parent: true, git: [], outside: [] })
+  })
+
   it('rejects unsafe package specifiers before invoking a package manager', async () => {
     const root = await temporaryDirectory()
 

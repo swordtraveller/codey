@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('development:send', projectId, conversationId, content),
     stopDevelopment: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('development:stop', projectId, conversationId),
+    openFrontendPreview: (projectId: string, conversationId: string, serverId: string) =>
+      ipcRenderer.invoke('frontend:open-preview', projectId, conversationId, serverId),
     onDevelopmentProgress: (listener: (progress: DevelopmentProgress) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, progress: DevelopmentProgress) =>
         listener(progress)

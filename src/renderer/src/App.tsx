@@ -171,8 +171,43 @@ function AssistantContent({ content }: { content: string }): React.JSX.Element {
     </div>
   )
 }
-function FunctionCallMessage({ block }: { block: Extract<AssistantMessageBlock, { type: 'function_call' }> }): React.JSX.Element {
+type FrontendServerToolResult = {
+  serverId?: string
+  status?: string
+}
+
+function parseFrontendServerResult(block: Extract<AssistantMessageBlock, { type: 'function_call' }>): FrontendServerToolResult | null {
+  if (!block.result || block.resultError || !block.name.startsWith('frontend_')) return null
+  try {
+    return JSON.parse(block.result) as FrontendServerToolResult
+  } catch {
+    return null
+  }
+}
+
+function FunctionCallMessage({
+  block,
+  projectId,
+  conversationId,
+}: {
+  block: Extract<AssistantMessageBlock, { type: 'function_call' }>
+  projectId?: string
+  conversationId?: string
+}): React.JSX.Element {
   const { t } = useTranslation()
+  const [previewError, setPreviewError] = useState('')
+  const server = parseFrontendServerResult(block)
+  const canPreview = (server?.status === 'starting' || server?.status === 'running') && Boolean(server.serverId && projectId && conversationId)
+  const openPreview = async (): Promise<void> => {
+    if (!projectId || !conversationId || !server?.serverId) return
+    setPreviewError('')
+    try {
+      const result = await window.codey.openFrontendPreview(projectId, conversationId, server.serverId)
+      if (result.status !== 'opened') setPreviewError(t(`preview.${result.status}`))
+    } catch {
+      setPreviewError(t('unableOpenPreview'))
+    }
+  }
 
   return (
     <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
@@ -187,6 +222,16 @@ function FunctionCallMessage({ block }: { block: Extract<AssistantMessageBlock, 
           <pre>{formatToolOutput(block.result)}</pre>
         </div>
       )}
+      {canPreview && (
+        <Button
+          appearance="secondary"
+          size="small"
+          onClick={() => void openPreview()}
+        >
+          {t('openPreview')}
+        </Button>
+      )}
+      {previewError && <p className="tool-preview-error">{previewError}</p>}
     </details>
   )
 }
@@ -1056,7 +1101,12 @@ export function App(): React.JSX.Element {
                             block.type === 'content' ? (
                               <AssistantContent content={block.content} key={`${message.id}-${index}`} />
                             ) : (
-                              <FunctionCallMessage block={block} key={block.id} />
+                              <FunctionCallMessage
+                                block={block}
+                                projectId={activeProject?.id}
+                                conversationId={activeConversation.id}
+                                key={block.id}
+                              />
                             ),
                           )
                         ) : message.role === 'assistant' ? (
@@ -1080,7 +1130,12 @@ export function App(): React.JSX.Element {
                       ) : item.block.type === 'content' ? (
                         <AssistantContent content={item.block.content} key={`live-block-${index}`} />
                       ) : (
-                        <FunctionCallMessage block={item.block} key={item.block.id || `live-block-${index}`} />
+                        <FunctionCallMessage
+                          block={item.block}
+                          projectId={activeProject?.id}
+                          conversationId={activeConversation.id}
+                          key={item.block.id || `live-block-${index}`}
+                        />
                       ),
                     )}
                   </div>

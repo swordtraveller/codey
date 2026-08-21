@@ -443,6 +443,15 @@ h1 {
   font-size: 11px;
   font-weight: 600;
 }
+.function-call > button {
+  margin-top: 10px;
+}
+
+.tool-preview-error {
+  margin: 8px 0 0;
+  color: var(--colorPaletteRedForeground1);
+  font-size: 12px;
+}
 
 .function-call pre {
   margin: 6px 0 0;
