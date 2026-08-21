@@ -22,6 +22,7 @@ import { setAppLanguage } from './i18n'
 import type {
   AgentLimitsConfig,
   AppLanguage,
+  AssistantMessageBlock,
   ContextCompressionNotice,
   ContextManagementConfig,
   ConversationRuntimeState,
@@ -38,7 +39,7 @@ import {
   type Project,
 } from '../../shared/types'
 
-function formatToolParameters(parameters: string): string {
+function formatToolOutput(parameters: string): string {
   try {
     return JSON.stringify(JSON.parse(parameters), null, 2)
   } catch {
@@ -168,6 +169,25 @@ function AssistantContent({ content }: { content: string }): React.JSX.Element {
         fallback
       )}
     </div>
+  )
+}
+function FunctionCallMessage({ block }: { block: Extract<AssistantMessageBlock, { type: 'function_call' }> }): React.JSX.Element {
+  const { t } = useTranslation()
+
+  return (
+    <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
+      <summary>{block.name}</summary>
+      <div className="tool-output-section">
+        <span>{t('toolParameters')}</span>
+        <pre>{formatToolOutput(block.parameters)}</pre>
+      </div>
+      {block.result !== undefined && (
+        <div className="tool-output-section">
+          <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
+          <pre>{formatToolOutput(block.result)}</pre>
+        </div>
+      )}
+    </details>
   )
 }
 function ContextSettingsFields({
@@ -1036,10 +1056,7 @@ export function App(): React.JSX.Element {
                             block.type === 'content' ? (
                               <AssistantContent content={block.content} key={`${message.id}-${index}`} />
                             ) : (
-                              <details className="function-call" key={block.id}>
-                                <summary>{block.name}</summary>
-                                <pre>{formatToolParameters(block.parameters)}</pre>
-                              </details>
+                              <FunctionCallMessage block={block} key={block.id} />
                             ),
                           )
                         ) : message.role === 'assistant' ? (
@@ -1063,10 +1080,7 @@ export function App(): React.JSX.Element {
                       ) : item.block.type === 'content' ? (
                         <AssistantContent content={item.block.content} key={`live-block-${index}`} />
                       ) : (
-                        <details className="function-call" key={item.block.id || `live-block-${index}`}>
-                          <summary>{item.block.name}</summary>
-                          <pre>{formatToolParameters(item.block.parameters)}</pre>
-                        </details>
+                        <FunctionCallMessage block={item.block} key={item.block.id || `live-block-${index}`} />
                       ),
                     )}
                   </div>

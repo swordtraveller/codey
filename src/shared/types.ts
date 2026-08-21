@@ -91,7 +91,7 @@ export type ContextMetrics = {
 
 export type AssistantMessageBlock =
   | { type: 'content'; content: string }
-  | { type: 'function_call'; id: string; name: string; parameters: string }
+  | { type: 'function_call'; id: string; name: string; parameters: string; result?: string; resultError?: boolean }
 
 export type ContextCompressionNotice = {
   originalTokens: number

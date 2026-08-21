@@ -36,6 +36,7 @@ import {
   readConversationWorkingSet,
 } from './conversation-store'
 import { log } from './logger'
+import { stopAllFrontendServers } from './frontend-runtime'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
@@ -459,6 +460,14 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (!mainWindow) createMainWindow()
   })
+})
+
+let frontendShutdownStarted = false
+app.on('will-quit', (event) => {
+  if (frontendShutdownStarted) return
+  frontendShutdownStarted = true
+  event.preventDefault()
+  void stopAllFrontendServers().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

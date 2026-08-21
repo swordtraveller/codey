@@ -113,6 +113,28 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
     }))
 }
 
+function toolResultHasFailure(content: string): boolean {
+  try {
+    const value = JSON.parse(content) as { success?: unknown }
+    return typeof value === 'object' && value !== null && value.success === false
+  } catch {
+    return false
+  }
+}
+
+function updateToolCallResult(
+  timeline: DevelopmentTimelineItem[],
+  toolCallId: string,
+  content: string,
+  isError: boolean,
+): void {
+  const item = timeline.find((candidate) =>
+    candidate.type === 'block' && candidate.block.type === 'function_call' && candidate.block.id === toolCallId,
+  )
+  if (item?.type !== 'block' || item.block.type !== 'function_call') return
+  item.block.result = content
+  item.block.resultError = isError
+}
 function toMessageBlocks(message: ResponseMessage): AssistantMessageBlock[] {
   const blocks: AssistantMessageBlock[] = []
   if (message.content) {
@@ -460,6 +482,7 @@ export async function develop(
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
       'For JavaScript or TypeScript projects, use node_package_command for npm/pnpm dependency operations and node_package_script only for scripts explicitly defined in package.json; do not run arbitrary package-manager shell commands.',
+      'For frontend development servers, use frontend_start_dev_server only with an explicitly defined package.json script. Use frontend_get_dev_server_status or frontend_get_dev_server_logs to inspect it, and frontend_stop_dev_server when it is no longer needed. Do not start arbitrary long-lived shell commands.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
       'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
@@ -587,26 +610,32 @@ export async function develop(
       for (let index = 0; index < toolCalls.length; index += 1) {
         const toolCall = toolCalls[index]
         let content: string
+        let isError = false
         try {
           throwIfAborted(runtime?.signal)
           content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
+          isError = toolResultHasFailure(content)
         } catch (error) {
           if (runtime?.signal?.aborted) {
             for (const pending of toolCalls.slice(index)) {
+              const stoppedContent = 'Stopped by user before completion'
               history.push({
                 role: 'tool',
                 tool_call_id: pending.id,
-                content: 'Stopped by user before completion',
+                content: stoppedContent,
                 id: randomUUID(),
                 createdAt: new Date().toISOString(),
                 representation: 'original',
                 contextSource: 'live',
               })
+              updateToolCallResult(timeline, pending.id, stoppedContent, true)
             }
+            onProgress?.([...timeline])
             throw error
           }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
+          isError = true
         }
         history.push({
           role: 'tool',
@@ -617,23 +646,27 @@ export async function develop(
           representation: 'original',
           contextSource: 'live',
         })
+        updateToolCallResult(timeline, toolCall.id, content, isError)
+        onProgress?.([...timeline])
         if (runtime?.signal?.aborted) {
           for (const pending of toolCalls.slice(index + 1)) {
+            const stoppedContent = 'Stopped by user before completion'
             history.push({
               role: 'tool',
               tool_call_id: pending.id,
-              content: 'Stopped by user before completion',
+              content: stoppedContent,
               id: randomUUID(),
               createdAt: new Date().toISOString(),
               representation: 'original',
               contextSource: 'live',
             })
+            updateToolCallResult(timeline, pending.id, stoppedContent, true)
           }
+          onProgress?.([...timeline])
           throw abortError()
         }
       }
-    }
-    throw new Error('The conversation round exceeded the configured model-request limit')
+    }    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
     const stopped = runtime?.signal?.aborted === true
     return {

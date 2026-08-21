@@ -23,6 +23,9 @@ void i18n.use(initReactI18next).init({
       translation: {
         copyMessage: 'Copy message',
         copy: 'Copy',
+        toolParameters: 'Parameters',
+        toolResult: 'Result',
+        toolError: 'Error',
         duration: '{{hours}} hr {{minutes}} min',
         processing: 'Processing {{duration}}...',
         completed: 'Completed in {{duration}}: {{result}}',
@@ -201,6 +204,9 @@ void i18n.use(initReactI18next).init({
       translation: {
         copyMessage: '复制消息',
         copy: '复制',
+        toolParameters: '参数',
+        toolResult: '返回值',
+        toolError: '错误',
         duration: '{{hours}} 时 {{minutes}} 分',
         processing: '正在处理中 {{duration}}...',
         completed: '已结束处理 {{duration}}：{{result}}',

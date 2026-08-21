@@ -422,8 +422,30 @@ h1 {
   font-weight: 500;
 }
 
+.function-call.tool-error {
+  border-color: #d13438;
+}
+
+.function-call.tool-error summary,
+.function-call.tool-error pre {
+  color: #a4262c;
+}
+
+.tool-output-section + .tool-output-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.tool-output-section > span {
+  display: block;
+  color: #777;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .function-call pre {
-  margin: 12px 0 0;
+  margin: 6px 0 0;
   overflow: auto;
   color: #666;
   white-space: pre-wrap;

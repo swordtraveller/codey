@@ -21,6 +21,12 @@ import {
   truncateOutput,
 } from './sandbox'
 import { runPackageManagerCommand, runPackageScript } from './node-sandbox'
+import {
+  getFrontendServer,
+  getFrontendServerLogs,
+  startFrontendServer,
+  stopFrontendServer,
+} from './frontend-runtime'
 
 export type ToolCall = {
   id: string
@@ -52,6 +58,7 @@ type ToolArguments = {
   package_manager?: 'npm' | 'pnpm'
   command?: 'install' | 'ci' | 'update' | 'list' | 'outdated'
   script?: string
+  server_id?: string
 }
 
 type TreeNode = {
@@ -534,6 +541,48 @@ export async function runAgentTool(
       ),
     )
   }
+  if (toolCall.function.name === 'frontend_start_dev_server') {
+    if (
+      !runtime ||
+      typeof args.folder_id !== 'string' ||
+      (args.package_manager !== 'npm' && args.package_manager !== 'pnpm') ||
+      typeof args.script !== 'string'
+    ) {
+      throw new Error('conversation runtime, folder_id, package_manager, and script are required')
+    }
+    const folder = getFolder(project, args.folder_id)
+    const packageRoot = await resolveFolderPath(folder, args.path ?? '.', false)
+    const argv = args.argv ?? []
+    if (!Array.isArray(argv) || argv.some((item) => typeof item !== 'string')) {
+      throw new Error('argv must be an array of strings')
+    }
+    return stringifyResult(await startFrontendServer(
+      project.id,
+      runtime.conversationId,
+      packageRoot,
+      args.package_manager,
+      args.script,
+      argv,
+    ))
+  }
+  if (toolCall.function.name === 'frontend_get_dev_server_status') {
+    if (!runtime || typeof args.server_id !== 'string') {
+      throw new Error('conversation runtime and server_id are required')
+    }
+    return stringifyResult(getFrontendServer(project.id, runtime.conversationId, args.server_id))
+  }
+  if (toolCall.function.name === 'frontend_get_dev_server_logs') {
+    if (!runtime || typeof args.server_id !== 'string') {
+      throw new Error('conversation runtime and server_id are required')
+    }
+    return stringifyResult(getFrontendServerLogs(project.id, runtime.conversationId, args.server_id))
+  }
+  if (toolCall.function.name === 'frontend_stop_dev_server') {
+    if (!runtime || typeof args.server_id !== 'string') {
+      throw new Error('conversation runtime and server_id are required')
+    }
+    return stringifyResult(await stopFrontendServer(project.id, runtime.conversationId, args.server_id))
+  }
   const environmentFolder = getEnvironmentFolder(project)
   const folderPaths = projectFolderPaths(project)
 
@@ -673,6 +722,10 @@ export function createAgentTools(project: Project): object[] {
     { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
     { type: 'function', function: { name: 'node_package_command', description: 'Run a safe npm or pnpm package-manager operation in a project package root. Install, CI, and update always disable package lifecycle scripts.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, command: { type: 'string', enum: ['install', 'ci', 'update', 'list', 'outdated'] }, packages: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'command', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'node_package_script', description: 'Run a package.json script that is explicitly defined in the selected package root, with a timeout and workspace write guard.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'script', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_start_dev_server', description: 'Start a long-running package.json development script in the project sandbox. The script must be explicitly defined in package.json.', parameters: { type: 'object', properties: { ...pathProperties, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 } }, required: ['folder_id', 'package_manager', 'script'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_get_dev_server_status', description: 'Get the status and bounded output of a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_get_dev_server_logs', description: 'Get bounded stdout and stderr from a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_stop_dev_server', description: 'Stop a development server started by this conversation and its child process tree.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_execute', description: 'Execute an in-memory Python code snippet without allowing file writes.', parameters: { type: 'object', properties: { code: { type: 'string' }, timeout, folder_id: { ...folderId, description: 'Optional project folder to use as the working directory.' } }, required: ['code', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_run_script', description: 'Run an existing project Python script using the project agent_venv.', parameters: { type: 'object', properties: { ...pathProperties, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: [...pathRequired, 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_install_package', description: 'Install packages into the project agent_venv environment.', parameters: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['packages'], additionalProperties: false } } },

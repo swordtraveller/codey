@@ -8,7 +8,7 @@ export async function createTemporaryDirectory(prefix: string): Promise<string> 
 }
 
 export async function removeTemporaryDirectory(directory: string): Promise<void> {
-  await rm(directory, { recursive: true, force: true })
+  await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 }
 
 export function runGit(directory: string, ...args: string[]): string {
