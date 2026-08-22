@@ -12,6 +12,7 @@ import type {
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
 import { truncateOutput } from './sandbox'
+import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
 
 type ResponseMessage = {
@@ -470,6 +471,7 @@ export async function develop(
 
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
+  const projectDetections = await detectProjectFolders(project.folders)
   const systemMessage: ContextMessage = {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
@@ -481,6 +483,8 @@ export async function develop(
       `The project Python environment is stored under folder ID ${project.pythonEnvironmentFolderId}.`,
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
+      'Do not assume a folder is a Python project just because Python tools are available. Use the detected runtimes and package files to choose tools. A folder may contain multiple unrelated runtimes, and a project may contain both frontend Node code and a Rust or Python component.',
+      'For frontend work, first use the detected package root, package manager, framework, and declared scripts. Use frontend lifecycle tools only for scripts that are actually declared in package.json; do not infer that a running process means the application is ready.',
       'For JavaScript or TypeScript projects, use node_package_command for npm/pnpm dependency operations and node_package_script only for scripts explicitly defined in package.json; do not run arbitrary package-manager shell commands.',
       'When the user asks to verify JavaScript or TypeScript work, use node_validate to run the relevant package.json scripts and report its structured results; do not infer success from process creation or partial output.',
       'For frontend development servers, use frontend_start_dev_server only with an explicitly defined package.json script. Use frontend_get_dev_server_status or frontend_get_dev_server_logs to inspect it, and frontend_stop_dev_server when it is no longer needed. Do not start arbitrary long-lived shell commands.',
