@@ -50,8 +50,8 @@ export type AgentLimitsConfig = {
 }
 
 export const defaultAgentLimitsConfig: AgentLimitsConfig = {
-  modelRequestsPerRound: 12,
-  toolCallsPerRequest: 20,
+  modelRequestsPerRound: 64,
+  toolCallsPerRequest: 32,
 }
 
 export type AppConfig = {
