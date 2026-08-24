@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, type Display, type NativeImage } from 'electron'
 import { join } from 'node:path'
 import type {
   AgentLimitsConfig,
@@ -12,7 +12,11 @@ import type {
   DevelopmentProgress,
   DevelopmentResult,
   DevelopmentTimelineItem,
+  ImageAttachment,
+  ScreenshotSelection,
+  ScreenshotSource,
 } from '../shared/types'
+import { validateImageAttachments } from '../shared/image-attachments'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
@@ -36,6 +40,9 @@ import {
   readConversationWorkingSet,
 } from './conversation-store'
 import { log } from './logger'
+import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
+import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
+import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
@@ -57,6 +64,15 @@ import {
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
+type PendingScreenshot = {
+  window: BrowserWindow
+  image: NativeImage
+  display: Display
+  restoreWindow: () => void
+  resolve: (selection: ScreenshotSelection | null) => void
+}
+const pendingScreenshots = new Map<string, PendingScreenshot>()
+onFrontendServerEnded(closePreviewWindow)
 let mainWindow: BrowserWindow | null = null
 let keepAwakeBlockerId: number | null = null
 let keepAwakeEnabled = false
@@ -175,12 +191,15 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
+  images: ImageAttachment[] = [],
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
-  if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
+  const imageError = validateImageAttachments(images)
+  if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
+  if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
   let project = await getProject(projectId)
   if (project.folders.length === 0) {
@@ -213,6 +232,7 @@ async function developProject(
     createModelConfigSnapshot(modelConfig),
     contextConfig,
     { startedAt, result: 'processing' },
+    images,
   )
   const updatedConversation = project.conversations.find((item) => item.id === conversationId)
   if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
@@ -230,18 +250,22 @@ async function developProject(
         getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
-  const storedHistory = persistedHistory.length > 0
+  const currentUserMessage = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
+    role: 'user' as const,
+    content: normalizedContent,
+    images,
+  }
+  const requestHistory = persistedHistory.length > 0
     ? persistedHistory
-    : updatedConversation.agentMessages
+    : [...updatedConversation.agentMessages, currentUserMessage]
   const result = await develop(
     project,
     modelConfig,
     contextConfig,
     agentLimits,
-    [
-      ...storedHistory,
-      { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
-    ],
+    requestHistory,
     onProgress,
     (managed) => {
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
@@ -321,8 +345,71 @@ function createMainWindow(): void {
     mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
+    closeAllPendingScreenshots()
+    closeAllPreviewWindows()
   })
   loadRenderer(window)
+}
+
+function sendScreenshotSource(pending: PendingScreenshot, captureId: string): void {
+  if (pending.window.isDestroyed()) return
+  const size = pending.image.getSize()
+  const source: ScreenshotSource = {
+    captureId,
+    dataUrl: `data:image/jpeg;base64,${pending.image.toJPEG(85).toString('base64')}`,
+    width: size.width,
+    height: size.height,
+    scaleX: size.width / pending.display.bounds.width,
+    scaleY: size.height / pending.display.bounds.height,
+  }
+  pending.window.webContents.send('screenshot:source', source)
+}
+
+function closePendingScreenshot(captureId: string, selection: ScreenshotSelection | null): void {
+  const pending = pendingScreenshots.get(captureId)
+  if (!pending) return
+  pendingScreenshots.delete(captureId)
+  pending.restoreWindow()
+  pending.resolve(selection)
+  if (!pending.window.isDestroyed()) pending.window.close()
+}
+
+function closeAllPendingScreenshots(): void {
+  for (const captureId of [...pendingScreenshots.keys()]) closePendingScreenshot(captureId, null)
+}
+
+async function selectScreenshotArea(
+  image: NativeImage,
+  display: Display,
+  restoreWindow: () => void,
+): Promise<ScreenshotSelection | null> {
+  const captureId = randomUUID()
+  const window = new BrowserWindow({
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    frame: false,
+    resizable: false,
+    movable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    autoHideMenuBar: true,
+    backgroundColor: '#111111',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, '../preload/index.js'),
+    },
+  })
+  window.setAlwaysOnTop(true, 'screen-saver')
+
+  return new Promise((resolve) => {
+    pendingScreenshots.set(captureId, { window, image, display, restoreWindow, resolve })
+    window.once('closed', () => closePendingScreenshot(captureId, null))
+    loadRenderer(window, { view: 'screenshot-overlay' })
+  })
 }
 
 async function openContextDebugWindow(projectId: string, conversationId: string): Promise<void> {
@@ -402,7 +489,40 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string) => {
+  ipcMain.handle('clipboard:screenshot', async (_event, hideWindow: boolean) => {
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main window is unavailable')
+    const captured = await captureDisplay(mainWindow, hideWindow)
+    try {
+      const selection = await selectScreenshotArea(
+        captured.image,
+        captured.display,
+        captured.restoreWindow,
+      )
+      if (!selection) return null
+      const image = cropScreenshot(captured.image, selection, captured.display)
+      copyImageToClipboard(image)
+      return createImageAttachment(image)
+    } finally {
+      captured.restoreWindow()
+    }
+  })
+  ipcMain.on('clipboard:screenshot-ready', (event) => {
+    const entry = [...pendingScreenshots.entries()]
+      .find(([, pending]) => event.sender === pending.window.webContents)
+    if (entry) sendScreenshotSource(entry[1], entry[0])
+  })
+  ipcMain.on('clipboard:screenshot-complete', (event, captureId: string, selection: ScreenshotSelection) => {
+    const pending = pendingScreenshots.get(captureId)
+    if (!pending || event.sender !== pending.window.webContents) return
+    closePendingScreenshot(captureId, selection)
+  })
+  ipcMain.on('clipboard:screenshot-cancel', (event, captureId: string) => {
+    const pending = pendingScreenshots.get(captureId)
+    if (!pending || event.sender !== pending.window.webContents) return
+    closePendingScreenshot(captureId, null)
+  })
+
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -412,7 +532,7 @@ app.whenReady().then(() => {
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, (timeline) => {
+      return await developProject(projectId, conversationId, content, images, (timeline) => {
         if (!event.sender.isDestroyed()) {
           const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)
@@ -430,6 +550,15 @@ app.whenReady().then(() => {
     if (!controller) return false
     controller.abort()
     return true
+  })
+  ipcMain.handle('frontend:open-preview', (_event, projectId: string, conversationId: string, serverId: string) => {
+    const server = getFrontendServer(projectId, conversationId, serverId)
+    if (server.status === 'starting') return { status: 'starting' as const }
+    if (server.status === 'failed') return { status: 'failed' as const }
+    if (server.status === 'stopped') return { status: 'stopped' as const }
+    if (!server.previewUrl) return { status: 'starting' as const }
+    openPreviewWindow(server.serverId, server.previewUrl)
+    return { status: 'opened' as const }
   })
 
   ipcMain.handle('context-debug:open', (_event, projectId: string, conversationId: string) =>
@@ -459,6 +588,16 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (!mainWindow) createMainWindow()
   })
+})
+
+let frontendShutdownStarted = false
+app.on('will-quit', (event) => {
+  if (frontendShutdownStarted) return
+  frontendShutdownStarted = true
+  event.preventDefault()
+  closeAllPendingScreenshots()
+  closeAllPreviewWindows()
+  void stopAllFrontendServers().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

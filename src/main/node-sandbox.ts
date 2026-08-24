@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process'
 import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   runSandboxProcess,
+  terminateSandboxProcess,
   safeResolveExistingPath,
   safeResolveWritablePath,
   truncateOutput,
@@ -80,6 +82,11 @@ function assertPath(value, write) {
   }
 }
 
+function isSandboxAncestor(value) {
+  const target = resolvePath(value)
+  return Boolean(target && isWithin(target, sandboxRoot))
+}
+
 function wrap(target, name, indexes, write = false) {
   const original = target[name]
   if (typeof original !== 'function') return
@@ -90,9 +97,52 @@ function wrap(target, name, indexes, write = false) {
 }
 
 for (const name of [
-  'readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'statSync', 'lstat', 'lstatSync',
-  'access', 'accessSync', 'realpath', 'realpathSync', 'existsSync', 'createReadStream',
+  'readFile', 'readFileSync', 'createReadStream',
 ]) wrap(fs, name, [0])
+function wrapDirectoryRead(target, name, asynchronous) {
+  const original = target[name]
+  if (typeof original !== 'function') return
+  target[name] = function (...args) {
+    try {
+      assertPath(args[0], false)
+    } catch {
+      if (asynchronous) {
+        const callback = args.find((value) => typeof value === 'function')
+        if (callback) process.nextTick(() => callback(null, []))
+        return
+      }
+      return []
+    }
+    return original.apply(this, args)
+  }
+}
+wrapDirectoryRead(fs, 'readdir', true)
+wrapDirectoryRead(fs, 'readdirSync', false)
+function wrapProbe(target, name, fallback) {
+  const original = target[name]
+  if (typeof original !== 'function') return
+  target[name] = function (...args) {
+    try {
+      assertPath(args[0], false)
+    } catch {
+      if (isSandboxAncestor(args[0])) return original.apply(this, args)
+      const targetPath = resolvePath(args[0]) || String(args[0])
+      const unavailable = Object.assign(new Error('Path is unavailable: ' + name + ' ' + targetPath), { code: 'ENOENT' })
+      const callback = args.find((value) => typeof value === 'function')
+      if (callback) {
+        process.nextTick(() => callback(unavailable))
+        return
+      }
+      if (fallback !== undefined) return fallback
+      throw unavailable
+    }
+    return original.apply(this, args)
+  }
+}
+wrapProbe(fs, 'existsSync', false)
+for (const name of ['stat', 'statSync', 'lstat', 'lstatSync', 'access', 'accessSync', 'realpath', 'realpathSync']) {
+  wrapProbe(fs, name)
+}
 for (const name of [
   'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'mkdir', 'mkdirSync',
   'rm', 'rmSync', 'rmdir', 'rmdirSync', 'unlink', 'unlinkSync', 'truncate', 'truncateSync',
@@ -107,9 +157,29 @@ if (originalRealpathNative) fs.realpath.native = originalRealpathNative
 if (originalRealpathSyncNative) fs.realpathSync.native = originalRealpathSyncNative
 
 const promises = fs.promises
-for (const name of [
-  'readFile', 'readdir', 'stat', 'lstat', 'access', 'realpath', 'open',
-]) wrap(promises, name, [0])
+for (const name of ['readFile', 'open']) wrap(promises, name, [0])
+const originalPromisesReaddir = promises.readdir
+promises.readdir = function (...args) {
+  try {
+    assertPath(args[0], false)
+  } catch {
+    return Promise.resolve([])
+  }
+  return originalPromisesReaddir.apply(this, args)
+}
+for (const name of ['stat', 'lstat', 'access', 'realpath']) {
+  const original = promises[name]
+  promises[name] = function (...args) {
+    try {
+      assertPath(args[0], false)
+    } catch {
+      if (isSandboxAncestor(args[0])) return original.apply(this, args)
+      const targetPath = resolvePath(args[0]) || String(args[0])
+      return Promise.reject(Object.assign(new Error('Path is unavailable: ' + name + ' ' + targetPath), { code: 'ENOENT' }))
+    }
+    return original.apply(this, args)
+  }
+}
 for (const name of [
   'writeFile', 'appendFile', 'mkdir', 'rm', 'rmdir', 'unlink', 'truncate', 'chmod', 'utimes',
 ]) wrap(promises, name, [0], true)
@@ -238,8 +308,17 @@ async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ gua
 }
 
 function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string): NodeJS.ProcessEnv {
+  const hostHome = process.env.USERPROFILE ?? process.env.HOME
+  const hostCargoHome = process.env.CARGO_HOME ?? (hostHome ? join(hostHome, '.cargo') : undefined)
+  const hostRustupHome = process.env.RUSTUP_HOME ?? (hostHome ? join(hostHome, '.rustup') : undefined)
   const inheritedEnvironment = Object.fromEntries(
-    ['PATH', 'Path', 'SystemRoot', 'ComSpec', 'COMSPEC', 'PATHEXT', 'LOCALAPPDATA', 'APPDATA', 'ProgramData', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS']
+    [
+      'PATH', 'Path', 'SystemRoot', 'ComSpec', 'COMSPEC', 'PATHEXT', 'LOCALAPPDATA', 'APPDATA', 'ProgramData',
+      'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS',
+      'RUSTUP_TOOLCHAIN', 'RUSTUP_DIST_SERVER', 'RUSTUP_UPDATE_ROOT',
+      'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir', 'WindowsSDKVersion',
+      'INCLUDE', 'LIB', 'LIBPATH',
+    ]
       .filter((key) => process.env[key] !== undefined)
       .map((key) => [key, process.env[key] as string]),
   )
@@ -262,9 +341,11 @@ function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoo
     TEMP: temporaryDirectory,
     TMP: temporaryDirectory,
     TMPDIR: temporaryDirectory,
-    HOME: temporaryDirectory,
-    USERPROFILE: temporaryDirectory,
+    ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+    ...(process.env.USERPROFILE ? { USERPROFILE: process.env.USERPROFILE } : {}),
     XDG_CACHE_HOME: temporaryDirectory,
+    ...(hostCargoHome ? { CARGO_HOME: hostCargoHome } : {}),
+    ...(hostRustupHome ? { RUSTUP_HOME: hostRustupHome } : {}),
     CODEY_NODE_SANDBOX_ROOT: root,
     CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory].join(process.platform === 'win32' ? ';' : ':'),
     CODEY_NODE_ALLOWED_WRITE_ROOTS: temporaryDirectory,
@@ -323,14 +404,24 @@ export async function runPackageManagerCommand(
   return resultFromProcess(result)
 }
 
-export async function runPackageScript(
+export type RunningNodePackageScript = {
+  pid: number | null
+  onOutput(listener: (stream: 'stdout' | 'stderr', chunk: string) => void): () => void
+  stop(): Promise<void>
+  done: Promise<NodePackageExecutionResult>
+}
+
+function appendProcessOutput(current: string, chunk: Buffer | string): string {
+  if (current.endsWith('[output truncated]')) return current
+  return truncateOutput(`${current}${chunk.toString()}`)
+}
+
+async function preparePackageScript(
   projectRoot: string,
   packageManager: PackageManager,
   script: string,
-  argv: string[] = [],
-  timeoutSeconds = 120,
-  signal?: AbortSignal,
-): Promise<NodePackageExecutionResult> {
+  argv: string[],
+): Promise<{ root: string; executable: string; args: string[]; environment: NodeJS.ProcessEnv }> {
   assertPackageManager(packageManager)
   if (!/^[A-Za-z0-9._:-]{1,100}$/.test(script)) throw new Error('script must be a package.json script name')
   validateArguments(argv)
@@ -341,11 +432,131 @@ export async function runPackageScript(
   const { temporaryDirectory, guardPath } = await prepareNodeSandbox(root)
   const args: string[] = [...prefixArgs, 'run', script]
   if (argv.length > 0) args.push('--', ...argv)
-  const result = await runSandboxProcess(executable, args, root, normalizeTimeout(timeoutSeconds), sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath), undefined, signal)
+  return {
+    root,
+    executable,
+    args,
+    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath),
+  }
+}
+
+export async function startPackageScript(
+  projectRoot: string,
+  packageManager: PackageManager,
+  script: string,
+  argv: string[] = [],
+  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+): Promise<RunningNodePackageScript> {
+  const prepared = await preparePackageScript(projectRoot, packageManager, script, argv)
+  const child = spawn(prepared.executable, prepared.args, {
+    cwd: prepared.root,
+    env: prepared.environment,
+    shell: false,
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  let stopped = false
+  let settled = false
+  let resolveDone: ((result: NodePackageExecutionResult) => void) | null = null
+  const listeners = new Set<(stream: 'stdout' | 'stderr', chunk: string) => void>()
+  if (onOutput) listeners.add(onOutput)
+  const notify = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+    const text = chunk.toString()
+    if (stream === 'stdout') stdout = appendProcessOutput(stdout, text)
+    else stderr = appendProcessOutput(stderr, text)
+    for (const listener of listeners) listener(stream, text)
+  }
+  const startedAt = Date.now()
+  const done = new Promise<NodePackageExecutionResult>((resolveResult, rejectResult) => {
+    resolveDone = resolveResult
+    child.stdout?.on('data', (chunk: Buffer | string) => notify('stdout', chunk))
+    child.stderr?.on('data', (chunk: Buffer | string) => notify('stderr', chunk))
+    child.once('error', (error) => {
+      if (settled) return
+      settled = true
+      if (stopped) {
+        resolveResult({ success: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), exit_code: -1, duration_ms: Date.now() - startedAt, timed_out: false })
+      } else {
+        rejectResult(error)
+      }
+    })
+    child.once('close', (exitCode) => {
+      if (settled) return
+      settled = true
+      resolveResult({
+        success: !stopped && exitCode === 0,
+        stdout,
+        stderr,
+        exit_code: stopped ? -1 : (exitCode ?? -1),
+        duration_ms: Date.now() - startedAt,
+        timed_out: false,
+      })
+    })
+  })
+  let stopPromise: Promise<void> | null = null
+  return {
+    pid: child.pid ?? null,
+    onOutput(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    stop() {
+      if (stopPromise) return stopPromise
+      if (settled) return Promise.resolve()
+      stopped = true
+      stopPromise = (async () => {
+        const startupDelay = 1_000 - (Date.now() - startedAt)
+        if (process.platform === 'win32' && startupDelay > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, startupDelay))
+        }
+        await terminateSandboxProcess(child)
+        await Promise.race([
+          done.then(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+        ])
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        if (!settled) {
+          settled = true
+          resolveDone?.({
+            success: false,
+            stdout,
+            stderr,
+            exit_code: -1,
+            duration_ms: Date.now() - startedAt,
+            timed_out: false,
+          })
+        }
+      })()
+      return stopPromise
+    },
+    done,
+  }
+}
+export async function runPackageScript(
+  projectRoot: string,
+  packageManager: PackageManager,
+  script: string,
+  argv: string[] = [],
+  timeoutSeconds = 120,
+  signal?: AbortSignal,
+): Promise<NodePackageExecutionResult> {
+  const prepared = await preparePackageScript(projectRoot, packageManager, script, argv)
+  const result = await runSandboxProcess(
+    prepared.executable,
+    prepared.args,
+    prepared.root,
+    normalizeTimeout(timeoutSeconds),
+    prepared.environment,
+    undefined,
+    signal,
+  )
   return resultFromProcess(result)
 }
 
 export function packageResultSummary(result: NodePackageExecutionResult): string {
   return truncateOutput(JSON.stringify(result))
 }
-

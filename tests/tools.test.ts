@@ -46,6 +46,7 @@ describe('agent tools', () => {
       'project_tree',
       'project_search_text',
       'python_execute',
+      'node_validate',
       'git_status',
       'git_commit',
     ]))

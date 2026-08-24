@@ -11,7 +11,9 @@ import type {
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
+import { redactProviderMessages, toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
+import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
 
 type ResponseMessage = {
@@ -75,6 +77,7 @@ function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
     createdAt: message.createdAt ?? new Date().toISOString(),
     role: message.role,
     content: message.content,
+    images: message.images,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
     pinnedToHot: message.pinnedToHot,
@@ -99,6 +102,7 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       createdAt: message.createdAt ?? new Date().toISOString(),
       role: message.role,
       content: message.content,
+      images: message.images,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
       pinnedToHot: message.pinnedToHot,
@@ -113,6 +117,28 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
     }))
 }
 
+function toolResultHasFailure(content: string): boolean {
+  try {
+    const value = JSON.parse(content) as { success?: unknown }
+    return typeof value === 'object' && value !== null && value.success === false
+  } catch {
+    return false
+  }
+}
+
+function updateToolCallResult(
+  timeline: DevelopmentTimelineItem[],
+  toolCallId: string,
+  content: string,
+  isError: boolean,
+): void {
+  const item = timeline.find((candidate) =>
+    candidate.type === 'block' && candidate.block.type === 'function_call' && candidate.block.id === toolCallId,
+  )
+  if (item?.type !== 'block' || item.block.type !== 'function_call') return
+  item.block.result = content
+  item.block.resultError = isError
+}
 function toMessageBlocks(message: ResponseMessage): AssistantMessageBlock[] {
   const blocks: AssistantMessageBlock[] = []
   if (message.content) {
@@ -203,16 +229,20 @@ async function requestCompletionAttempt(
     throw new Error('Configure a model before sending a message')
   }
 
+  const providerMessages = toProviderMessages(messages)
   const requestBody = {
     model: config.modelName,
-    messages,
+    messages: providerMessages,
     tools,
     tool_choice: 'auto',
     stream: true,
   }
   log.debug('model.request', {
     url: config.baseUrl + '/chat/completions',
-    body: requestBody,
+    body: {
+      ...requestBody,
+      messages: redactProviderMessages(providerMessages, messages),
+    },
   })
 
   let content = ''
@@ -361,6 +391,7 @@ async function requestCompletion(
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
+  const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
     throwIfAborted(signal)
@@ -406,9 +437,10 @@ async function requestCompletion(
         ...details,
         message: failure.message,
         hasPartialResponse: hasResponseData(failure.partial),
+        hasImageInput,
       })
 
-      if (attempt < maxNetworkAttempts && (timedOut || isRetryableRequestError(error))) {
+      if (attempt < maxNetworkAttempts && !hasImageInput && (timedOut || isRetryableRequestError(error))) {
         log.warn('model.request.retrying', {
           attempt: attempt + 1,
           maxAttempts: maxNetworkAttempts,
@@ -448,6 +480,7 @@ export async function develop(
 
   const writtenFiles: string[] = []
   const tools = createAgentTools(project)
+  const projectDetections = await detectProjectFolders(project.folders)
   const systemMessage: ContextMessage = {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
@@ -459,7 +492,11 @@ export async function develop(
       `The project Python environment is stored under folder ID ${project.pythonEnvironmentFolderId}.`,
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
       'Use file and project tools for general development work. Use Python tools only for Python-related tasks or explicit Python environment operations.',
+      'Do not assume a folder is a Python project just because Python tools are available. Use the detected runtimes and package files to choose tools. A folder may contain multiple unrelated runtimes, and a project may contain both frontend Node code and a Rust or Python component.',
+      'For frontend work, first use the detected package root, package manager, framework, and declared scripts. Use frontend lifecycle tools only for scripts that are actually declared in package.json; do not infer that a running process means the application is ready.',
       'For JavaScript or TypeScript projects, use node_package_command for npm/pnpm dependency operations and node_package_script only for scripts explicitly defined in package.json; do not run arbitrary package-manager shell commands.',
+      'When the user asks to verify JavaScript or TypeScript work, use node_validate to run the relevant package.json scripts and report its structured results; do not infer success from process creation or partial output.',
+      'For frontend development servers, use frontend_start_dev_server only with an explicitly defined package.json script. Use frontend_get_dev_server_status or frontend_get_dev_server_logs to inspect it, and frontend_stop_dev_server when it is no longer needed. Do not start arbitrary long-lived shell commands.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add requires explicit file paths, and git_commit requires staged changes.',
       'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
@@ -587,26 +624,32 @@ export async function develop(
       for (let index = 0; index < toolCalls.length; index += 1) {
         const toolCall = toolCalls[index]
         let content: string
+        let isError = false
         try {
           throwIfAborted(runtime?.signal)
           content = await runAgentTool(project, toolCall, writtenFiles, runtime)
           completedToolCalls += 1
+          isError = toolResultHasFailure(content)
         } catch (error) {
           if (runtime?.signal?.aborted) {
             for (const pending of toolCalls.slice(index)) {
+              const stoppedContent = 'Stopped by user before completion'
               history.push({
                 role: 'tool',
                 tool_call_id: pending.id,
-                content: 'Stopped by user before completion',
+                content: stoppedContent,
                 id: randomUUID(),
                 createdAt: new Date().toISOString(),
                 representation: 'original',
                 contextSource: 'live',
               })
+              updateToolCallResult(timeline, pending.id, stoppedContent, true)
             }
+            onProgress?.([...timeline])
             throw error
           }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
+          isError = true
         }
         history.push({
           role: 'tool',
@@ -617,23 +660,27 @@ export async function develop(
           representation: 'original',
           contextSource: 'live',
         })
+        updateToolCallResult(timeline, toolCall.id, content, isError)
+        onProgress?.([...timeline])
         if (runtime?.signal?.aborted) {
           for (const pending of toolCalls.slice(index + 1)) {
+            const stoppedContent = 'Stopped by user before completion'
             history.push({
               role: 'tool',
               tool_call_id: pending.id,
-              content: 'Stopped by user before completion',
+              content: stoppedContent,
               id: randomUUID(),
               createdAt: new Date().toISOString(),
               representation: 'original',
               contextSource: 'live',
             })
+            updateToolCallResult(timeline, pending.id, stoppedContent, true)
           }
+          onProgress?.([...timeline])
           throw abortError()
         }
       }
-    }
-    throw new Error('The conversation round exceeded the configured model-request limit')
+    }    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
     const stopped = runtime?.signal?.aborted === true
     return {

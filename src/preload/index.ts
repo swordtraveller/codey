@@ -5,6 +5,9 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
+  ImageAttachment,
+  ScreenshotSelection,
+  ScreenshotSource,
 } from '../shared/types'
 
 contextBridge.exposeInMainWorld(
@@ -59,10 +62,23 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
-    develop: (projectId: string, conversationId: string, content: string) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images),
+    screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
+    onScreenshotSource: (listener: (source: ScreenshotSource) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, source: ScreenshotSource) => listener(source)
+      ipcRenderer.on('screenshot:source', handler)
+      ipcRenderer.send('clipboard:screenshot-ready')
+      return () => ipcRenderer.removeListener('screenshot:source', handler)
+    },
+    completeScreenshotSelection: (captureId: string, selection: ScreenshotSelection) =>
+      ipcRenderer.send('clipboard:screenshot-complete', captureId, selection),
+    cancelScreenshotSelection: (captureId: string) =>
+      ipcRenderer.send('clipboard:screenshot-cancel', captureId),
     stopDevelopment: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('development:stop', projectId, conversationId),
+    openFrontendPreview: (projectId: string, conversationId: string, serverId: string) =>
+      ipcRenderer.invoke('frontend:open-preview', projectId, conversationId, serverId),
     onDevelopmentProgress: (listener: (progress: DevelopmentProgress) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, progress: DevelopmentProgress) =>
         listener(progress)

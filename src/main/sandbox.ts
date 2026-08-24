@@ -303,26 +303,43 @@ export async function safeResolveWritablePath(
   return target
 }
 
-function killChild(child: ChildProcess): void {
-  if (child.killed) return
+export function terminateSandboxProcess(child: ChildProcess): Promise<void> {
+  if (child.killed) return Promise.resolve()
   if (process.platform === 'win32' && child.pid) {
-    spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
-      windowsHide: true,
-      stdio: 'ignore',
+    return new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      })
+      let finished = false
+      const finish = (): void => {
+        if (finished) return
+        finished = true
+        if (!child.killed) {
+          try {
+            child.kill()
+          } catch {
+            // The process may already have exited after taskkill completed.
+          }
+        }
+        resolve()
+      }
+      killer.once('error', finish)
+      killer.once('close', finish)
+      setTimeout(finish, 2_000)
     })
-    return
   }
   if (child.pid && process.platform !== 'win32') {
     try {
       process.kill(-child.pid, 'SIGKILL')
-      return
+      return Promise.resolve()
     } catch {
       // Fall back to terminating the direct child.
     }
   }
   child.kill()
+  return Promise.resolve()
 }
-
 function abortError(): Error {
   const error = new Error('Operation stopped')
   error.name = 'AbortError'
@@ -364,7 +381,7 @@ export function runSandboxProcess(
     const onAbort = (): void => {
       if (!settled) {
         aborted = true
-        killChild(child)
+        terminateSandboxProcess(child)
       }
     }
     const cleanup = (): void => {
@@ -374,7 +391,7 @@ export function runSandboxProcess(
     const timer = setTimeout(() => {
       if (!settled) {
         timedOut = true
-        killChild(child)
+        terminateSandboxProcess(child)
       }
     }, timeoutMs)
     signal?.addEventListener('abort', onAbort, { once: true })

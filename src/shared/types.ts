@@ -1,3 +1,6 @@
+import type { ImageAttachment } from './image-attachments'
+export type { ImageAttachment, ImageMediaType } from './image-attachments'
+
 export type AppLanguage = 'system' | 'en' | 'zh-CN'
 
 export type ModelConfig = {
@@ -50,8 +53,8 @@ export type AgentLimitsConfig = {
 }
 
 export const defaultAgentLimitsConfig: AgentLimitsConfig = {
-  modelRequestsPerRound: 12,
-  toolCallsPerRequest: 20,
+  modelRequestsPerRound: 64,
+  toolCallsPerRequest: 32,
 }
 
 export type AppConfig = {
@@ -91,7 +94,7 @@ export type ContextMetrics = {
 
 export type AssistantMessageBlock =
   | { type: 'content'; content: string }
-  | { type: 'function_call'; id: string; name: string; parameters: string }
+  | { type: 'function_call'; id: string; name: string; parameters: string; result?: string; resultError?: boolean }
 
 export type ContextCompressionNotice = {
   originalTokens: number
@@ -117,6 +120,7 @@ export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  images?: ImageAttachment[]
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
@@ -144,6 +148,7 @@ export type AgentContextMessage = {
   createdAt?: string
   role: ChatMessage['role'] | 'tool'
   content: string | null
+  images?: ImageAttachment[]
   toolCalls?: unknown[]
   toolCallId?: string
   pinnedToHot?: boolean
@@ -344,4 +349,20 @@ export type ConversationStateChange = {
   projectId: string
   conversationId: string
   state: ConversationRuntimeState
+}
+
+export type ScreenshotSource = {
+  captureId: string
+  dataUrl: string
+  width: number
+  height: number
+  scaleX: number
+  scaleY: number
+}
+
+export type ScreenshotSelection = {
+  x: number
+  y: number
+  width: number
+  height: number
 }

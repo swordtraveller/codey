@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -22,12 +22,16 @@ import { setAppLanguage } from './i18n'
 import type {
   AgentLimitsConfig,
   AppLanguage,
+  AssistantMessageBlock,
   ContextCompressionNotice,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationTurnRecord,
   DevelopmentTimelineItem,
+  ImageAttachment,
+  ImageMediaType,
 } from '../../shared/types'
+import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -38,7 +42,21 @@ import {
   type Project,
 } from '../../shared/types'
 
-function formatToolParameters(parameters: string): string {
+function readImage(file: File): Promise<ImageAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => resolve({
+      id: crypto.randomUUID(),
+      name: file.name || `clipboard-${crypto.randomUUID()}.${file.type.split('/')[1] ?? 'png'}`,
+      mediaType: file.type as ImageMediaType,
+      dataUrl: String(reader.result),
+    })
+    reader.readAsDataURL(file)
+  })
+}
+
+function formatToolOutput(parameters: string): string {
   try {
     return JSON.stringify(JSON.parse(parameters), null, 2)
   } catch {
@@ -170,6 +188,136 @@ function AssistantContent({ content }: { content: string }): React.JSX.Element {
     </div>
   )
 }
+type FrontendServerToolResult = {
+  serverId?: string
+  status?: string
+}
+
+function parseFrontendServerResult(block: Extract<AssistantMessageBlock, { type: 'function_call' }>): FrontendServerToolResult | null {
+  if (!block.result || block.resultError || !block.name.startsWith('frontend_')) return null
+  try {
+    return JSON.parse(block.result) as FrontendServerToolResult
+  } catch {
+    return null
+  }
+}
+
+type NodeValidationStatus = 'passed' | 'failed' | 'timed_out' | 'cancelled'
+
+type NodeValidationResult = {
+  status: NodeValidationStatus
+  summary: {
+    total: number
+    passed: number
+    duration_ms: number
+  }
+  checks: Array<{
+    script: string
+    status: NodeValidationStatus
+    exit_code: number
+    duration_ms: number
+    stdout: string
+    stderr: string
+  }>
+}
+
+function parseNodeValidationResult(block: Extract<AssistantMessageBlock, { type: 'function_call' }>): NodeValidationResult | null {
+  if (block.name !== 'node_validate' || !block.result || block.resultError) return null
+  try {
+    const result = JSON.parse(block.result) as NodeValidationResult
+    return result && Array.isArray(result.checks) && result.summary ? result : null
+  } catch {
+    return null
+  }
+}
+
+function formatValidationDuration(durationMs: number): string {
+  return durationMs < 1_000 ? `${durationMs} ms` : `${(durationMs / 1_000).toFixed(1)} s`
+}
+
+function ValidationResultView({ result }: { result: NodeValidationResult }): React.JSX.Element {
+  const { t } = useTranslation()
+  const statusLabel = (status: NodeValidationStatus): string => t(`validationStatus_${status}`)
+
+  return (
+    <div className="validation-result">
+      <div className="validation-summary">
+        <span className={`validation-status validation-${result.status}`}>{statusLabel(result.status)}</span>
+        <span>{t('validationSummary', {
+          passed: result.summary.passed,
+          total: result.summary.total,
+          duration: formatValidationDuration(result.summary.duration_ms),
+        })}</span>
+      </div>
+      {result.checks.map((check, index) => (
+        <div className="validation-check" key={`${check.script}-${index}`}>
+          <div className="validation-check-heading">
+            <strong>{check.script}</strong>
+            <span>{statusLabel(check.status)} · {formatValidationDuration(check.duration_ms)} · {t('exitCode')} {check.exit_code}</span>
+          </div>
+          {(check.stdout || check.stderr) && (
+            <details className="validation-logs">
+              <summary>{t('validationLogs')}</summary>
+              {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
+              {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
+            </details>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+function FunctionCallMessage({
+  block,
+  projectId,
+  conversationId,
+}: {
+  block: Extract<AssistantMessageBlock, { type: 'function_call' }>
+  projectId?: string
+  conversationId?: string
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [previewError, setPreviewError] = useState('')
+  const server = parseFrontendServerResult(block)
+  const validation = parseNodeValidationResult(block)
+  const canPreview = (server?.status === 'starting' || server?.status === 'running') && Boolean(server.serverId && projectId && conversationId)
+  const openPreview = async (): Promise<void> => {
+    if (!projectId || !conversationId || !server?.serverId) return
+    setPreviewError('')
+    try {
+      const result = await window.codey.openFrontendPreview(projectId, conversationId, server.serverId)
+      if (result.status !== 'opened') setPreviewError(t(`preview.${result.status}`))
+    } catch {
+      setPreviewError(t('unableOpenPreview'))
+    }
+  }
+
+  return (
+    <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
+      <summary>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</summary>
+      <div className="tool-output-section">
+        <span>{t('toolParameters')}</span>
+        <pre>{formatToolOutput(block.parameters)}</pre>
+      </div>
+      {block.result !== undefined && (
+        <div className="tool-output-section">
+          <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
+          {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
+        </div>
+      )}
+      {canPreview && (
+        <Button
+          appearance="secondary"
+          size="small"
+          onClick={() => void openPreview()}
+        >
+          {t('openPreview')}
+        </Button>
+      )}
+      {previewError && <p className="tool-preview-error">{previewError}</p>}
+    </details>
+  )
+}
 function ContextSettingsFields({
   value,
   disabled = false,
@@ -270,6 +418,8 @@ export function App(): React.JSX.Element {
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -300,6 +450,8 @@ export function App(): React.JSX.Element {
   }>>({})
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
@@ -355,6 +507,25 @@ export function App(): React.JSX.Element {
       .catch(() => setError(t('unableLoadProjects')))
   }, [])
 
+  useEffect(() => {
+    setDraftImages([])
+  }, [activeProjectId, activeConversationId])
+
+  useEffect(() => {
+    if (!attachmentMenuOpen) return
+    function closeAttachmentMenu(event: MouseEvent): void {
+      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
+    }
+    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setAttachmentMenuOpen(false)
+    }
+    document.addEventListener('mousedown', closeAttachmentMenu)
+    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeAttachmentMenu)
+      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
+    }
+  }, [attachmentMenuOpen])
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
     const key = `${progress.projectId}:${progress.conversationId}`
     setLiveResponses((current) => ({ ...current, [key]: progress }))
@@ -648,11 +819,72 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function appendImageAttachments(attachments: ImageAttachment[]): boolean {
+    if (draftImages.length + attachments.length > maximumImageAttachments) {
+      setError(t('tooManyImages', { count: maximumImageAttachments }))
+      return false
+    }
+    setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
+    setError('')
+    return true
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    const conversationKey = activeConversationKeyRef.current
+    if (files.length === 0) return
+    if (draftImages.length + files.length > maximumImageAttachments) {
+      setError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
+      setError(t('unsupportedImage'))
+      return
+    }
+    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
+      setError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map(readImage))
+      if (conversationKey !== activeConversationKeyRef.current) return
+      appendImageAttachments(attachments)
+    } catch {
+      setError(t('imageReadFailed'))
+    }
+  }
+
+  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addImageFiles(files)
+  }
+
+  async function captureScreen(hideWindow: boolean): Promise<void> {
+    if (!canSend || interactionLocked) return
+    try {
+      const attachment = await window.codey.screenshot(hideWindow)
+      if (attachment) appendImageAttachments([attachment])
+    } catch {
+      setError(t('screenshotFailed'))
+    }
+  }
+
+  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const image = [...event.clipboardData.items]
+      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
+      ?.getAsFile()
+    if (!image) return
+
+    event.preventDefault()
+    await addImageFiles([image])
+  }
   async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
 
     const content = draft.trim()
-    if (!content || !canSend || !activeProject || !activeConversation || interactionLocked) {
+    const images = draftImages
+    if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -660,6 +892,7 @@ export function App(): React.JSX.Element {
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
     setDraft('')
+    setDraftImages([])
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
@@ -670,7 +903,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: userMessageId, role: 'user', content },
+                { id: userMessageId, role: 'user', content, images },
               ],
             }
           : conversation,
@@ -699,14 +932,15 @@ export function App(): React.JSX.Element {
     }))
 
     try {
-      const result = await window.codey.develop(projectId, conversationId, content)
+      const result = await window.codey.develop(projectId, conversationId, content, images)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
         )
         const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
           .reverse()
-          .find((message) => message.role === 'user' && message.content === content)
+          .find((message) => message.role === 'user' && message.content === content &&
+            (images.length === 0 || message.images?.[0]?.id === images[0].id))
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -1036,16 +1270,27 @@ export function App(): React.JSX.Element {
                             block.type === 'content' ? (
                               <AssistantContent content={block.content} key={`${message.id}-${index}`} />
                             ) : (
-                              <details className="function-call" key={block.id}>
-                                <summary>{block.name}</summary>
-                                <pre>{formatToolParameters(block.parameters)}</pre>
-                              </details>
+                              <FunctionCallMessage
+                                block={block}
+                                projectId={activeProject?.id}
+                                conversationId={activeConversation.id}
+                                key={block.id}
+                              />
                             ),
                           )
                         ) : message.role === 'assistant' ? (
                           <AssistantContent content={message.content} />
                         ) : (
-                          <p>{message.content}</p>
+                          <div className="user-message-content">
+                            {message.images?.length ? (
+                              <div className="message-images">
+                                {message.images.map((image) => (
+                                  <img alt={image.name} key={image.id} src={image.dataUrl} />
+                                ))}
+                              </div>
+                            ) : null}
+                            {message.content && <p>{message.content}</p>}
+                          </div>
                         )}
                       </div>
                       {messageTurn && <ConversationStopwatch turn={messageTurn} />}
@@ -1063,10 +1308,12 @@ export function App(): React.JSX.Element {
                       ) : item.block.type === 'content' ? (
                         <AssistantContent content={item.block.content} key={`live-block-${index}`} />
                       ) : (
-                        <details className="function-call" key={item.block.id || `live-block-${index}`}>
-                          <summary>{item.block.name}</summary>
-                          <pre>{formatToolParameters(item.block.parameters)}</pre>
-                        </details>
+                        <FunctionCallMessage
+                          block={item.block}
+                          projectId={activeProject?.id}
+                          conversationId={activeConversation.id}
+                          key={item.block.id || `live-block-${index}`}
+                        />
                       ),
                     )}
                   </div>
@@ -1090,6 +1337,88 @@ export function App(): React.JSX.Element {
           </div>
 
           <form className="composer" onSubmit={sendMessage}>
+            <input
+              accept={supportedImageMediaTypes.join(',')}
+              hidden
+              multiple
+              onChange={(event) => void selectImages(event)}
+              ref={imageInputRef}
+              type="file"
+            />
+            {draftImages.length > 0 && (
+              <div className="draft-images">
+                {draftImages.map((image) => (
+                  <div className="draft-image" key={image.id}>
+                    <img alt={image.name} src={image.dataUrl} />
+                    <Button
+                      aria-label={t('removeImage')}
+                      appearance="subtle"
+                      onClick={() => setDraftImages((current) => current.filter((item) => item.id !== image.id))}
+                      shape="circular"
+                      size="small"
+                      title={t('removeImage')}
+                      type="button"
+                    >
+                      ×
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="attachment-menu" ref={attachmentMenuRef}>
+              <Button
+                appearance="secondary"
+                aria-expanded={attachmentMenuOpen}
+                aria-haspopup="menu"
+                disabled={!canSend || interactionLocked}
+                onClick={() => setAttachmentMenuOpen((open) => !open)}
+                size="large"
+                title={t('addAttachment')}
+                type="button"
+              >
+                +
+              </Button>
+              {attachmentMenuOpen && (
+                <div className="attachment-menu-popover" role="menu">
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      void captureScreen(false)
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('captureScreenshot')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      void captureScreen(true)
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('captureScreenshotHideWindow')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      imageInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadImage')}
+                  </Button>
+                </div>
+              )}
+            </div>
             <Textarea
               aria-label={t('developmentRequest')}
               className="message-input"
@@ -1097,6 +1426,7 @@ export function App(): React.JSX.Element {
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
+              onPaste={(event) => void handlePaste(event)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault()
@@ -1124,7 +1454,7 @@ export function App(): React.JSX.Element {
             ) : (
               <Button
                 appearance="primary"
-                disabled={!canSend || !draft.trim() || interactionLocked}
+                disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
                 size="large"
                 type="submit"
               >

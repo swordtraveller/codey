@@ -1,4 +1,6 @@
 import { getEncoding } from 'js-tiktoken'
+import { estimatedImageTokens } from '../shared/image-attachments'
+import type { ImageAttachment } from '../shared/image-attachments'
 import type { ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
 import type { ToolCall } from './tools'
 
@@ -7,6 +9,7 @@ export type ContextMessage = {
   createdAt?: string
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null
+  images?: ImageAttachment[]
   tool_calls?: ToolCall[]
   tool_call_id?: string
   pinnedToHot?: boolean
@@ -40,7 +43,20 @@ const encoder = getEncoding('o200k_base')
 const protectedBlockPattern = /```[\s\S]*?```|Traceback \(most recent call\):[\s\S]*?(?=\n\n|$)|(?:^|\n)(?:Error|Exception|Caused by):[^\n]*(?:\n\s+at [^\n]*)*|(?:^|\n)(?:(?:\d{4}-\d{2}-\d{2}[T ][^\n]*)|(?:(?:\[[^\]\n]+\]\s*)?(?:DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b[^\n]*))/g
 
 export function countContextTokens(value: unknown): number {
-  return encoder.encode(JSON.stringify(value)).length
+  let imageCount = 0
+  const serialized = JSON.stringify(value, (_key, item: unknown) => {
+    if (
+      item && typeof item === 'object' &&
+      'dataUrl' in item && 'mediaType' in item &&
+      typeof item.dataUrl === 'string' && typeof item.mediaType === 'string' &&
+      item.dataUrl.startsWith(`data:${item.mediaType};base64,`)
+    ) {
+      imageCount += 1
+      return { ...item, dataUrl: '[image data omitted]' }
+    }
+    return item
+  })
+  return encoder.encode(serialized).length + imageCount * estimatedImageTokens
 }
 
 function isPinned(message: ContextMessage): boolean {

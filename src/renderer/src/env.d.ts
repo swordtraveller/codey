@@ -8,7 +8,10 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentResult,
+  ImageAttachment,
   Project,
+  ScreenshotSelection,
+  ScreenshotSource,
   TokenLimitSimulation,
 } from '../../shared/types'
 
@@ -50,8 +53,18 @@ declare global {
         projectId: string,
         conversationId: string,
         content: string,
+        images?: ImageAttachment[],
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
+      screenshot(hideWindow: boolean): Promise<ImageAttachment | null>
+      onScreenshotSource(listener: (source: ScreenshotSource) => void): () => void
+      completeScreenshotSelection(captureId: string, selection: ScreenshotSelection): void
+      cancelScreenshotSelection(captureId: string): void
+      openFrontendPreview(
+        projectId: string,
+        conversationId: string,
+        serverId: string,
+      ): Promise<{ status: 'opened' | 'starting' | 'stopped' | 'failed' }>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
       onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
       openContextDebug(projectId: string, conversationId: string): Promise<void>
