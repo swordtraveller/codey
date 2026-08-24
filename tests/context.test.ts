@@ -185,6 +185,35 @@ describe('manageContext', () => {
     expect(result.messages.some((message) => message.id === 'recalled-large')).toBe(false)
     expect(result.metrics.compressedTokens).toBeLessThan(result.metrics.triggerThreshold)
   })
+  it('keeps the current user message in Hot even when older rounds are demoted', () => {
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'old-user', role: 'user', content: 'Old request '.repeat(400) },
+      { id: 'old-assistant', role: 'assistant', content: 'Old reply '.repeat(400) },
+      { id: 'current-user', role: 'user', content: 'Current request' },
+    ]
+
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({
+        layeredEnabled: true,
+        recentKeepRounds: 1,
+        hotTokenBudget: hotBudget([messages[0], messages.at(-1)!]),
+        warmTokenBudget: 10_000,
+      }),
+    )
+
+    expect(result.messages.find((message) => message.id === 'current-user')).toEqual(expect.objectContaining({
+      role: 'user',
+      contextLayer: 'hot',
+      contextRegion: 'newborn',
+      contextSource: 'live',
+    }))
+    expect(result.warmMessages.some((message) => message.id === 'current-user')).toBe(false)
+  })
+
   it('keeps recalled summaries in Hot while preserving their lossy label and truth references', () => {
     const summary = `${SUMMARY_LABEL}\nThis content is compressed and may omit details. It is not an authoritative source.\nTruth references: truth-1\n\nPrior decision summary.`
     const messages: ContextMessage[] = [

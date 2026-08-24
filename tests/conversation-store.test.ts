@@ -64,6 +64,32 @@ describe('conversation context store', () => {
     expect(storage.index.path).toMatch(/index\.json$/)
   })
 
+  it('places an appended current user message in the live Hot working set', async () => {
+    await writeConversationMessages('project', 'conversation', [
+      { id: 'previous-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Previous request' },
+      { id: 'previous-assistant', createdAt: '2026-01-01T00:00:01.000Z', role: 'assistant', content: 'Previous reply' },
+    ])
+    await appendConversationMessages('project', 'conversation', [
+      { id: 'current-user', createdAt: '2026-01-01T00:00:02.000Z', role: 'user', content: 'Current request' },
+    ])
+
+    const workingSet = await readConversationWorkingSet(
+      'project',
+      'conversation',
+      { ...defaultContextManagementConfig, recentKeepRounds: 1 },
+      'Current request',
+    )
+
+    expect(workingSet.find((message) => message.id === 'current-user')).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Current request',
+      contextLayer: 'hot',
+      contextRegion: 'newborn',
+      contextSource: 'live',
+      truthRefs: ['current-user'],
+    }))
+  })
+
   it('stores labeled summaries separately without modifying the truth log', async () => {
     const message: AgentContextMessage = {
       id: 'truth-1',

@@ -35,6 +35,7 @@ import {
   simulateTokenLimit,
 } from './context-debug'
 import {
+  appendConversationMessages,
   ensureConversationMessages,
   readConversationMessages,
   readConversationWorkingSet,
@@ -222,6 +223,14 @@ async function developProject(
   }
 
   await prepareContextDebugStorage(projectId, conversationId)
+  const userMessageId = randomUUID()
+  const currentUserMessage = {
+    id: userMessageId,
+    createdAt: new Date().toISOString(),
+    role: 'user' as const,
+    content: normalizedContent,
+    images,
+  }
   project = await addMessage(
     projectId,
     conversationId,
@@ -233,15 +242,12 @@ async function developProject(
     contextConfig,
     { startedAt, result: 'processing' },
     images,
+    userMessageId,
   )
-  const updatedConversation = project.conversations.find((item) => item.id === conversationId)
-  if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
-
-  const userMessageId = updatedConversation.messages.at(-1)?.id
-  if (!userMessageId) return { project, writtenFiles: [], error: 'Conversation message not found' }
+  await appendConversationMessages(projectId, conversationId, [currentUserMessage])
 
   const roundId = randomUUID()
-  const persistedHistory = contextConfig.layeredEnabled
+  const requestHistory = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
         conversationId,
@@ -250,16 +256,9 @@ async function developProject(
         getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
-  const currentUserMessage = {
-    id: randomUUID(),
-    createdAt: new Date().toISOString(),
-    role: 'user' as const,
-    content: normalizedContent,
-    images,
+  if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
+    return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
   }
-  const requestHistory = persistedHistory.length > 0
-    ? persistedHistory
-    : [...updatedConversation.agentMessages, currentUserMessage]
   const result = await develop(
     project,
     modelConfig,
@@ -271,7 +270,7 @@ async function developProject(
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
-    { conversationId, signal },
+    { conversationId, signal, latestUserMessageId: userMessageId },
   )
   project = await saveConversationContext(
     projectId,
