@@ -283,11 +283,23 @@ export async function addMessage(
   turn?: ConversationTurnRecord,
   images?: ImageAttachment[],
   messageId?: string,
+  createdAt?: string,
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
 
-  conversation.messages.push({ id: messageId ?? randomUUID(), role, content, images, blocks, compression, modelConfig, contextConfig, turn })
+  conversation.messages.push({
+    id: messageId ?? randomUUID(),
+    createdAt: createdAt ?? new Date().toISOString(),
+    role,
+    content,
+    images,
+    blocks,
+    compression,
+    modelConfig,
+    contextConfig,
+    turn,
+  })
   if (role === 'user' && conversation.messages.length === 1) {
     const title = content || images?.[0]?.name || 'Image request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title

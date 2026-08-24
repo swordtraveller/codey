@@ -1,7 +1,7 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { gitAdd, gitCommit, gitDiff, gitGetCurrentBranch, gitLog, gitStatus } from '../src/main/git'
+import { gitAdd, gitCommit, gitDiff, gitGetCurrentBranch, gitLog, gitStatus, gitUnstage } from '../src/main/git'
 import { createTemporaryDirectory, initializeGitRepository, removeTemporaryDirectory, runGit } from './helpers'
 
 describe('git tools', () => {
@@ -58,6 +58,24 @@ describe('git tools', () => {
     )
   })
 
+  it('unstages selected files without changing their working tree contents', async () => {
+    await writeFile(join(repository, 'selected.txt'), 'changed\n', 'utf8')
+    await gitAdd(repository, ['selected.txt'])
+
+    const result = await gitUnstage(repository, ['selected.txt'])
+
+    expect(result.unstaged_paths).toEqual(['selected.txt'])
+    expect(await readFile(join(repository, 'selected.txt'), 'utf8')).toBe('changed\n')
+    expect(runGit(repository, 'diff', '--cached', '--name-only')).toBe('')
+    expect(runGit(repository, 'status', '--short')).toContain('?? selected.txt')
+  })
+
+  it.each(['.', './', '.\\', '../outside.txt', '-A'])(
+    'rejects unsafe git_unstage path %s',
+    async (path) => {
+      await expect(gitUnstage(repository, [path])).rejects.toThrow()
+    },
+  )
   it('commits staged changes and returns them from git_log', async () => {
     await writeFile(join(repository, 'feature.txt'), 'feature\n', 'utf8')
     await gitAdd(repository, ['feature.txt'])
