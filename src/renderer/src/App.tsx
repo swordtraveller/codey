@@ -86,6 +86,20 @@ function copyText(content: string): void {
   void navigator.clipboard?.writeText(content)
 }
 
+function formatMessageTime(createdAt: string | undefined): string {
+  if (!createdAt) return ''
+  const date = new Date(createdAt)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
 function isValidContextConfig(value: ContextManagementConfig): boolean {
   return Number.isInteger(value.safeOutputMargin) && value.safeOutputMargin >= 1 &&
     Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
@@ -159,13 +173,15 @@ function CompressionMessage({ compression }: { compression: ContextCompressionNo
   )
 }
 
-function AssistantContent({ content }: { content: string }): React.JSX.Element {
+function AssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
   const { t } = useTranslation()
   const fallback = <p>{content}</p>
+  const timestamp = formatMessageTime(createdAt)
 
   return (
     <div className="message-card">
-      <div className="message-card-actions">
+      <div className="message-card-header">
+        {timestamp && <time>{timestamp}</time>}
         <Button
           aria-label={t('copyMessage')}
           appearance="subtle"
@@ -903,7 +919,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: userMessageId, role: 'user', content, images },
+                { id: userMessageId, role: 'user', content, images, createdAt: new Date().toISOString() },
               ],
             }
           : conversation,
@@ -1151,60 +1167,77 @@ export function App(): React.JSX.Element {
               <strong>{activeProject?.name ?? 'Codey'}</strong>
               {activeConversation && <span>{activeConversation.title}</span>}
             </div>
-            <div className="model-status">
+            <div className="topbar-controls">
               {activeConversation && config.modelConfigs.length > 0 ? (
-                <label className="conversation-model-picker">
-                  <span>
-                    {configured ? effectiveModelConfig?.modelName : t('notConfigured')}
+                <div className="topbar-row topbar-model-row">
+                  <label className="topbar-field-label">
+                    <span>{t('configuration')}:</span>
+                    <span className="conversation-model-picker">
+                      <span>
+                        {effectiveModelConfig?.name || effectiveModelConfig?.modelName || t('notConfigured')}
+                      </span>
+                      <select
+                        aria-label={t('conversationModel')}
+                        disabled={interactionLocked}
+                        value={activeConversation.modelConfigId ?? ''}
+                        onChange={(event) => void changeConversationModelConfig(event.target.value)}
+                      >
+                        <option value="">{t('followProjectDefault')}</option>
+                        {config.modelConfigs.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name || model.modelName || t('unnamedModel')}
+                          </option>
+                        ))}
+                      </select>
+                    </span>
+                  </label>
+                  <span className="topbar-model-name">
+                    <span>{t('modelLabel')}:</span>
+                    <strong>{configured ? effectiveModelConfig?.modelName : t('notConfigured')}</strong>
                   </span>
-                  <select
-                    aria-label={t('conversationModel')}
-                    disabled={interactionLocked}
-                    value={activeConversation.modelConfigId ?? ''}
-                    onChange={(event) => void changeConversationModelConfig(event.target.value)}
-                  >
-                    <option value="">{t('followProjectDefault')}</option>
-                    {config.modelConfigs.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name || model.modelName || t('unnamedModel')}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                </div>
               ) : (
-                <span className="status">{t('notConfigured')}</span>
+                <div className="topbar-row topbar-model-row">
+                  <span className="status">{t('notConfigured')}</span>
+                </div>
               )}
               {activeConversation && (
-                <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('conversation')}>
-                  {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
-                </Button>
+                <div className="topbar-row">
+                  <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
+                    {t('agentLimits')}
+                  </Button>
+                </div>
               )}
               {activeConversation && (
-                <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
-                  {t('agentLimits')}
-                </Button>
+                <div className="topbar-row">
+                  <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('conversation')}>
+                    {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
+                  </Button>
+                  {config.developerMode && activeProject && (
+                    <Button
+                      appearance="subtle"
+                      size="small"
+                      title={t('contextDebuggerShortcut')}
+                      onClick={() => void window.codey
+                        .openContextDebug(activeProject.id, activeConversation.id)
+                        .catch((reason) => setError(
+                          reason instanceof Error ? reason.message : t('unableOpenContextDebugger'),
+                        ))}
+                    >
+                      {t('openContextDebugger')}
+                    </Button>
+                  )}
+                </div>
               )}
               {context && contextStatus && (
-                <span
-                  className="context-status"
-                  title={t('peakInputTitle', { original: context.originalTokens, compressed: context.compressedTokens })}
-                >
-                  {contextStatus}
-                </span>
-              )}
-              {config.developerMode && activeProject && activeConversation && (
-                <Button
-                  appearance="subtle"
-                  size="small"
-                  title={t('contextDebuggerShortcut')}
-                  onClick={() => void window.codey
-                    .openContextDebug(activeProject.id, activeConversation.id)
-                    .catch((reason) => setError(
-                      reason instanceof Error ? reason.message : t('unableOpenContextDebugger'),
-                    ))}
-                >
-                  {t('openContextDebugger')}
-                </Button>
+                <div className="topbar-row">
+                  <span
+                    className="context-status"
+                    title={t('peakInputTitle', { original: context.originalTokens, compressed: context.compressedTokens })}
+                  >
+                    {contextStatus}
+                  </span>
+                </div>
               )}
             </div>
           </header>
@@ -1268,7 +1301,7 @@ export function App(): React.JSX.Element {
                         ) : message.role === 'assistant' && message.blocks?.length ? (
                           message.blocks.map((block, index) =>
                             block.type === 'content' ? (
-                              <AssistantContent content={block.content} key={`${message.id}-${index}`} />
+                              <AssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
                             ) : (
                               <FunctionCallMessage
                                 block={block}
@@ -1279,9 +1312,21 @@ export function App(): React.JSX.Element {
                             ),
                           )
                         ) : message.role === 'assistant' ? (
-                          <AssistantContent content={message.content} />
+                          <AssistantContent content={message.content} createdAt={message.createdAt} />
                         ) : (
                           <div className="user-message-content">
+                            <div className="message-card-header">
+                              {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+                              <Button
+                                aria-label={t('copyMessage')}
+                                appearance="subtle"
+                                size="small"
+                                title={t('copyMessage')}
+                                onClick={() => copyText(message.content)}
+                              >
+                                {t('copy')}
+                              </Button>
+                            </div>
                             {message.images?.length ? (
                               <div className="message-images">
                                 {message.images.map((image) => (
@@ -1306,7 +1351,11 @@ export function App(): React.JSX.Element {
                           key={`live-compression-${index}`}
                         />
                       ) : item.block.type === 'content' ? (
-                        <AssistantContent content={item.block.content} key={`live-block-${index}`} />
+                        <AssistantContent
+                          content={item.block.content}
+                          createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
+                          key={`live-block-${index}`}
+                        />
                       ) : (
                         <FunctionCallMessage
                           block={item.block}

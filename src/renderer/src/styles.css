@@ -126,7 +126,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 64px;
+  min-height: 148px;
   border-bottom: 1px solid #e0e0e0;
   padding: 0 32px;
   background: #fff;
@@ -138,9 +138,38 @@ body {
   gap: 3px;
 }
 
-.model-status {
+.topbar-controls {
   align-items: flex-end;
+  gap: 4px !important;
+  min-width: 360px;
   text-align: right;
+}
+
+.topbar-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 30px;
+}
+
+.topbar-model-row {
+  gap: 12px;
+}
+
+.topbar-field-label,
+.topbar-model-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #616161;
+  font-size: 12px;
+}
+
+.topbar-model-name strong {
+  color: #242424;
+  font-weight: 600;
 }
 
 .context-status {
@@ -372,10 +401,26 @@ h1 {
   background: #fff;
 }
 
-.message-card-actions {
+.message-card-header {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
   margin: -6px -8px 4px;
+}
+
+.message-card-header time {
+  color: #8a8a8a;
+  font-size: 11px;
+}
+
+.message.user .message-card-header {
+  margin-bottom: 6px;
+}
+
+.message.user .message-card-header time,
+.message.user .message-card-header button {
+  color: rgb(255 255 255 / 86%);
 }
 
 .markdown-content > :first-child {
@@ -562,6 +607,7 @@ h1 {
 }
 
 .composer {
+  --composer-control-height: 64px;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -594,11 +640,18 @@ h1 {
 
 .message-input {
   flex: 1;
+  min-height: var(--composer-control-height);
 }
 
 .attachment-menu {
   position: relative;
   align-self: flex-end;
+}
+
+.attachment-menu > button,
+.composer > button {
+  min-height: var(--composer-control-height);
+  height: var(--composer-control-height);
 }
 
 .attachment-menu-popover {
