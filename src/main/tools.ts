@@ -9,6 +9,7 @@ import {
   gitGetCurrentBranch,
   gitLog,
   gitStatus,
+  gitUnstage,
 } from './git'
 import {
   executePythonCode,
@@ -474,6 +475,12 @@ export async function runAgentTool(
     }
     return stringifyResult(await gitAdd(getFolder(project, args.folder_id).path, args.paths, runtime?.signal))
   }
+  if (toolCall.function.name === 'git_unstage') {
+    if (typeof args.folder_id !== 'string' || !Array.isArray(args.paths)) {
+      throw new Error('folder_id and paths are required')
+    }
+    return stringifyResult(await gitUnstage(getFolder(project, args.folder_id).path, args.paths, runtime?.signal))
+  }
   if (toolCall.function.name === 'git_commit') {
     if (typeof args.folder_id !== 'string' || typeof args.message !== 'string') {
       throw new Error('folder_id and message are required')
@@ -759,6 +766,7 @@ export function createAgentTools(project: Project): object[] {
     { type: 'function', function: { name: 'git_status', description: 'Show the concise working tree and staging status for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_diff', description: 'Show unstaged or staged changes for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, staged: { type: 'boolean', description: 'True to show staged changes; false to show unstaged changes.' } }, required: ['folder_id', 'staged'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_add', description: 'Stage an explicit list of project files. Repository-wide paths and directories are rejected.', parameters: { type: 'object', properties: { folder_id: gitFolderId, paths: { type: 'array', items: { type: 'string', maxLength: 500, description: 'A file path relative to the repository root.' }, minItems: 1, maxItems: 100, uniqueItems: true } }, required: ['folder_id', 'paths'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'git_unstage', description: 'Remove an explicit list of files from the staging area while preserving their working tree contents. This does not revert or delete files.', parameters: { type: 'object', properties: { folder_id: gitFolderId, paths: { type: 'array', items: { type: 'string', maxLength: 500, description: 'A file path relative to the repository root.' }, minItems: 1, maxItems: 100, uniqueItems: true } }, required: ['folder_id', 'paths'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_commit', description: 'Commit currently staged changes. Fails when the staging area is empty.', parameters: { type: 'object', properties: { folder_id: gitFolderId, message: { type: 'string', minLength: 1, maxLength: 5000 } }, required: ['folder_id', 'message'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_log', description: 'Show recent commits from a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, max_count: { type: 'integer', minimum: 1, maximum: 50 } }, required: ['folder_id', 'max_count'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_get_current_branch', description: 'Return the current branch or report a detached HEAD.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },

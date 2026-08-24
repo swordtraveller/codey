@@ -157,7 +157,7 @@ function assertExplicitPath(inputPath: string): void {
     || inputPath === './'
     || inputPath === '.\\'
   ) {
-    throw new Error('git_add requires explicit file paths; repository-wide paths are not allowed')
+    throw new Error('Git operations require explicit file paths; repository-wide paths are not allowed')
   }
   const segments = inputPath.split(/[\\/]+/)
   if (segments.some((segment) => blockedPathNames.has(segment.toLowerCase()))) {
@@ -165,7 +165,7 @@ function assertExplicitPath(inputPath: string): void {
   }
 }
 
-async function normalizeAddPaths(root: string, paths: string[], signal?: AbortSignal): Promise<string[]> {
+async function normalizeExplicitPaths(root: string, paths: string[], signal?: AbortSignal): Promise<string[]> {
   if (paths.length === 0 || paths.length > maxGitPaths || paths.some((path) => typeof path !== 'string')) {
     throw new Error(`paths must contain between 1 and ${maxGitPaths} file paths`)
   }
@@ -177,12 +177,12 @@ async function normalizeAddPaths(root: string, paths: string[], signal?: AbortSi
     const target = await safeResolveWritablePath(root, inputPath)
     const normalized = relative(root, target).split(sep).join('/')
     if (!normalized) {
-      throw new Error('git_add requires explicit file paths')
+      throw new Error('Git operations require explicit file paths')
     }
     try {
       const entry = await lstat(target)
       if (!entry.isFile()) {
-        throw new Error(`git_add only accepts files: ${inputPath}`)
+        throw new Error(`Git operations only accept files: ${inputPath}`)
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -219,10 +219,22 @@ export async function gitAdd(
   signal?: AbortSignal,
 ): Promise<{ success: true; staged_paths: string[]; status: string }> {
   const root = await repositoryRoot(workspaceRoot, signal)
-  const normalizedPaths = await normalizeAddPaths(root, paths, signal)
+  const normalizedPaths = await normalizeExplicitPaths(root, paths, signal)
   await runGit(root, ['--literal-pathspecs', 'add', '--', ...normalizedPaths], [0], gitTimeoutMs, signal)
   const status = await runGit(root, ['status', '--short', '--untracked-files=all'], [0], gitTimeoutMs, signal)
   return { success: true, staged_paths: normalizedPaths, status: status.stdout.trimEnd() }
+}
+
+export async function gitUnstage(
+  workspaceRoot: string,
+  paths: string[],
+  signal?: AbortSignal,
+): Promise<{ success: true; unstaged_paths: string[]; status: string }> {
+  const root = await repositoryRoot(workspaceRoot, signal)
+  const normalizedPaths = await normalizeExplicitPaths(root, paths, signal)
+  await runGit(root, ['--literal-pathspecs', 'restore', '--staged', '--', ...normalizedPaths], [0], gitTimeoutMs, signal)
+  const status = await runGit(root, ['status', '--short', '--untracked-files=all'], [0], gitTimeoutMs, signal)
+  return { success: true, unstaged_paths: normalizedPaths, status: status.stdout.trimEnd() }
 }
 
 export async function gitCommit(

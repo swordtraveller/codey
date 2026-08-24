@@ -48,6 +48,7 @@ describe('agent tools', () => {
       'python_execute',
       'node_validate',
       'git_status',
+      'git_unstage',
       'git_commit',
     ]))
   })
