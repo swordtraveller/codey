@@ -466,7 +466,7 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; signal?: AbortSignal },
+  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string },
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
     return {
@@ -508,6 +508,17 @@ export async function develop(
     ].join('\n'),
   }
   const history = toApiMessages(agentMessages)
+  if (runtime?.latestUserMessageId && !history.some((message) =>
+    message.id === runtime.latestUserMessageId && message.role === 'user'
+  )) {
+    return {
+      writtenFiles: [],
+      agentMessages,
+      timeline: [],
+      summaryArtifacts: [],
+      error: 'Latest user message is missing from the request history',
+    }
+  }
   let context: ContextMetrics | undefined
   const timeline: DevelopmentTimelineItem[] = []
   const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
@@ -520,6 +531,11 @@ export async function develop(
       throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
+      if (runtime?.latestUserMessageId && !managed.messages.some((message) =>
+        message.id === runtime.latestUserMessageId && message.role === 'user'
+      )) {
+        throw new Error('Latest user message is missing from the Hot prompt')
+      }
       for (const message of [...managed.messages, ...managed.warmMessages]) {
         const stored = history.find((candidate) => candidate.id === message.id)
         if (!stored) continue
