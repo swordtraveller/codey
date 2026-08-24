@@ -65,6 +65,7 @@ export type AppConfig = {
   developerMode: boolean
   keepAwakeEnabled: boolean
   keepAwakeOnlyWhileWorking: boolean
+  networkAccessEnabled: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -75,6 +76,7 @@ export const defaultAppConfig: AppConfig = {
   developerMode: false,
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
+  networkAccessEnabled: false,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>

@@ -39,6 +39,7 @@ const config: AppConfig = {
   developerMode: false,
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
+  networkAccessEnabled: false,
 }
 const project: Project = {
   id: 'project',
