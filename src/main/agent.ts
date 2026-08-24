@@ -458,30 +458,8 @@ async function requestCompletion(
   throw new Error('Model request failed')
 }
 
-export async function develop(
-  project: Project,
-  config: ModelConfig,
-  contextConfig: ContextManagementConfig,
-  agentLimits: AgentLimitsConfig,
-  agentMessages: AgentContextMessage[],
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
-  onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string },
-): Promise<AgentResult> {
-  if (project.folders.length === 0) {
-    return {
-      writtenFiles: [],
-      agentMessages,
-      timeline: [],
-      summaryArtifacts: [],
-      error: 'Add a project folder before sending a request',
-    }
-  }
-
-  const writtenFiles: string[] = []
-  const tools = createAgentTools(project)
-  const projectDetections = await detectProjectFolders(project.folders)
-  const systemMessage: ContextMessage = {
+function createAgentSystemMessage(project: Project): ContextMessage {
+  return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
     role: 'system',
@@ -507,6 +485,45 @@ export async function develop(
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
+}
+
+export function buildAgentContext(
+  project: Project,
+  config: ModelConfig,
+  contextConfig: ContextManagementConfig,
+  agentMessages: AgentContextMessage[],
+): ContextResult {
+  return manageContext(
+    [createAgentSystemMessage(project), ...toApiMessages(agentMessages)],
+    createAgentTools(project),
+    config,
+    contextConfig,
+  )
+}
+export async function develop(
+  project: Project,
+  config: ModelConfig,
+  contextConfig: ContextManagementConfig,
+  agentLimits: AgentLimitsConfig,
+  agentMessages: AgentContextMessage[],
+  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onContextSnapshot?: (result: ContextResult) => void,
+  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string },
+): Promise<AgentResult> {
+  if (project.folders.length === 0) {
+    return {
+      writtenFiles: [],
+      agentMessages,
+      timeline: [],
+      summaryArtifacts: [],
+      error: 'Add a project folder before sending a request',
+    }
+  }
+
+  const writtenFiles: string[] = []
+  const tools = createAgentTools(project)
+  const projectDetections = await detectProjectFolders(project.folders)
+  const systemMessage = createAgentSystemMessage(project)
   const history = toApiMessages(agentMessages)
   if (runtime?.latestUserMessageId && !history.some((message) =>
     message.id === runtime.latestUserMessageId && message.role === 'user'
