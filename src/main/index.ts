@@ -15,9 +15,11 @@ import type {
   ImageAttachment,
   ScreenshotSelection,
   ScreenshotSource,
+  Conversation,
+  Project,
 } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
-import { develop } from './agent'
+import { buildAgentContext, develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
 import {
@@ -26,9 +28,11 @@ import {
   getContextDebugOverview,
   getContextDebugRevision,
   getRememberedWarmMessages,
+  hasContextDebugSnapshot,
   persistContextDebugMessages,
   readColdContextMessage,
   readContextSnapshotMessage,
+  rememberInitializedSnapshot,
   rememberSnapshot,
   searchColdContext,
   setContextPin,
@@ -411,11 +415,45 @@ async function selectScreenshotArea(
   })
 }
 
+async function initializeContextDebugContext(
+  projectId: string,
+  conversationId: string,
+  project: Project,
+  conversation: Conversation,
+  appConfig: AppConfig,
+): Promise<void> {
+  if (getConversationState(projectId, conversationId) !== 'idle') return
+  if (hasContextDebugSnapshot(projectId, conversationId)) return
+
+  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  if (!modelConfig) return
+  const contextConfig = structuredClone(
+    resolveContextManagementConfig(appConfig, project, conversation),
+  )
+  const history = contextConfig.layeredEnabled
+    ? await readConversationWorkingSet(
+        projectId,
+        conversationId,
+        contextConfig,
+        '',
+        getRememberedWarmMessages(projectId, conversationId),
+      )
+    : await readConversationMessages(projectId, conversationId)
+  const managed = buildAgentContext(project, modelConfig, contextConfig, history)
+  const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), randomUUID())
+  rememberInitializedSnapshot(
+    projectId,
+    conversationId,
+    snapshot,
+    [...managed.messages, ...managed.warmMessages],
+  )
+}
 async function openContextDebugWindow(projectId: string, conversationId: string): Promise<void> {
   const config = await readConfig()
   if (!config.developerMode) throw new Error('Developer mode is disabled')
   const project = await getProject(projectId)
-  if (!project.conversations.some((item) => item.id === conversationId)) {
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
     throw new Error('Conversation not found')
   }
   await prepareContextDebugStorage(projectId, conversationId)
@@ -426,6 +464,7 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
     existing.focus()
     return
   }
+  await initializeContextDebugContext(projectId, conversationId, project, conversation, config)
   const window = new BrowserWindow({
     width: 1320,
     height: 850,

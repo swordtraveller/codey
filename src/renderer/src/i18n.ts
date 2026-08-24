@@ -234,6 +234,7 @@ void i18n.use(initReactI18next).init({
         audit_manual_demotion: 'Manual demotion',
         audit_pinned_ratio_warning: 'Pinned ratio warning',
         audit_token_simulation: 'Token simulation',
+        audit_hot_warm_initialization: 'Hot / Warm initialization',
       },
     },
     'zh-CN': {
@@ -451,6 +452,7 @@ void i18n.use(initReactI18next).init({
         audit_manual_demotion: '手动下沉',
         audit_pinned_ratio_warning: '固定内容占比告警',
         audit_token_simulation: 'Token 模拟',
+        audit_hot_warm_initialization: 'Hot / Warm 初始化',
       },
     },
   },

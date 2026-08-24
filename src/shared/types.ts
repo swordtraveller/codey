@@ -314,6 +314,7 @@ export type ContextAuditEvent = {
     | 'manual_demotion'
     | 'pinned_ratio_warning'
     | 'token_simulation'
+    | 'hot_warm_initialization'
   messageIds: string[]
   tokenDelta?: number
   description: string

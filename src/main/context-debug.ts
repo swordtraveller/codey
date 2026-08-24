@@ -113,6 +113,26 @@ export function rememberSnapshot(projectId: string, conversationId: string, snap
   snapshotMessages.set(storageKey, currentMessages)
 }
 
+export function hasContextDebugSnapshot(projectId: string, conversationId: string): boolean {
+  return snapshots.has(key(projectId, conversationId))
+}
+
+export function rememberInitializedSnapshot(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  messages: ContextMessage[],
+): void {
+  rememberSnapshot(projectId, conversationId, snapshot, messages)
+  addAudit(projectId, conversationId, {
+    roundId: snapshot.roundId,
+    requestId: snapshot.requestId,
+    type: 'hot_warm_initialization',
+    messageIds: [...snapshot.hot, ...snapshot.warm].map((item) => item.id),
+    description: 'Initialized Hot and Warm from persisted conversation history',
+    simulated: false,
+  })
+}
 export function getRememberedWarmMessages(projectId: string, conversationId: string): AgentContextMessage[] {
   const storageKey = key(projectId, conversationId)
   const snapshot = snapshots.get(storageKey)
