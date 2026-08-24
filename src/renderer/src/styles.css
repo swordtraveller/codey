@@ -596,6 +596,96 @@ h1 {
   flex: 1;
 }
 
+.attachment-menu {
+  position: relative;
+  align-self: flex-end;
+}
+
+.attachment-menu-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 220px;
+  gap: 2px;
+  border: 1px solid #d1d1d1;
+  border-radius: 6px;
+  padding: 6px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 16%);
+}
+
+.attachment-menu-item {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.screenshot-overlay {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  background: #111;
+}
+
+.screenshot-overlay-image,
+.screenshot-overlay-shade,
+.screenshot-overlay-selection,
+.screenshot-overlay-interaction {
+  position: absolute;
+  inset: 0;
+}
+
+.screenshot-overlay-image {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  object-fit: fill;
+}
+
+.screenshot-overlay-shade {
+  background: rgb(0 0 0 / 38%);
+  pointer-events: none;
+}
+
+.screenshot-overlay-selection {
+  z-index: 1;
+  border: 1px solid #fff;
+  outline: 1px solid #0f6cbd;
+  background: rgb(255 255 255 / 8%);
+  pointer-events: none;
+}
+
+.screenshot-overlay-interaction {
+  z-index: 2;
+}
+
+.screenshot-overlay-toolbar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgb(0 0 0 / 68%);
+  font-size: 13px;
+}
+
+.screenshot-overlay-toolbar button {
+  border: 0;
+  border-radius: 4px;
+  padding: 5px 10px;
+  color: #1a1a1a;
+  background: #fff;
+  cursor: pointer;
+}
+
 .dialog-fields {
   display: grid;
   gap: 16px;

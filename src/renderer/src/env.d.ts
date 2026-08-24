@@ -10,6 +10,8 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   Project,
+  ScreenshotSelection,
+  ScreenshotSource,
   TokenLimitSimulation,
 } from '../../shared/types'
 
@@ -54,6 +56,10 @@ declare global {
         images?: ImageAttachment[],
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
+      screenshot(hideWindow: boolean): Promise<ImageAttachment | null>
+      onScreenshotSource(listener: (source: ScreenshotSource) => void): () => void
+      completeScreenshotSelection(captureId: string, selection: ScreenshotSelection): void
+      cancelScreenshotSelection(captureId: string): void
       openFrontendPreview(
         projectId: string,
         conversationId: string,

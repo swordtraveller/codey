@@ -350,3 +350,19 @@ export type ConversationStateChange = {
   conversationId: string
   state: ConversationRuntimeState
 }
+
+export type ScreenshotSource = {
+  captureId: string
+  dataUrl: string
+  width: number
+  height: number
+  scaleX: number
+  scaleY: number
+}
+
+export type ScreenshotSelection = {
+  x: number
+  y: number
+  width: number
+  height: number
+}

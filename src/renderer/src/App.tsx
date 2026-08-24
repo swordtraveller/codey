@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -48,7 +48,7 @@ function readImage(file: File): Promise<ImageAttachment> {
     reader.onerror = () => reject(reader.error)
     reader.onload = () => resolve({
       id: crypto.randomUUID(),
-      name: file.name,
+      name: file.name || `clipboard-${crypto.randomUUID()}.${file.type.split('/')[1] ?? 'png'}`,
       mediaType: file.type as ImageMediaType,
       dataUrl: String(reader.result),
     })
@@ -419,6 +419,7 @@ export function App(): React.JSX.Element {
   const [activeConversationId, setActiveConversationId] = useState('')
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -450,6 +451,7 @@ export function App(): React.JSX.Element {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
@@ -509,6 +511,21 @@ export function App(): React.JSX.Element {
     setDraftImages([])
   }, [activeProjectId, activeConversationId])
 
+  useEffect(() => {
+    if (!attachmentMenuOpen) return
+    function closeAttachmentMenu(event: MouseEvent): void {
+      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
+    }
+    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setAttachmentMenuOpen(false)
+    }
+    document.addEventListener('mousedown', closeAttachmentMenu)
+    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeAttachmentMenu)
+      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
+    }
+  }, [attachmentMenuOpen])
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
     const key = `${progress.projectId}:${progress.conversationId}`
     setLiveResponses((current) => ({ ...current, [key]: progress }))
@@ -802,10 +819,18 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+  function appendImageAttachments(attachments: ImageAttachment[]): boolean {
+    if (draftImages.length + attachments.length > maximumImageAttachments) {
+      setError(t('tooManyImages', { count: maximumImageAttachments }))
+      return false
+    }
+    setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
+    setError('')
+    return true
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
     const conversationKey = activeConversationKeyRef.current
-    const files = [...(event.target.files ?? [])]
-    event.target.value = ''
     if (files.length === 0) return
     if (draftImages.length + files.length > maximumImageAttachments) {
       setError(t('tooManyImages', { count: maximumImageAttachments }))
@@ -823,13 +848,37 @@ export function App(): React.JSX.Element {
     try {
       const attachments = await Promise.all(files.map(readImage))
       if (conversationKey !== activeConversationKeyRef.current) return
-      setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
-      setError('')
+      appendImageAttachments(attachments)
     } catch {
       setError(t('imageReadFailed'))
     }
   }
 
+  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addImageFiles(files)
+  }
+
+  async function captureScreen(hideWindow: boolean): Promise<void> {
+    if (!canSend || interactionLocked) return
+    try {
+      const attachment = await window.codey.screenshot(hideWindow)
+      if (attachment) appendImageAttachments([attachment])
+    } catch {
+      setError(t('screenshotFailed'))
+    }
+  }
+
+  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const image = [...event.clipboardData.items]
+      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
+      ?.getAsFile()
+    if (!image) return
+
+    event.preventDefault()
+    await addImageFiles([image])
+  }
   async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
 
@@ -1316,16 +1365,60 @@ export function App(): React.JSX.Element {
                 ))}
               </div>
             )}
-            <Button
-              appearance="secondary"
-              disabled={!canSend || interactionLocked}
-              onClick={() => imageInputRef.current?.click()}
-              size="large"
-              title={t('attachImage')}
-              type="button"
-            >
-              {t('attachImage')}
-            </Button>
+            <div className="attachment-menu" ref={attachmentMenuRef}>
+              <Button
+                appearance="secondary"
+                aria-expanded={attachmentMenuOpen}
+                aria-haspopup="menu"
+                disabled={!canSend || interactionLocked}
+                onClick={() => setAttachmentMenuOpen((open) => !open)}
+                size="large"
+                title={t('addAttachment')}
+                type="button"
+              >
+                +
+              </Button>
+              {attachmentMenuOpen && (
+                <div className="attachment-menu-popover" role="menu">
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      void captureScreen(false)
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('captureScreenshot')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      void captureScreen(true)
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('captureScreenshotHideWindow')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item"
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      imageInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadImage')}
+                  </Button>
+                </div>
+              )}
+            </div>
             <Textarea
               aria-label={t('developmentRequest')}
               className="message-input"
@@ -1333,6 +1426,7 @@ export function App(): React.JSX.Element {
               size="large"
               value={draft}
               onChange={(_, data) => setDraft(data.value)}
+              onPaste={(event) => void handlePaste(event)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault()
