@@ -275,6 +275,7 @@ async function developProject(
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
     { conversationId, signal, latestUserMessageId: userMessageId },
+    appConfig.networkAccessEnabled,
   )
   project = await saveConversationContext(
     projectId,
@@ -439,7 +440,7 @@ async function initializeContextDebugContext(
         getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
-  const managed = buildAgentContext(project, modelConfig, contextConfig, history)
+  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled)
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), randomUUID())
   rememberInitializedSnapshot(
     projectId,

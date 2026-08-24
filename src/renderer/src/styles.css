@@ -643,12 +643,34 @@ h1 {
   min-height: var(--composer-control-height);
 }
 
-.attachment-menu {
-  position: relative;
+.composer-side-controls {
+  display: flex;
+  flex: 0 0 108px;
+  flex-direction: column;
   align-self: flex-end;
+  gap: 4px;
+  height: var(--composer-control-height);
 }
 
-.attachment-menu > button,
+.attachment-menu,
+.network-access-switch {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.attachment-menu > button {
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+}
+
+.network-access-switch {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+}
+
 .composer > button {
   min-height: var(--composer-control-height);
   height: var(--composer-control-height);

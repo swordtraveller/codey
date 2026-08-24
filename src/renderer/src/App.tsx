@@ -728,6 +728,23 @@ export function App(): React.JSX.Element {
     }))
   }
 
+  async function setNetworkAccess(enabled: boolean): Promise<void> {
+    if (interactionLocked) return
+    const next = { ...config, networkAccessEnabled: enabled }
+    setConfig(next)
+    setConfigDraft((current) => ({ ...current, networkAccessEnabled: enabled }))
+    try {
+      const saved = await window.codey.saveConfig(next)
+      setConfig(saved)
+      setConfigDraft(saved)
+      setError('')
+    } catch {
+      setConfig(config)
+      setConfigDraft((current) => ({ ...current, networkAccessEnabled: config.networkAccessEnabled }))
+      setError(t('invalidModelConfig'))
+    }
+  }
+
   async function saveSettings(): Promise<void> {
     setSaving(true)
     setSettingsError('')
@@ -1414,59 +1431,68 @@ export function App(): React.JSX.Element {
                 ))}
               </div>
             )}
-            <div className="attachment-menu" ref={attachmentMenuRef}>
-              <Button
-                appearance="secondary"
-                aria-expanded={attachmentMenuOpen}
-                aria-haspopup="menu"
-                disabled={!canSend || interactionLocked}
-                onClick={() => setAttachmentMenuOpen((open) => !open)}
-                size="large"
-                title={t('addAttachment')}
-                type="button"
-              >
-                +
-              </Button>
-              {attachmentMenuOpen && (
-                <div className="attachment-menu-popover" role="menu">
-                  <Button
-                    appearance="subtle"
-                    className="attachment-menu-item"
-                    onClick={() => {
-                      setAttachmentMenuOpen(false)
-                      void captureScreen(false)
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    {t('captureScreenshot')}
-                  </Button>
-                  <Button
-                    appearance="subtle"
-                    className="attachment-menu-item"
-                    onClick={() => {
-                      setAttachmentMenuOpen(false)
-                      void captureScreen(true)
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    {t('captureScreenshotHideWindow')}
-                  </Button>
-                  <Button
-                    appearance="subtle"
-                    className="attachment-menu-item"
-                    onClick={() => {
-                      setAttachmentMenuOpen(false)
-                      imageInputRef.current?.click()
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    {t('uploadImage')}
-                  </Button>
-                </div>
-              )}
+            <div className="composer-side-controls">
+              <div className="attachment-menu" ref={attachmentMenuRef}>
+                <Button
+                  appearance="secondary"
+                  aria-expanded={attachmentMenuOpen}
+                  aria-haspopup="menu"
+                  disabled={!canSend || interactionLocked}
+                  onClick={() => setAttachmentMenuOpen((open) => !open)}
+                  title={t('addAttachment')}
+                  type="button"
+                >
+                  +
+                </Button>
+                {attachmentMenuOpen && (
+                  <div className="attachment-menu-popover" role="menu">
+                    <Button
+                      appearance="subtle"
+                      className="attachment-menu-item"
+                      onClick={() => {
+                        setAttachmentMenuOpen(false)
+                        void captureScreen(false)
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {t('captureScreenshot')}
+                    </Button>
+                    <Button
+                      appearance="subtle"
+                      className="attachment-menu-item"
+                      onClick={() => {
+                        setAttachmentMenuOpen(false)
+                        void captureScreen(true)
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {t('captureScreenshotHideWindow')}
+                    </Button>
+                    <Button
+                      appearance="subtle"
+                      className="attachment-menu-item"
+                      onClick={() => {
+                        setAttachmentMenuOpen(false)
+                        imageInputRef.current?.click()
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {t('uploadImage')}
+                    </Button>
+                  </div>
+                )}
+              </div>
+              <Switch
+                checked={config.networkAccessEnabled}
+                className="network-access-switch"
+                disabled={interactionLocked}
+                label={t('networkAccess')}
+                onChange={(_, data) => void setNetworkAccess(data.checked)}
+                title={t('networkAccessWarning')}
+              />
             </div>
             <Textarea
               aria-label={t('developmentRequest')}
