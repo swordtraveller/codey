@@ -11,6 +11,7 @@ import {
   type ContextManagementConfig,
   type ConversationTurnRecord,
   type Conversation,
+  type ImageAttachment,
   type ModelConfigSnapshot,
   type Project,
   type ProjectFolder,
@@ -85,7 +86,7 @@ function normalizeProject(value: StoredProject): Project {
       agentLimits: normalizeStoredAgentLimits(conversation.agentLimits),
       agentMessages:
         conversation.agentMessages ??
-        conversation.messages.map(({ role, content }) => ({ role, content })),
+        conversation.messages.map(({ role, content, images }) => ({ role, content, images })),
     })),
     pythonEnvironmentFolderId: configuredFolder
       ? (value.pythonEnvironmentFolderId ?? null)
@@ -280,13 +281,15 @@ export async function addMessage(
   modelConfig?: ModelConfigSnapshot,
   contextConfig?: ContextManagementConfig,
   turn?: ConversationTurnRecord,
+  images?: ImageAttachment[],
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
 
-  conversation.messages.push({ id: randomUUID(), role, content, blocks, compression, modelConfig, contextConfig, turn })
+  conversation.messages.push({ id: randomUUID(), role, content, images, blocks, compression, modelConfig, contextConfig, turn })
   if (role === 'user' && conversation.messages.length === 1) {
-    conversation.title = content.length > 36 ? `${content.slice(0, 36)}…` : content
+    const title = content || images?.[0]?.name || 'Image request'
+    conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
   }
   await saveProjects()
   return project

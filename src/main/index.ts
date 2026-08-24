@@ -12,7 +12,9 @@ import type {
   DevelopmentProgress,
   DevelopmentResult,
   DevelopmentTimelineItem,
+  ImageAttachment,
 } from '../shared/types'
+import { validateImageAttachments } from '../shared/image-attachments'
 import { develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
@@ -178,12 +180,15 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
+  images: ImageAttachment[] = [],
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
-  if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
+  const imageError = validateImageAttachments(images)
+  if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
+  if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
   let project = await getProject(projectId)
   if (project.folders.length === 0) {
@@ -216,6 +221,7 @@ async function developProject(
     createModelConfigSnapshot(modelConfig),
     contextConfig,
     { startedAt, result: 'processing' },
+    images,
   )
   const updatedConversation = project.conversations.find((item) => item.id === conversationId)
   if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
@@ -233,18 +239,22 @@ async function developProject(
         getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
-  const storedHistory = persistedHistory.length > 0
+  const currentUserMessage = {
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
+    role: 'user' as const,
+    content: normalizedContent,
+    images,
+  }
+  const requestHistory = persistedHistory.length > 0
     ? persistedHistory
-    : updatedConversation.agentMessages
+    : [...updatedConversation.agentMessages, currentUserMessage]
   const result = await develop(
     project,
     modelConfig,
     contextConfig,
     agentLimits,
-    [
-      ...storedHistory,
-      { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
-    ],
+    requestHistory,
     onProgress,
     (managed) => {
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
@@ -406,7 +416,7 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -416,7 +426,7 @@ app.whenReady().then(() => {
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, (timeline) => {
+      return await developProject(projectId, conversationId, content, images, (timeline) => {
         if (!event.sender.isDestroyed()) {
           const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)

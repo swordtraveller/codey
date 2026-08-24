@@ -5,6 +5,7 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
+  ImageAttachment,
 } from '../shared/types'
 
 contextBridge.exposeInMainWorld(
@@ -59,8 +60,8 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
-    develop: (projectId: string, conversationId: string, content: string) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images),
     stopDevelopment: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('development:stop', projectId, conversationId),
     openFrontendPreview: (projectId: string, conversationId: string, serverId: string) =>

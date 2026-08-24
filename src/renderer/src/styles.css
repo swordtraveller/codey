@@ -345,6 +345,26 @@ h1 {
   gap: 10px;
 }
 
+.user-message-content,
+.message-images,
+.draft-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.user-message-content {
+  flex-direction: column;
+}
+
+.message-images img {
+  display: block;
+  max-width: min(320px, 100%);
+  max-height: 240px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
 .message-card {
   padding: 12px 16px;
   border: 1px solid #e0e0e0;
@@ -543,10 +563,33 @@ h1 {
 
 .composer {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   width: min(calc(100% - 64px), 760px);
   margin: 0 auto;
   padding: 0 0 28px;
+}
+
+.draft-images {
+  width: 100%;
+}
+
+.draft-image {
+  position: relative;
+}
+
+.draft-image img {
+  display: block;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.draft-image > button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
 }
 
 .message-input {

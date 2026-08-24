@@ -11,6 +11,7 @@ import type {
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
+import { redactProviderMessages, toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -76,6 +77,7 @@ function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
     createdAt: message.createdAt ?? new Date().toISOString(),
     role: message.role,
     content: message.content,
+    images: message.images,
     tool_calls: message.toolCalls as ToolCall[] | undefined,
     tool_call_id: message.toolCallId,
     pinnedToHot: message.pinnedToHot,
@@ -100,6 +102,7 @@ function toStoredMessages(messages: ContextMessage[]): AgentContextMessage[] {
       createdAt: message.createdAt ?? new Date().toISOString(),
       role: message.role,
       content: message.content,
+      images: message.images,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
       pinnedToHot: message.pinnedToHot,
@@ -226,16 +229,20 @@ async function requestCompletionAttempt(
     throw new Error('Configure a model before sending a message')
   }
 
+  const providerMessages = toProviderMessages(messages)
   const requestBody = {
     model: config.modelName,
-    messages,
+    messages: providerMessages,
     tools,
     tool_choice: 'auto',
     stream: true,
   }
   log.debug('model.request', {
     url: config.baseUrl + '/chat/completions',
-    body: requestBody,
+    body: {
+      ...requestBody,
+      messages: redactProviderMessages(providerMessages, messages),
+    },
   })
 
   let content = ''
@@ -384,6 +391,7 @@ async function requestCompletion(
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
+  const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
     throwIfAborted(signal)
@@ -429,9 +437,10 @@ async function requestCompletion(
         ...details,
         message: failure.message,
         hasPartialResponse: hasResponseData(failure.partial),
+        hasImageInput,
       })
 
-      if (attempt < maxNetworkAttempts && (timedOut || isRetryableRequestError(error))) {
+      if (attempt < maxNetworkAttempts && !hasImageInput && (timedOut || isRetryableRequestError(error))) {
         log.warn('model.request.retrying', {
           attempt: attempt + 1,
           maxAttempts: maxNetworkAttempts,

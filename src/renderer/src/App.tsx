@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -28,7 +28,10 @@ import type {
   ConversationRuntimeState,
   ConversationTurnRecord,
   DevelopmentTimelineItem,
+  ImageAttachment,
+  ImageMediaType,
 } from '../../shared/types'
+import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -38,6 +41,20 @@ import {
   type ModelConfig,
   type Project,
 } from '../../shared/types'
+
+function readImage(file: File): Promise<ImageAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => resolve({
+      id: crypto.randomUUID(),
+      name: file.name,
+      mediaType: file.type as ImageMediaType,
+      dataUrl: String(reader.result),
+    })
+    reader.readAsDataURL(file)
+  })
+}
 
 function formatToolOutput(parameters: string): string {
   try {
@@ -401,6 +418,7 @@ export function App(): React.JSX.Element {
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -431,6 +449,7 @@ export function App(): React.JSX.Element {
   }>>({})
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const activeConversationKeyRef = useRef('')
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
@@ -485,6 +504,10 @@ export function App(): React.JSX.Element {
       })
       .catch(() => setError(t('unableLoadProjects')))
   }, [])
+
+  useEffect(() => {
+    setDraftImages([])
+  }, [activeProjectId, activeConversationId])
 
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
     const key = `${progress.projectId}:${progress.conversationId}`
@@ -779,11 +802,40 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const conversationKey = activeConversationKeyRef.current
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    if (files.length === 0) return
+    if (draftImages.length + files.length > maximumImageAttachments) {
+      setError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
+      setError(t('unsupportedImage'))
+      return
+    }
+    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
+      setError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map(readImage))
+      if (conversationKey !== activeConversationKeyRef.current) return
+      setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
+      setError('')
+    } catch {
+      setError(t('imageReadFailed'))
+    }
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
 
     const content = draft.trim()
-    if (!content || !canSend || !activeProject || !activeConversation || interactionLocked) {
+    const images = draftImages
+    if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -791,6 +843,7 @@ export function App(): React.JSX.Element {
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
     setDraft('')
+    setDraftImages([])
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
@@ -801,7 +854,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: userMessageId, role: 'user', content },
+                { id: userMessageId, role: 'user', content, images },
               ],
             }
           : conversation,
@@ -830,14 +883,15 @@ export function App(): React.JSX.Element {
     }))
 
     try {
-      const result = await window.codey.develop(projectId, conversationId, content)
+      const result = await window.codey.develop(projectId, conversationId, content, images)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
         )
         const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
           .reverse()
-          .find((message) => message.role === 'user' && message.content === content)
+          .find((message) => message.role === 'user' && message.content === content &&
+            (images.length === 0 || message.images?.[0]?.id === images[0].id))
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -1178,7 +1232,16 @@ export function App(): React.JSX.Element {
                         ) : message.role === 'assistant' ? (
                           <AssistantContent content={message.content} />
                         ) : (
-                          <p>{message.content}</p>
+                          <div className="user-message-content">
+                            {message.images?.length ? (
+                              <div className="message-images">
+                                {message.images.map((image) => (
+                                  <img alt={image.name} key={image.id} src={image.dataUrl} />
+                                ))}
+                              </div>
+                            ) : null}
+                            {message.content && <p>{message.content}</p>}
+                          </div>
                         )}
                       </div>
                       {messageTurn && <ConversationStopwatch turn={messageTurn} />}
@@ -1225,6 +1288,44 @@ export function App(): React.JSX.Element {
           </div>
 
           <form className="composer" onSubmit={sendMessage}>
+            <input
+              accept={supportedImageMediaTypes.join(',')}
+              hidden
+              multiple
+              onChange={(event) => void selectImages(event)}
+              ref={imageInputRef}
+              type="file"
+            />
+            {draftImages.length > 0 && (
+              <div className="draft-images">
+                {draftImages.map((image) => (
+                  <div className="draft-image" key={image.id}>
+                    <img alt={image.name} src={image.dataUrl} />
+                    <Button
+                      aria-label={t('removeImage')}
+                      appearance="subtle"
+                      onClick={() => setDraftImages((current) => current.filter((item) => item.id !== image.id))}
+                      shape="circular"
+                      size="small"
+                      title={t('removeImage')}
+                      type="button"
+                    >
+                      ×
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <Button
+              appearance="secondary"
+              disabled={!canSend || interactionLocked}
+              onClick={() => imageInputRef.current?.click()}
+              size="large"
+              title={t('attachImage')}
+              type="button"
+            >
+              {t('attachImage')}
+            </Button>
             <Textarea
               aria-label={t('developmentRequest')}
               className="message-input"
@@ -1259,7 +1360,7 @@ export function App(): React.JSX.Element {
             ) : (
               <Button
                 appearance="primary"
-                disabled={!canSend || !draft.trim() || interactionLocked}
+                disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
                 size="large"
                 type="submit"
               >

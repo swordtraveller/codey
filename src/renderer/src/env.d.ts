@@ -8,6 +8,7 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentResult,
+  ImageAttachment,
   Project,
   TokenLimitSimulation,
 } from '../../shared/types'
@@ -50,6 +51,7 @@ declare global {
         projectId: string,
         conversationId: string,
         content: string,
+        images?: ImageAttachment[],
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
       openFrontendPreview(

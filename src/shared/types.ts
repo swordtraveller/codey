@@ -1,3 +1,6 @@
+import type { ImageAttachment } from './image-attachments'
+export type { ImageAttachment, ImageMediaType } from './image-attachments'
+
 export type AppLanguage = 'system' | 'en' | 'zh-CN'
 
 export type ModelConfig = {
@@ -117,6 +120,7 @@ export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  images?: ImageAttachment[]
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
@@ -144,6 +148,7 @@ export type AgentContextMessage = {
   createdAt?: string
   role: ChatMessage['role'] | 'tool'
   content: string | null
+  images?: ImageAttachment[]
   toolCalls?: unknown[]
   toolCallId?: string
   pinnedToHot?: boolean
