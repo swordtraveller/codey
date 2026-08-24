@@ -5,7 +5,7 @@ import {
   Spinner,
   webLightTheme,
 } from '@fluentui/react-components'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
 import type {
@@ -19,6 +19,29 @@ import type {
 
 type Props = { projectId: string; conversationId: string }
 type Layer = 'hot' | 'warm'
+
+function layerItemKey(layer: Layer, id: string): string {
+  return layer + ':' + id
+}
+
+function HighlightedText({ text, query }: { text: string; query: string }): React.JSX.Element {
+  const trimmedQuery = query.trim()
+  if (!trimmedQuery) return <>{text}</>
+
+  const parts: React.JSX.Element[] = []
+  const lowerText = text.toLowerCase()
+  const lowerQuery = trimmedQuery.toLowerCase()
+  let cursor = 0
+  let matchIndex = lowerText.indexOf(lowerQuery, cursor)
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) parts.push(<span key={'text-' + cursor}>{text.slice(cursor, matchIndex)}</span>)
+    parts.push(<mark key={'match-' + matchIndex}>{text.slice(matchIndex, matchIndex + trimmedQuery.length)}</mark>)
+    cursor = matchIndex + trimmedQuery.length
+    matchIndex = lowerText.indexOf(lowerQuery, cursor)
+  }
+  if (cursor < text.length) parts.push(<span key={'text-' + cursor}>{text.slice(cursor)}</span>)
+  return <>{parts}</>
+}
 
 function VisibilityIcon({ visible }: { visible: boolean }): React.JSX.Element {
   return (
@@ -64,6 +87,9 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
   const [storagePathVisible, setStoragePathVisible] = useState(false)
   const revisionRef = useRef<string | null>(null)
   const refreshInFlightRef = useRef(false)
+  const layerItemRefs = useRef<Record<string, HTMLElement | null>>({})
+  const [layerSearchQuery, setLayerSearchQuery] = useState('')
+  const [activeLayerMatchIndex, setActiveLayerMatchIndex] = useState(-1)
 
   useEffect(() => {
     void window.codey.getConfig().then((config) => setAppLanguage(config.language))
@@ -139,25 +165,54 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
       : snapshot.requestTokens >= snapshot.triggerThreshold
         ? 'warning'
         : 'normal'
+  const layerSearchMatches = useMemo<Array<{ layer: Layer; id: string }>>(() => {
+    const query = layerSearchQuery.trim().toLowerCase()
+    if (!query || !snapshot) return []
+
+    return (['hot', 'warm'] as const).flatMap((layer) => snapshot[layer]
+      .filter((item) => [
+        item.preview, item.role, item.source, t(item.source), item.region,
+        t('region_' + item.region), item.representation,
+        t('representation_' + item.representation), ...item.truthRefs,
+      ].join('\n').toLowerCase().includes(query))
+      .map((item) => ({ layer, id: item.id })))
+  }, [layerSearchQuery, snapshot, t])
+
+  useEffect(() => {
+    setActiveLayerMatchIndex((current) => current >= layerSearchMatches.length ? -1 : current)
+  }, [layerSearchMatches.length])
+
+  function moveLayerMatch(direction: -1 | 1): void {
+    if (layerSearchMatches.length === 0) return
+    const nextIndex = activeLayerMatchIndex < 0
+      ? direction > 0 ? 0 : layerSearchMatches.length - 1
+      : (activeLayerMatchIndex + direction + layerSearchMatches.length) % layerSearchMatches.length
+    const match = layerSearchMatches[nextIndex]
+    setActiveLayerMatchIndex(nextIndex)
+    layerItemRefs.current[layerItemKey(match.layer, match.id)]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
 
   function layerCard(item: ContextLayerItem, layer: Layer): React.JSX.Element {
     const full = expanded[item.id]
     const immutable = item.source === 'system'
+    const active = layerSearchMatches[activeLayerMatchIndex]?.layer === layer
+      && layerSearchMatches[activeLayerMatchIndex]?.id === item.id
     return (
-      <article className="context-debug-message" key={item.id}>
+      <article ref={(element) => { layerItemRefs.current[layerItemKey(layer, item.id)] = element }}
+        className={'context-debug-message' + (active ? ' context-debug-message-search-active' : '')} key={item.id}>
         <div className="context-debug-message-head">
-          <strong>{item.role}</strong>
+          <strong><HighlightedText text={item.role} query={layerSearchQuery} /></strong>
           <span>{item.tokenCount.toLocaleString()} {t('tokens')}</span>
         </div>
         <div className="context-debug-tags">
-          <span>{t(item.source)}</span>
-          <span>{t(`region_${item.region}`)}</span>
-          <span>{t(`representation_${item.representation}`)}</span>
+          <span><HighlightedText text={t(item.source)} query={layerSearchQuery} /></span>
+          <span><HighlightedText text={t('region_' + item.region)} query={layerSearchQuery} /></span>
+          <span><HighlightedText text={t('representation_' + item.representation)} query={layerSearchQuery} /></span>
           {item.pinnedToHot && <span>{t('pinnedToHot')}</span>}
           {item.pendingDemotion && <span>{t('pendingDemotion')}</span>}
         </div>
         <time>{formatTime(item.createdAt)}</time>
-        <p>{item.preview || '—'}</p>
+        <p><HighlightedText text={item.preview || '—'} query={layerSearchQuery} /></p>
         {item.truthRefs.length > 0 && <code className="context-debug-pointer">{t('truthReferences')}: {item.truthRefs.join(', ')}</code>}
         {full && <pre className="context-debug-full">{messageText(full)}</pre>}
         <div className="context-debug-actions">
@@ -262,6 +317,19 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
             {snapshot ? t('snapshotAt', { time: formatTime(snapshot.createdAt) }) : t('noSnapshot')}
             {!idle && ` · ${t('idleOnly')}`}
           </p>
+
+          <section className="context-debug-layer-search">
+            <div>
+              <h2>{t('layerSearch')}</h2>
+              <Input aria-label={t('searchHotWarm')} placeholder={t('searchHotWarm')} value={layerSearchQuery}
+                onChange={(_, data) => { setLayerSearchQuery(data.value); setActiveLayerMatchIndex(-1) }} />
+            </div>
+            <div className="context-debug-layer-search-actions">
+              <Button appearance="subtle" disabled={layerSearchMatches.length === 0} onClick={() => moveLayerMatch(-1)}>{t('previousMatch')}</Button>
+              <Button appearance="subtle" disabled={layerSearchMatches.length === 0} onClick={() => moveLayerMatch(1)}>{t('nextMatch')}</Button>
+              <span aria-live="polite">{layerSearchMatches.length === 0 ? (layerSearchQuery.trim() ? t('noLayerMatches') : t('searchMatches', { current: 0, total: 0 })) : t('searchMatches', { current: activeLayerMatchIndex < 0 ? 0 : activeLayerMatchIndex + 1, total: layerSearchMatches.length })}</span>
+            </div>
+          </section>
 
           <main className="context-debug-layers">
             <section>

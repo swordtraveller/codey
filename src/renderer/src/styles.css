@@ -915,6 +915,52 @@ h1 {
   margin: 10px 0 16px;
 }
 
+.context-debug-layer-search {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+}
+
+.context-debug-layer-search h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.context-debug-layer-search > div:first-child {
+  min-width: 240px;
+  flex: 1;
+}
+
+.context-debug-layer-search-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.context-debug-layer-search-actions > span {
+  color: #707070;
+  font-size: 11px;
+}
+
+.context-debug-message-search-active {
+  border-color: #0f6cbd;
+  box-shadow: 0 0 0 2px rgb(15 108 189 / 18%);
+}
+
+.context-debug-message mark {
+  border-radius: 2px;
+  padding: 0 1px;
+  color: inherit;
+  background: #ffecb5;
+}
+
 .context-debug-layers {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
