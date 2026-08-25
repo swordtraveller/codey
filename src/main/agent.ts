@@ -496,12 +496,14 @@ export function buildAgentContext(
   contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
   networkAccessEnabled = false,
+  customStrategy?: { allow: boolean; latestUserMessageId?: string },
 ): ContextResult {
   return manageContext(
     [createAgentSystemMessage(project, networkAccessEnabled), ...toApiMessages(agentMessages)],
     createAgentTools(project, networkAccessEnabled),
     config,
     contextConfig,
+    { allowCustomStrategy: customStrategy?.allow, latestUserMessageId: customStrategy?.latestUserMessageId },
   )
 }
 export async function develop(
@@ -512,7 +514,7 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string },
+  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
@@ -552,10 +554,14 @@ export async function develop(
     for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
-      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig)
-      if (runtime?.latestUserMessageId && !managed.messages.some((message) =>
-        message.id === runtime.latestUserMessageId && message.role === 'user'
-      )) {
+      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig, {
+        allowCustomStrategy: runtime?.allowCustomStrategy,
+        latestUserMessageId: runtime?.latestUserMessageId,
+      })
+      if ((!runtime?.allowCustomStrategy || !contextConfig.customStrategyEnabled || !contextConfig.customStrategyScript?.trim()) &&
+        runtime?.latestUserMessageId && !managed.messages.some((message) =>
+          message.id === runtime.latestUserMessageId && message.role === 'user'
+        )) {
         throw new Error('Latest user message is missing from the Hot prompt')
       }
       for (const message of [...managed.messages, ...managed.warmMessages]) {

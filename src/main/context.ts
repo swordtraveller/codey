@@ -1,8 +1,9 @@
-import { getEncoding } from 'js-tiktoken'
-import { estimatedImageTokens } from '../shared/image-attachments'
 import type { ImageAttachment } from '../shared/image-attachments'
 import type { ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
 import type { ToolCall } from './tools'
+import { countContextTokens, normalizeToolCallSequence } from './context-utils'
+import { applyCustomRhaiStrategy } from './rhai-strategy'
+export { countContextTokens, normalizeToolCallSequence } from './context-utils'
 
 export type ContextMessage = {
   id?: string
@@ -39,25 +40,7 @@ export type ContextResult = {
 }
 
 export const SUMMARY_LABEL = '[SUMMARY — LOSSY, NOT AUTHORITATIVE]'
-const encoder = getEncoding('o200k_base')
 const protectedBlockPattern = /```[\s\S]*?```|Traceback \(most recent call\):[\s\S]*?(?=\n\n|$)|(?:^|\n)(?:Error|Exception|Caused by):[^\n]*(?:\n\s+at [^\n]*)*|(?:^|\n)(?:(?:\d{4}-\d{2}-\d{2}[T ][^\n]*)|(?:(?:\[[^\]\n]+\]\s*)?(?:DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b[^\n]*))/g
-
-export function countContextTokens(value: unknown): number {
-  let imageCount = 0
-  const serialized = JSON.stringify(value, (_key, item: unknown) => {
-    if (
-      item && typeof item === 'object' &&
-      'dataUrl' in item && 'mediaType' in item &&
-      typeof item.dataUrl === 'string' && typeof item.mediaType === 'string' &&
-      item.dataUrl.startsWith(`data:${item.mediaType};base64,`)
-    ) {
-      imageCount += 1
-      return { ...item, dataUrl: '[image data omitted]' }
-    }
-    return item
-  })
-  return encoder.encode(serialized).length + imageCount * estimatedImageTokens
-}
 
 function isPinned(message: ContextMessage): boolean {
   return message.role === 'system' || message.pinnedToHot === true
@@ -73,47 +56,6 @@ function isResident(message: ContextMessage): boolean {
 
 function isRecalled(message: ContextMessage): boolean {
   return ['warm-recall', 'cold-summary-recall', 'cold-truth-recall', 'cold-recall'].includes(message.contextSource ?? '')
-}
-
-/** Remove incomplete tool-call blocks before sending messages to a Chat Completions provider. */
-export function normalizeToolCallSequence(messages: ContextMessage[]): ContextMessage[] {
-  const result: ContextMessage[] = []
-  let changed = false
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index]
-    if (message.role === 'tool') {
-      changed = true
-      continue
-    }
-    if (message.role !== 'assistant' || !message.tool_calls?.length) {
-      result.push(message)
-      continue
-    }
-
-    const expected = new Set(message.tool_calls.map((toolCall) => toolCall.id))
-    const responses: ContextMessage[] = []
-    let next = index + 1
-    while (next < messages.length && messages[next].role === 'tool') {
-      responses.push(messages[next])
-      next += 1
-    }
-    const received = new Set(responses.map((response) => response.tool_call_id))
-    const complete = expected.size > 0
-      && received.size === expected.size
-      && [...expected].every((id) => received.has(id))
-      && responses.every((response) => response.tool_call_id && expected.has(response.tool_call_id))
-
-    if (complete) {
-      result.push(message, ...responses)
-    } else if (message.content) {
-      changed = true
-      result.push({ ...message, tool_calls: undefined })
-    } else {
-      changed = true
-    }
-    index = next - 1
-  }
-  return changed ? result : messages
 }
 
 function refsFor(message: ContextMessage): string[] {
@@ -389,6 +331,40 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     toolDefinitionTokens: countContextTokens(tools),
   }
 }
-export function manageContext(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig): ContextResult {
+export type ContextManagementRuntime = {
+  allowCustomStrategy?: boolean
+  latestUserMessageId?: string
+}
+
+export function manageContext(
+  messages: ContextMessage[],
+  tools: object[],
+  modelConfig: ModelConfig,
+  contextConfig: ContextManagementConfig,
+  runtime: ContextManagementRuntime = {},
+): ContextResult {
+  const customMessages = applyCustomRhaiStrategy(messages, tools, modelConfig, contextConfig, runtime)
+  if (customMessages) {
+    const originalTokens = countContextTokens({ messages, tools })
+    const compressedTokens = countContextTokens({ messages: customMessages, tools })
+    return {
+      messages: customMessages.map((message) => ({
+        ...message,
+        contextLayer: 'hot',
+        contextSource: message.contextSource ?? 'live',
+        representation: message.representation ?? 'original',
+      })),
+      warmMessages: [],
+      summaryArtifacts: [],
+      metrics: metrics(originalTokens, compressedTokens, modelConfig, contextConfig, {
+        layered: contextConfig.layeredEnabled,
+        recalled: customMessages.some((message) => ['warm-recall', 'cold-summary-recall', 'cold-truth-recall', 'cold-recall'].includes(message.contextSource ?? '')),
+        filtered: false,
+        rewritten: false,
+        truncated: false,
+      }),
+      toolDefinitionTokens: countContextTokens(tools),
+    }
+  }
   return contextConfig.layeredEnabled ? manageLayered(messages, tools, modelConfig, contextConfig) : manageSingleLayer(messages, tools, modelConfig, contextConfig)
 }

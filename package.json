@@ -50,7 +50,11 @@
       "output": "dist"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "native/rhai-runner.exe"
+    ],
+    "asarUnpack": [
+      "native/rhai-runner.exe"
     ],
     "win": {
       "target": "nsis"

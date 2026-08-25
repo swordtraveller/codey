@@ -221,6 +221,7 @@ async function developProject(
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
   if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
@@ -274,7 +275,12 @@ async function developProject(
       const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
       rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
     },
-    { conversationId, signal, latestUserMessageId: userMessageId },
+    {
+      conversationId,
+      signal,
+      latestUserMessageId: userMessageId,
+      allowCustomStrategy,
+    },
     appConfig.networkAccessEnabled,
   )
   project = await saveConversationContext(
@@ -440,7 +446,7 @@ async function initializeContextDebugContext(
         getRememberedWarmMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
-  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled)
+  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, { allow: appConfig.developerMode && conversation.contextConfigOverride !== null })
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), randomUUID())
   rememberInitializedSnapshot(
     projectId,
