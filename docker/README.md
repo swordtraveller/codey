@@ -81,7 +81,7 @@ Handover 的静态文件会在镜像构建阶段重新生成；Bridge 的 `bridg
 
 ### 仅更新 handover 的步骤
 
-1. 服务器更新 handover 目录
+1. 服务器更新 handover 目录 和 package.json, pnpm-lock.yaml
 2. `sudo docker compose up -d --build caddy`
 3. `sudo docker compose ps`
 4. 浏览器 / PWA 强制刷新
