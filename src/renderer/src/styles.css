@@ -1338,3 +1338,11 @@ h1 {
     grid-template-columns: 1fr;
   }
 }
+
+.bridge-request { display: flex; gap: 8px; align-items: center; }
+.bridge-request > span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.bridge-invitation { font-family: Consolas, monospace; font-size: 11px; }
+.bridge-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.bridge-request span { display: grid; gap: 2px; }
+.bridge-request small { color: var(--colorNeutralForeground3); font-size: 11px; }

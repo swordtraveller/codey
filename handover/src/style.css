@@ -1,0 +1,20 @@
+:root { font-family: system-ui, sans-serif; color: #17212b; background:#f7f7f5; }
+* { box-sizing: border-box; }
+body { margin:0; min-width:320px; }
+.shell { max-width:1100px; margin:auto; padding:20px; }
+textarea { width:100%; border:1px solid #c9c9c3; border-radius:10px; padding:12px; font:inherit; background:white; }
+button { border:0; border-radius:10px; padding:11px 16px; background:#17212b; color:white; font:inherit; cursor:pointer; }
+button:disabled { opacity:.5; }
+.status { color:#5e6873; }
+.layout { display:grid; grid-template-columns:minmax(180px,280px) 1fr; gap:16px; margin-top:16px; }
+aside, .thread { background:white; border-radius:14px; padding:14px; box-shadow:0 1px 5px #0001; }
+.conversation { display:block; width:100%; margin:8px 0; text-align:left; background:#eef1f3; color:#17212b; }
+.thread { min-height:65vh; }
+article { padding:10px 12px; border-radius:12px; margin:9px 0; white-space:pre-wrap; }
+article.user { background:#e4f2ff; } article.assistant { background:#f0f0ed; }
+form { display:flex; gap:8px; align-items:end; margin-top:20px; } form textarea { flex:1; }
+@media (max-width: 700px) { .layout { grid-template-columns:1fr; } form { flex-direction:column; align-items:stretch; } }
+
+.fingerprint { padding: 10px 12px; border-left: 3px solid #17212b; background: #eef1f3; border-radius: 8px; }
+.fingerprint code { font-weight: 650; overflow-wrap: anywhere; }
+.fingerprint small { color: #5e6873; }

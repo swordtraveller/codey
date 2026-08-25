@@ -6,9 +6,11 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   ImageAttachment,
+  Project,
   ScreenshotSelection,
   ScreenshotSource,
 } from '../shared/types'
+import type { BridgeChannelStatus } from '../shared/bridge'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -21,6 +23,11 @@ contextBridge.exposeInMainWorld(
     getConfig: () => ipcRenderer.invoke('config:get'),
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    getBridgeStatus: (): Promise<BridgeChannelStatus | null> => ipcRenderer.invoke('bridge:status'),
+    createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
+    approveBridgeRequest: (requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus | null> => ipcRenderer.invoke('bridge:approve', requestId, devicePublicKey),
+    rejectBridgeRequest: (requestId: string): Promise<BridgeChannelStatus | null> => ipcRenderer.invoke('bridge:reject', requestId),
+    syncBridge: (): Promise<BridgeChannelStatus | null> => ipcRenderer.invoke('bridge:sync'),
     createProject: (name: string) => ipcRenderer.invoke('projects:create', name),
     addProjectFolder: (projectId: string) =>
       ipcRenderer.invoke('projects:add-folder', projectId),
@@ -90,6 +97,11 @@ contextBridge.exposeInMainWorld(
         listener(change)
       ipcRenderer.on('conversation:state-change', handler)
       return () => ipcRenderer.removeListener('conversation:state-change', handler)
+    },
+    onProjectUpdated: (listener: (project: Project) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, project: Project) => listener(project)
+      ipcRenderer.on('project:updated', handler)
+      return () => ipcRenderer.removeListener('project:updated', handler)
     },
     openContextDebug: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('context-debug:open', projectId, conversationId),

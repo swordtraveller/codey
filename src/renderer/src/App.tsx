@@ -19,6 +19,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
+import type { BridgeChannelStatus } from '../../shared/bridge'
 import type {
   AgentLimitsConfig,
   AppLanguage,
@@ -512,6 +513,11 @@ export function App(): React.JSX.Element {
   const [contextProjectId, setContextProjectId] = useState('')
   const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
   const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
+  const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false)
+  const [bridgeUrl, setBridgeUrl] = useState('http://127.0.0.1:8787')
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeChannelStatus | null>(null)
+  const [bridgeError, setBridgeError] = useState('')
+  const [bridgeBusy, setBridgeBusy] = useState(false)
   const [agentLimitsDialogOpen, setAgentLimitsDialogOpen] = useState(false)
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
@@ -627,6 +633,10 @@ export function App(): React.JSX.Element {
     }))
   }), [])
 
+  useEffect(() => window.codey.onProjectUpdated((project) => {
+    setProjects((current) => current.map((item) => item.id === project.id ? project : item))
+  }), [])
+
   useEffect(() => {
     function openDebugger(event: KeyboardEvent): void {
       if (
@@ -691,6 +701,75 @@ export function App(): React.JSX.Element {
     setConfigDraft(createSettingsDraft())
     setSettingsError('')
     setSettingsOpen(true)
+  }
+
+  async function openBridgeDialog(): Promise<void> {
+    setBridgeDialogOpen(true)
+    setBridgeError('')
+    try {
+      setBridgeStatus(await window.codey.getBridgeStatus())
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '无法读取 Bridge 状态')
+    }
+  }
+
+  async function createBridgeChannel(): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      const status = await window.codey.createBridgeChannel(bridgeUrl)
+      setBridgeStatus(status)
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '创建频道失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function approveBridgeRequest(request: BridgeChannelStatus['pendingRequests'][number]): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeStatus(await window.codey.approveBridgeRequest(request.id, request.devicePublicKey))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '审批失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function rejectBridgeRequest(requestId: string): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeStatus(await window.codey.rejectBridgeRequest(requestId))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '拒绝失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function copyBridgeInvitation(): Promise<void> {
+    if (!bridgeStatus?.invitation) return
+    try {
+      await navigator.clipboard.writeText(bridgeStatus.invitation)
+      setBridgeError('配对内容已复制')
+    } catch {
+      setBridgeError('复制失败，请手动复制')
+    }
+  }
+
+  async function syncBridgeNow(): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeStatus(await window.codey.syncBridge())
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '同步失败')
+    } finally {
+      setBridgeBusy(false)
+    }
   }
 
   function updateAppContextConfig(patch: Partial<ContextManagementConfig>): void {
@@ -1249,6 +1328,9 @@ export function App(): React.JSX.Element {
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
+          <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
+            Handover
+          </Button>
         </aside>
 
         <section className="workspace">
@@ -1787,6 +1869,52 @@ export function App(): React.JSX.Element {
               >
                 {saving ? t('saving') : t('save')}
               </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={bridgeDialogOpen} onOpenChange={(_, data) => setBridgeDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Handover</DialogTitle>
+            <DialogContent className="dialog-fields">
+              {!bridgeStatus ? (
+                <>
+                  <Field label="Bridge 地址" hint="本机可用 HTTP；远程 Bridge 必须使用 HTTPS。">
+                    <Input value={bridgeUrl} onChange={(_, data) => setBridgeUrl(data.value)} disabled={bridgeBusy} placeholder="http://127.0.0.1:8787" />
+                  </Field>
+                  <Button appearance="primary" disabled={bridgeBusy || !bridgeUrl.trim()} onClick={() => void createBridgeChannel()}>
+                    {bridgeBusy ? '创建中…' : '创建配对频道'}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <p>频道：<code>{bridgeStatus.channelId}</code></p>
+                  <p>配对有效期：{new Date(bridgeStatus.enrollmentExpiresAt).toLocaleString()}</p>
+                  <Field label="配对内容" hint="仅交给要配对的 Handover 设备；过期后请重新创建频道。">
+                    <Textarea className="bridge-invitation" readOnly value={bridgeStatus.invitation} rows={5} />
+                  </Field>
+                  <div className="bridge-actions">
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void copyBridgeInvitation()}>复制配对内容</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow()}>立即同步</Button>
+                  </div>
+                  <h3>待审批设备</h3>
+                  <p className="status">请与 Handover 上显示的设备指纹核对后再允许。</p>
+                  {bridgeStatus.pendingRequests.length === 0 ? <p className="status">暂无请求</p> : bridgeStatus.pendingRequests.map((request) => (
+                    <div className="bridge-request" key={request.id}>
+                      <span>{request.deviceName}<small>设备指纹：<code>{request.fingerprint}</code></small></span>
+                      <Button size="small" appearance="primary" disabled={bridgeBusy} onClick={() => void approveBridgeRequest(request)}>允许</Button>
+                      <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void rejectBridgeRequest(request.id)}>拒绝</Button>
+                    </div>
+                  ))}
+                  <p className="status">已批准设备：{bridgeStatus.approvedDevices.length}</p>
+                </>
+              )}
+              {bridgeError && <p className="dialog-error">{bridgeError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setBridgeDialogOpen(false)}>关闭</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>

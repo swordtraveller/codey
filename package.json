@@ -13,7 +13,10 @@
     "typecheck": "tsc -b --pretty false",
     "build": "pnpm typecheck && electron-vite build",
     "dist": "pnpm build && electron-builder",
-    "dist:dir": "pnpm build && electron-builder --dir"
+    "dist:dir": "pnpm build && electron-builder --dir",
+    "bridge:start": "node bridge/cli.mjs start",
+    "handover:dev": "vite --config handover/vite.config.ts",
+    "handover:build": "vite build --config handover/vite.config.ts"
   },
   "dependencies": {
     "@fluentui/react-components": "^9.74.5",

@@ -1,3 +1,4 @@
+import type { BridgeChannelStatus } from '../../shared/bridge'
 import type {
   AgentLimitsConfig,
   AppConfig,
@@ -26,6 +27,11 @@ declare global {
       getConfig(): Promise<AppConfig>
       saveConfig(config: AppConfig): Promise<AppConfig>
       getProjects(): Promise<Project[]>
+      getBridgeStatus(): Promise<BridgeChannelStatus | null>
+      createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
+      approveBridgeRequest(requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus | null>
+      rejectBridgeRequest(requestId: string): Promise<BridgeChannelStatus | null>
+      syncBridge(): Promise<BridgeChannelStatus | null>
       createProject(name: string): Promise<Project>
       addProjectFolder(projectId: string): Promise<Project | null>
       setProjectModelConfig(projectId: string, modelConfigId: string | null): Promise<Project>
@@ -67,6 +73,7 @@ declare global {
       ): Promise<{ status: 'opened' | 'starting' | 'stopped' | 'failed' }>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
       onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
+      onProjectUpdated(listener: (project: Project) => void): () => void
       openContextDebug(projectId: string, conversationId: string): Promise<void>
       getContextDebugOverview(projectId: string, conversationId: string): Promise<ContextDebugOverview>
       getContextDebugRevision(projectId: string, conversationId: string): Promise<string>

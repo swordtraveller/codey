@@ -44,3 +44,8 @@ agent_venv/
 
 # Native build intermediates
 native/rhai-runner/target/
+# Bridge runtime state
+bridge/.data/
+
+# Handover output
+handover/dist/
