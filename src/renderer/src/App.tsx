@@ -334,96 +334,164 @@ function FunctionCallMessage({
     </details>
   )
 }
+type ContextStrategyMode = 'default' | 'layered' | 'custom'
+
+function contextStrategyMode(value: ContextManagementConfig, customStrategyAvailable: boolean): ContextStrategyMode {
+  if (customStrategyAvailable && value.customStrategyEnabled) return 'custom'
+  return value.layeredEnabled ? 'layered' : 'default'
+}
+
 function ContextSettingsFields({
   value,
   disabled = false,
+  showCustomStrategy = false,
   onChange,
 }: {
   value: ContextManagementConfig
   disabled?: boolean
+  showCustomStrategy?: boolean
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const strategyMode = contextStrategyMode(value, showCustomStrategy)
+
+  function setStrategyMode(mode: ContextStrategyMode): void {
+    if (mode === 'custom') {
+      onChange({ layeredEnabled: false, customStrategyEnabled: true })
+      return
+    }
+    onChange({
+      layeredEnabled: mode === 'layered',
+      customStrategyEnabled: false,
+    })
+  }
 
   return (
     <div className="context-settings-fields">
-      <Switch
-        checked={value.layeredEnabled}
-        disabled={disabled}
-        label={t('layeredContext')}
-        onChange={(_, data) => onChange({ layeredEnabled: data.checked })}
-      />
-      <Switch
-        checked={value.filterEnabled}
-        disabled={disabled}
-        label={t('contextFilter')}
-        onChange={(_, data) => onChange({ filterEnabled: data.checked })}
-      />
-      <Switch
-        checked={value.rewriteEnabled}
-        disabled={disabled}
-        label={t('contextRewrite')}
-        onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
-      />
-      <Switch
-        checked={value.truncateEnabled}
-        disabled={disabled}
-        label={t('contextTruncate')}
-        onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
-      />
-      <Field label={t('outputTokenMargin')} required>
-        <Input
+      <Field label={t('contextStrategyMode')}>
+        <Select
           disabled={disabled}
-          min={1}
-          step={1000}
-          type="number"
-          value={String(value.safeOutputMargin)}
-          onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-        />
+          value={strategyMode}
+          onChange={(_, data) => setStrategyMode(data.value as ContextStrategyMode)}
+        >
+          <option value="default">{t('contextStrategyDefault')}</option>
+          <option value="layered">{t('contextStrategyLayered')}</option>
+          {showCustomStrategy && <option value="custom">{t('contextStrategyCustom')}</option>}
+        </Select>
       </Field>
-      <Field label={t('recentRounds')} required>
-        <Input
-          disabled={disabled}
-          max={20}
-          min={1}
-          type="number"
-          value={String(value.recentKeepRounds)}
-          onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
-        />
-      </Field>
-      {value.layeredEnabled && (
-        <div className="context-budgets">
-          <Field label={t('hotTokenBudget')} required>
-            <Input
+
+      {strategyMode === 'custom' ? (
+        <>
+          <Field label={t('customContextStrategyScript')}>
+            <Textarea
               disabled={disabled}
-              min={1000}
-              step={1000}
-              type="number"
-              value={String(value.hotTokenBudget)}
-              onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
+              resize="vertical"
+              value={value.customStrategyScript ?? ''}
+              onChange={(_, data) => onChange({ customStrategyScript: data.value })}
+              placeholder={t('customContextStrategyPlaceholder')}
+              rows={12}
+              onKeyDown={(event) => {
+                if (event.key !== 'Tab') return
+                event.preventDefault()
+                const textarea = event.currentTarget
+                const start = textarea.selectionStart
+                const end = textarea.selectionEnd
+                const current = value.customStrategyScript ?? ''
+                const next = `${current.slice(0, start)}\t${current.slice(end)}`
+                onChange({ customStrategyScript: next })
+                window.requestAnimationFrame(() => {
+                  textarea.selectionStart = start + 1
+                  textarea.selectionEnd = start + 1
+                })
+              }}
             />
           </Field>
-          <Field label={t('warmTokenBudget')} required>
+          <Field label={t('outputTokenMargin')} required>
             <Input
               disabled={disabled}
-              min={0}
+              min={1}
               step={1000}
               type="number"
-              value={String(value.warmTokenBudget)}
-              onChange={(_, data) => onChange({ warmTokenBudget: Number(data.value) })}
+              value={String(value.safeOutputMargin)}
+              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
             />
           </Field>
-          <Field label={t('coldRecallTokenBudget')} required>
+        </>
+      ) : (
+        <>
+          <Switch
+            checked={value.filterEnabled}
+            disabled={disabled}
+            label={t('contextFilter')}
+            onChange={(_, data) => onChange({ filterEnabled: data.checked })}
+          />
+          <Switch
+            checked={value.rewriteEnabled}
+            disabled={disabled}
+            label={t('contextRewrite')}
+            onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
+          />
+          <Switch
+            checked={value.truncateEnabled}
+            disabled={disabled}
+            label={t('contextTruncate')}
+            onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
+          />
+          <Field label={t('outputTokenMargin')} required>
             <Input
               disabled={disabled}
-              min={0}
+              min={1}
               step={1000}
               type="number"
-              value={String(value.coldRecallTokenBudget)}
-              onChange={(_, data) => onChange({ coldRecallTokenBudget: Number(data.value) })}
+              value={String(value.safeOutputMargin)}
+              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
             />
           </Field>
-        </div>
+          <Field label={t('recentRounds')} required>
+            <Input
+              disabled={disabled}
+              max={20}
+              min={1}
+              type="number"
+              value={String(value.recentKeepRounds)}
+              onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
+            />
+          </Field>
+          {strategyMode === 'layered' && (
+            <div className="context-budgets">
+              <Field label={t('hotTokenBudget')} required>
+                <Input
+                  disabled={disabled}
+                  min={1000}
+                  step={1000}
+                  type="number"
+                  value={String(value.hotTokenBudget)}
+                  onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
+                />
+              </Field>
+              <Field label={t('warmTokenBudget')} required>
+                <Input
+                  disabled={disabled}
+                  min={0}
+                  step={1000}
+                  type="number"
+                  value={String(value.warmTokenBudget)}
+                  onChange={(_, data) => onChange({ warmTokenBudget: Number(data.value) })}
+                />
+              </Field>
+              <Field label={t('coldRecallTokenBudget')} required>
+                <Input
+                  disabled={disabled}
+                  min={0}
+                  step={1000}
+                  type="number"
+                  value={String(value.coldRecallTokenBudget)}
+                  onChange={(_, data) => onChange({ coldRecallTokenBudget: Number(data.value) })}
+                />
+              </Field>
+            </div>
+          )}
+        </>
       )}
     </div>
   )
@@ -479,6 +547,11 @@ export function App(): React.JSX.Element {
   const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
+  const effectiveContextStrategyLabel = effectiveContextConfig.customStrategyEnabled
+    ? t('contextStrategyCustom')
+    : effectiveContextConfig.layeredEnabled
+      ? t('contextStrategyLayeredShort')
+      : t('contextStrategyDefault')
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
   const context = activeConversation?.context
   const contextStatus = context
@@ -1228,7 +1301,7 @@ export function App(): React.JSX.Element {
               {activeConversation && (
                 <div className="topbar-row">
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('conversation')}>
-                    {t('contextSettings')}{effectiveContextConfig.layeredEnabled ? ' · Hot/Warm/Cold' : ''}
+                    {t('contextSettings')} · {effectiveContextStrategyLabel}
                   </Button>
                   {config.developerMode && activeProject && (
                     <Button
@@ -1783,6 +1856,7 @@ export function App(): React.JSX.Element {
               />
               <ContextSettingsFields
                 disabled={interactionLocked || !contextOverrideEnabled}
+                showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
                 value={contextDraft}
                 onChange={updateContextDraft}
               />

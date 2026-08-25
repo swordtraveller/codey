@@ -31,6 +31,9 @@ export type ContextManagementConfig = {
   hotTokenBudget: number
   warmTokenBudget: number
   coldRecallTokenBudget: number
+  /** Developer-only conversation override for a custom Rhai strategy. */
+  customStrategyEnabled?: boolean
+  customStrategyScript?: string
 }
 
 export const defaultContextManagementConfig: ContextManagementConfig = {
@@ -43,6 +46,8 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   hotTokenBudget: 64_000,
   warmTokenBudget: 32_000,
   coldRecallTokenBudget: 8_000,
+  customStrategyEnabled: false,
+  customStrategyScript: '',
 }
 
 export const maximumAgentLimit = 100

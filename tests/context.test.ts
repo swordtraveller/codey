@@ -261,6 +261,81 @@ describe('manageContext', () => {
     expect(result.warmMessages.find((message) => message.id === 'tool-result')?.content).toBe('const exact = true')
   })
 
+  it('applies a custom Rhai strategy to select existing messages', () => {
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'old', role: 'assistant', content: 'Old reply' },
+      { id: 'latest', role: 'user', content: 'Latest request' },
+    ]
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({ safeOutputMargin: 100, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(content) { #{ messages: [content.messages[0], content.messages[2]] } }',
+      }),
+      { allowCustomStrategy: true, latestUserMessageId: 'latest' },
+    )
+
+    expect(result.messages.map((message) => message.id)).toEqual(['system', 'latest'])
+    expect(result.warmMessages).toEqual([])
+  })
+
+  it('allows a custom Rhai strategy to remove system and latest user messages', () => {
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'middle', role: 'assistant', content: 'Selected message' },
+      { id: 'latest', role: 'user', content: 'Latest request' },
+    ]
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({ safeOutputMargin: 100, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(content) { #{ messages: [content.messages[1]] } }',
+      }),
+      { allowCustomStrategy: true, latestUserMessageId: 'latest' },
+    )
+
+    expect(result.messages.map((message) => message.id)).toEqual(['middle'])
+  })
+  it('allows a custom Rhai strategy to remove a pinned message', () => {
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'pinned', role: 'assistant', content: 'Pinned', pinnedToHot: true },
+      { id: 'latest', role: 'user', content: 'Latest request' },
+    ]
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({ safeOutputMargin: 100, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(content) { [content.messages[0], content.messages[2]] }',
+      }),
+      { allowCustomStrategy: true, latestUserMessageId: 'latest' },
+    )
+
+    expect(result.messages.map((message) => message.id)).toEqual(['system', 'latest'])
+  })
+
+  it('ignores a custom Rhai strategy unless the host explicitly allows it', () => {
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'latest', role: 'user', content: 'Latest request' },
+    ]
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 10_000 }),
+      context({ safeOutputMargin: 100, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(content) { [] }',
+      }),
+      { allowCustomStrategy: false, latestUserMessageId: 'latest' },
+    )
+
+    expect(result.messages).toBe(messages)
+  })
+
   it('does not mutate canonical input messages', () => {
     const messages: ContextMessage[] = [
       { role: 'system', content: 'System instruction' },
