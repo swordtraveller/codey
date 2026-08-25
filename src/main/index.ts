@@ -556,16 +556,21 @@ app.whenReady().then(() => {
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
-  ipcMain.handle('bridge:approve', async (_event, requestId: string, devicePublicKey: JsonWebKey) => {
-    await bridgeHandover.approve(requestId, devicePublicKey, await getProjects())
+  ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
+    await bridgeHandover.approve(channelId, requestId, devicePublicKey, await getProjects())
     return bridgeHandover.status()
   })
-  ipcMain.handle('bridge:reject', async (_event, requestId: string) => {
-    await bridgeHandover.reject(requestId)
+  ipcMain.handle('bridge:reject', async (_event, channelId: string, requestId: string) => {
+    await bridgeHandover.reject(channelId, requestId)
     return bridgeHandover.status()
   })
-  ipcMain.handle('bridge:sync', async () => {
-    await bridgeHandover.sync(await getProjects())
+  ipcMain.handle('bridge:sync', async (_event, channelId?: string) => {
+    await bridgeHandover.sync(await getProjects(), channelId)
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:refresh', async (_event, channelId: string) => bridgeHandover.refreshEnrollment(channelId))
+  ipcMain.handle('bridge:remove', async (_event, channelId: string) => {
+    await bridgeHandover.removeChannel(channelId)
     return bridgeHandover.status()
   })
   ipcMain.handle('projects:create', async (_event, name: string) => {

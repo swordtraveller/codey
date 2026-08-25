@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, webcrypto } from 'node:crypto'
+import { createHash, randomBytes, webcrypto } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app, safeStorage } from 'electron'
@@ -24,15 +24,14 @@ type StoredBridgeChannel = {
   processedEventIds: string[]
 }
 
-type StoredBridgeState = { channel: StoredBridgeChannel | null }
-
+type StoredBridgeState = { channels: StoredBridgeChannel[] }
+type LegacyStoredBridgeState = { channel: StoredBridgeChannel | null }
 type RequestResponse = { requests: BridgePendingRequest[] }
 type BootstrapApproval = { deviceId: string }
 
 function bridgeStatePath(): string {
   return join(app.getPath('userData'), 'bridge-handover.json')
 }
-
 function base64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64url')
 }
@@ -60,7 +59,6 @@ function normalizeBridgeUrl(value: string): string {
   if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Use the Bridge server origin only')
   return url.origin
 }
-
 async function derivePairwiseKey(privateJwk: JsonWebKey, publicJwk: JsonWebKey, info: string): Promise<CryptoKey> {
   const own = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits'])
   const other = await crypto.subtle.importKey('jwk', publicJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, [])
@@ -82,32 +80,44 @@ async function dataKey(channel: StoredBridgeChannel): Promise<CryptoKey> {
 }
 
 export class BridgeHandoverService {
-  private state: StoredBridgeState = { channel: null }
+  private state: StoredBridgeState = { channels: [] }
   private loaded = false
 
   private async load(): Promise<void> {
     if (this.loaded) return
     this.loaded = true
     try {
-      const stored = JSON.parse(await readFile(bridgeStatePath(), 'utf8')) as { encrypted?: boolean; payload?: string } | StoredBridgeState
+      const stored = JSON.parse(await readFile(bridgeStatePath(), 'utf8')) as { encrypted?: boolean; payload?: string } | StoredBridgeState | LegacyStoredBridgeState
+      let decrypted: StoredBridgeState | LegacyStoredBridgeState | null = null
       if ('payload' in stored && stored.encrypted && stored.payload && safeStorage.isEncryptionAvailable()) {
-        this.state = JSON.parse(safeStorage.decryptString(Buffer.from(stored.payload, 'base64')))
-      } else if ('channel' in stored && stored.channel === null) this.state = stored
-      else if ('channel' in stored) log.warn('bridge.state.unencrypted.ignored', {})
+        decrypted = JSON.parse(safeStorage.decryptString(Buffer.from(stored.payload, 'base64'))) as StoredBridgeState | LegacyStoredBridgeState
+      } else if ('channel' in stored && stored.channel === null) {
+        decrypted = stored
+      } else if ('channels' in stored && Array.isArray(stored.channels) && stored.channels.length === 0) {
+        decrypted = stored
+      } else {
+        log.warn('bridge.state.unencrypted.ignored', {})
+      }
+      if (decrypted && 'channels' in decrypted && Array.isArray(decrypted.channels)) this.state = { channels: decrypted.channels }
+      else if (decrypted && 'channel' in decrypted) {
+        this.state = { channels: decrypted.channel ? [decrypted.channel] : [] }
+        await this.save()
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') log.warn('bridge.state.read.failed', error)
     }
   }
   private async save(): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('OS secure storage is required for Bridge pairing')
-    const raw = JSON.stringify(this.state)
-    const stored = { encrypted: true, payload: safeStorage.encryptString(raw).toString('base64') }
+    const stored = { encrypted: true, payload: safeStorage.encryptString(JSON.stringify(this.state)).toString('base64') }
     await writeFile(bridgeStatePath(), JSON.stringify(stored), 'utf8')
   }
-  private async request<T>(path: string, init: RequestInit, owner = false): Promise<T> {
-    await this.load()
-    const channel = this.state.channel
-    if (!channel) throw new Error('No Bridge channel')
+  private channel(channelId: string): StoredBridgeChannel {
+    const channel = this.state.channels.find((item) => item.channelId === channelId)
+    if (!channel) throw new Error('Bridge channel not found')
+    return channel
+  }
+  private async request<T>(channel: StoredBridgeChannel, path: string, init: RequestInit, owner = false): Promise<T> {
     const response = await fetch(`${channel.bridgeUrl}${path}`, {
       ...init,
       headers: { 'content-type': 'application/json', ...(owner ? { authorization: `Bearer ${channel.ownerToken}` } : {}), ...(init.headers ?? {}) },
@@ -116,17 +126,23 @@ export class BridgeHandoverService {
     if (!response.ok) throw new Error(result.error || 'Bridge request failed')
     return result
   }
-
-  async status(): Promise<BridgeChannelStatus | null> {
-    await this.load(); const channel = this.state.channel
-    if (!channel) return null
-    const requests = await this.request<RequestResponse>(`/v1/channels/${channel.channelId}/requests`, { method: 'GET' }, true).catch(() => ({ requests: [] }))
+  private async channelStatus(channel: StoredBridgeChannel): Promise<BridgeChannelStatus> {
+    const requests = await this.request<RequestResponse>(channel, `/v1/channels/${channel.channelId}/requests`, { method: 'GET' }, true).catch(() => ({ requests: [] }))
+    const devices = await this.request<{ devices: Array<{ id: string; name: string; approvedAt: string }> }>(channel, `/v1/channels/${channel.channelId}/devices`, { method: 'GET' }, true).catch(() => ({ devices: [] }))
     return {
-      channelId: channel.channelId, bridgeUrl: channel.bridgeUrl, enrollmentExpiresAt: channel.enrollmentExpiresAt,
-      invitation: invitationUrl(channel), pendingRequests: requests.requests.map((request) => ({ ...request, fingerprint: publicKeyFingerprint(request.devicePublicKey) })), approvedDevices: (await this.request<{ devices: Array<{ id: string; name: string; approvedAt: string }> }>(`/v1/channels/${channel.channelId}/devices`, { method: 'GET' }, true).catch(() => ({ devices: [] }))).devices,
+      channelId: channel.channelId,
+      bridgeUrl: channel.bridgeUrl,
+      enrollmentExpiresAt: channel.enrollmentExpiresAt,
+      invitation: invitationUrl(channel),
+      pendingRequests: requests.requests.map((request) => ({ ...request, fingerprint: publicKeyFingerprint(request.devicePublicKey) })),
+      approvedDevices: devices.devices,
     }
   }
 
+  async status(): Promise<BridgeChannelStatus[]> {
+    await this.load()
+    return Promise.all(this.state.channels.map((channel) => this.channelStatus(channel)))
+  }
   async createChannel(bridgeUrlInput: string): Promise<BridgeChannelStatus> {
     await this.load()
     if (!safeStorage.isEncryptionAvailable()) throw new Error('OS secure storage is required for Bridge pairing')
@@ -138,52 +154,77 @@ export class BridgeHandoverService {
     const response = await fetch(`${bridgeUrl}/v1/channels`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ownerToken }) })
     const created = await response.json() as { channelId?: string; enrollmentSecret?: string; enrollmentExpiresAt?: string; error?: string }
     if (!response.ok || !created.channelId || !created.enrollmentSecret || !created.enrollmentExpiresAt) throw new Error(created.error || 'Could not create channel')
-    this.state.channel = { bridgeUrl, channelId: created.channelId, ownerToken, enrollmentSecret: created.enrollmentSecret, enrollmentExpiresAt: created.enrollmentExpiresAt, codeyPrivateKey, codeyPublicKey, dataKey: base64url(randomBytes(32)), processedEventIds: [] }
+    const channel: StoredBridgeChannel = { bridgeUrl, channelId: created.channelId, ownerToken, enrollmentSecret: created.enrollmentSecret, enrollmentExpiresAt: created.enrollmentExpiresAt, codeyPrivateKey, codeyPublicKey, dataKey: base64url(randomBytes(32)), processedEventIds: [] }
+    this.state.channels.push(channel)
     await this.save()
-    return (await this.status())!
+    return this.channelStatus(channel)
   }
-
-  async approve(requestId: string, devicePublicKey: JsonWebKey, projects: Project[]): Promise<void> {
-    await this.load(); const channel = this.state.channel
-    if (!channel) throw new Error('No Bridge channel')
+  async refreshEnrollment(channelId: string): Promise<BridgeChannelStatus> {
+    await this.load()
+    const channel = this.channel(channelId)
+    const refreshed = await this.request<{ enrollmentSecret: string; enrollmentExpiresAt: string }>(channel, `/v1/channels/${channel.channelId}/enrollment/refresh`, { method: 'POST', body: '{}' }, true)
+    channel.enrollmentSecret = refreshed.enrollmentSecret
+    channel.enrollmentExpiresAt = refreshed.enrollmentExpiresAt
+    await this.save()
+    return this.channelStatus(channel)
+  }
+  async removeChannel(channelId: string): Promise<void> {
+    await this.load()
+    const before = this.state.channels.length
+    this.state.channels = this.state.channels.filter((channel) => channel.channelId !== channelId)
+    if (this.state.channels.length === before) throw new Error('Bridge channel not found')
+    await this.save()
+  }
+  async approve(channelId: string, requestId: string, devicePublicKey: JsonWebKey, projects: Project[]): Promise<void> {
+    await this.load()
+    const channel = this.channel(channelId)
     const key = await derivePairwiseKey(channel.codeyPrivateKey, devicePublicKey, `${channel.channelId}:${requestId}`)
     const deviceToken = base64url(randomBytes(32))
     const keyEnvelope = await aesEncrypt(key, { dataKey: channel.dataKey, deviceToken }, `${channel.channelId}:${requestId}`)
-    await this.request<BootstrapApproval>(`/v1/channels/${channel.channelId}/requests/${requestId}/approve`, { method: 'POST', body: JSON.stringify({ keyEnvelope, deviceTokenHash: createHash('sha256').update(deviceToken).digest('hex') }) }, true)
-    await this.sync(projects)
+    await this.request<BootstrapApproval>(channel, `/v1/channels/${channel.channelId}/requests/${requestId}/approve`, { method: 'POST', body: JSON.stringify({ keyEnvelope, deviceTokenHash: createHash('sha256').update(deviceToken).digest('hex') }) }, true)
+    await this.syncChannel(channel, projects)
   }
-  async reject(requestId: string): Promise<void> {
-    await this.load(); const channel = this.state.channel; if (!channel) return
-    await this.request(`/v1/channels/${channel.channelId}/requests/${requestId}/reject`, { method: 'POST', body: '{}' }, true)
+  async reject(channelId: string, requestId: string): Promise<void> {
+    await this.load()
+    const channel = this.channel(channelId)
+    await this.request(channel, `/v1/channels/${channel.channelId}/requests/${requestId}/reject`, { method: 'POST', body: '{}' }, true)
   }
-  async sync(projects: Project[]): Promise<void> {
-    await this.load(); const channel = this.state.channel; if (!channel) return
+  async sync(projects: Project[], channelId?: string): Promise<void> {
+    await this.load()
+    const channels = channelId ? [this.channel(channelId)] : this.state.channels
+    for (const channel of channels) await this.syncChannel(channel, projects)
+  }
+  private async syncChannel(channel: StoredBridgeChannel, projects: Project[]): Promise<void> {
     const key = await dataKey(channel)
     const catalog: HandoverCatalog = { updatedAt: new Date().toISOString(), projects: projects.map((project) => ({ id: project.id, name: project.name, conversations: project.conversations.map((conversation) => ({ id: conversation.id, title: conversation.title, updatedAt: conversation.messages.at(-1)?.createdAt })) })) }
-    await this.putSnapshot('catalog', await aesEncrypt(key, catalog, `${channel.channelId}:catalog`))
+    await this.putSnapshot(channel, 'catalog', await aesEncrypt(key, catalog, `${channel.channelId}:catalog`))
     for (const project of projects) for (const conversation of project.conversations) {
       const safe: HandoverConversation = { projectId: project.id, conversationId: conversation.id, title: conversation.title, updatedAt: conversation.messages.at(-1)?.createdAt ?? new Date().toISOString(), messages: conversation.messages.map((message) => ({ id: message.id, role: message.role, content: message.content, blocks: message.blocks?.filter((block): block is { type: 'content'; content: string } => block.type === 'content'), createdAt: message.createdAt })) }
-      await this.putSnapshot(`conversation-${conversation.id}`, await aesEncrypt(key, safe, `${channel.channelId}:conversation-${conversation.id}`))
+      await this.putSnapshot(channel, `conversation-${conversation.id}`, await aesEncrypt(key, safe, `${channel.channelId}:conversation-${conversation.id}`))
     }
   }
-  private async putSnapshot(name: string, envelope: BridgeEnvelope): Promise<void> {
-    const channel = this.state.channel!; await this.request(`/v1/channels/${channel.channelId}/snapshots/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ envelope }) }, true)
+  private async putSnapshot(channel: StoredBridgeChannel, name: string, envelope: BridgeEnvelope): Promise<void> {
+    await this.request(channel, `/v1/channels/${channel.channelId}/snapshots/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ envelope }) }, true)
   }
   async processEvents(process: (message: HandoverUserMessage) => Promise<boolean>): Promise<void> {
-    await this.load(); const channel = this.state.channel; if (!channel) return
-    const result = await this.request<{ events: Array<{ id: string; envelope: BridgeEnvelope }> }>(`/v1/channels/${channel.channelId}/events`, { method: 'GET' }, true)
-    const key = await dataKey(channel)
-    for (const event of result.events) {
-      if (channel.processedEventIds.includes(event.id)) continue
+    await this.load()
+    for (const channel of this.state.channels) {
       try {
-        const message = await aesDecrypt<HandoverUserMessage>(key, event.envelope, `${channel.channelId}:event:${event.id}`)
-        if (!message || typeof message.content !== 'string' || message.content.trim().length === 0 || message.content.length > MAX_REMOTE_MESSAGE_CHARS || !message.projectId || !message.conversationId || !message.clientMessageId) throw new Error('Invalid handover message')
-        if (await process(message)) {
-          await this.request(`/v1/channels/${channel.channelId}/events/${event.id}/ack`, { method: 'POST', body: '{}' }, true)
-          channel.processedEventIds = [...channel.processedEventIds, event.id].slice(-50)
-          await this.save()
+        const result = await this.request<{ events: Array<{ id: string; envelope: BridgeEnvelope }> }>(channel, `/v1/channels/${channel.channelId}/events`, { method: 'GET' }, true)
+        const key = await dataKey(channel)
+        for (const event of result.events) {
+          if (channel.processedEventIds.includes(event.id)) continue
+          try {
+            const message = await aesDecrypt<HandoverUserMessage>(key, event.envelope, `${channel.channelId}:event:${event.id}`)
+            if (!message || typeof message.content !== 'string' || message.content.trim().length === 0 || message.content.length > MAX_REMOTE_MESSAGE_CHARS || !message.projectId || !message.conversationId || !message.clientMessageId) throw new Error('Invalid handover message')
+            if (await process(message)) {
+              await this.request(channel, `/v1/channels/${channel.channelId}/events/${event.id}/ack`, { method: 'POST', body: '{}' }, true)
+              channel.processedEventIds = [...channel.processedEventIds, event.id].slice(-50)
+              await this.save()
+            }
+          } catch (error) { log.warn('bridge.event.process.failed', { channelId: channel.channelId, error }) }
         }
-      } catch (error) { log.warn('bridge.event.process.failed', error) }
+      } catch (error) { log.warn('bridge.channel.poll.failed', { channelId: channel.channelId, error }) }
     }
   }
 }

@@ -49,3 +49,6 @@ bridge/.data/
 
 # Handover output
 handover/dist/
+
+# Local packaging artifacts
+*.zip

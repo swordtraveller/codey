@@ -24,3 +24,8 @@ pnpm dist
 ```
 
 Build artifacts are written to `dist/`.
+
+
+## Public deployment
+
+Use the Compose deployment package in [docker/README.md](docker/README.md).

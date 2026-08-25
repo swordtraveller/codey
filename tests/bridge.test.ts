@@ -43,13 +43,25 @@ describe('Bridge relay', () => {
     })
     expect(deniedJoin.status).toBe(403)
 
-    const joined = await request<{ requestId: string; joinTicket: string }>(`/v1/channels/${channelId}/join`, {
+    const ownerHeaders = { authorization: `Bearer ${ownerToken}`, 'content-type': 'application/json' }
+    const refreshed = await request<{ enrollmentSecret: string; enrollmentExpiresAt: string }>(`/v1/channels/${channelId}/enrollment/refresh`, {
+      method: 'POST', headers: ownerHeaders, body: '{}',
+    })
+    expect(refreshed.status).toBe(200)
+    expect(refreshed.body.enrollmentSecret).not.toBe(created.body.enrollmentSecret)
+    expect(new Date(refreshed.body.enrollmentExpiresAt).getTime()).toBeGreaterThan(Date.now())
+
+    const oldSecretJoin = await request<{ error: string }>(`/v1/channels/${channelId}/join`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enrollmentSecret: created.body.enrollmentSecret, deviceName: 'Handover PWA', devicePublicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' } }),
     })
-    expect(joined.status).toBe(202)
+    expect(oldSecretJoin.status).toBe(403)
 
-    const ownerHeaders = { authorization: `Bearer ${ownerToken}`, 'content-type': 'application/json' }
+    const joined = await request<{ requestId: string; joinTicket: string }>(`/v1/channels/${channelId}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enrollmentSecret: refreshed.body.enrollmentSecret, deviceName: 'Handover PWA', devicePublicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' } }),
+    })
+    expect(joined.status).toBe(202)
     const envelope = { iv: 'a'.repeat(16), ciphertext: 'b'.repeat(32) }
     const pendingRead = await request<{ error: string }>(`/v1/channels/${channelId}/snapshots/catalog`, { headers: { authorization: 'Bearer unknown' } })
     expect(pendingRead.status).toBe(401)

@@ -27,11 +27,13 @@ declare global {
       getConfig(): Promise<AppConfig>
       saveConfig(config: AppConfig): Promise<AppConfig>
       getProjects(): Promise<Project[]>
-      getBridgeStatus(): Promise<BridgeChannelStatus | null>
+      getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
-      approveBridgeRequest(requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus | null>
-      rejectBridgeRequest(requestId: string): Promise<BridgeChannelStatus | null>
-      syncBridge(): Promise<BridgeChannelStatus | null>
+      approveBridgeRequest(channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]>
+      rejectBridgeRequest(channelId: string, requestId: string): Promise<BridgeChannelStatus[]>
+      syncBridge(channelId?: string): Promise<BridgeChannelStatus[]>
+      refreshBridgeEnrollment(channelId: string): Promise<BridgeChannelStatus>
+      removeBridgeChannel(channelId: string): Promise<BridgeChannelStatus[]>
       createProject(name: string): Promise<Project>
       addProjectFolder(projectId: string): Promise<Project | null>
       setProjectModelConfig(projectId: string, modelConfigId: string | null): Promise<Project>

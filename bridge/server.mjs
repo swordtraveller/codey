@@ -125,6 +125,14 @@ async function route(req, res) {
     if (parts[0] !== 'v1' || parts[1] !== 'channels' || !parts[2]) return fail(res, 404, 'Not found')
     const channel = channelFor(res, parts[2]); if (!channel) return
     const action = parts.slice(3)
+    if (req.method === 'POST' && action[0] === 'enrollment' && action[1] === 'refresh') {
+      if (!owner(res, req, channel)) return
+      const enrollmentSecret = randomToken()
+      channel.enrollmentHash = digest(enrollmentSecret)
+      channel.enrollmentExpiresAt = now() + ENROLLMENT_TTL_MS
+      await persist()
+      return json(res, 200, { enrollmentSecret, enrollmentExpiresAt: new Date(channel.enrollmentExpiresAt).toISOString() })
+    }
     if (req.method === 'POST' && action[0] === 'join') {
       const input = await body(req)
       if (!limit(res, `join:${parts[2]}:${req.socket.remoteAddress || ''}`, 1)) return

@@ -1,0 +1,59 @@
+name: codey-handover
+
+services:
+  bridge-data-init:
+    image: busybox:1.36
+    user: "0:0"
+    restart: "no"
+    volumes:
+      - bridge-data:/var/lib/codey-bridge
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        chown -R 1000:1000 /var/lib/codey-bridge
+        chmod 700 /var/lib/codey-bridge
+
+  bridge:
+    build:
+      context: .
+      target: bridge
+    restart: unless-stopped
+    environment:
+      BRIDGE_HOST: 0.0.0.0
+      BRIDGE_DATA_PATH: /var/lib/codey-bridge/bridge.json
+    expose:
+      - "8787"
+    volumes:
+      - bridge-data:/var/lib/codey-bridge
+    depends_on:
+      bridge-data-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    build:
+      context: .
+      target: handover
+    restart: unless-stopped
+    environment:
+      BRIDGE_DOMAIN: ${BRIDGE_DOMAIN:?Set BRIDGE_DOMAIN in .env}
+      HANDOVER_DOMAIN: ${HANDOVER_DOMAIN:?Set HANDOVER_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      bridge:
+        condition: service_healthy
+
+volumes:
+  bridge-data:
+  caddy-data:
+  caddy-config:

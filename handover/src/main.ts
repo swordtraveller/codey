@@ -214,5 +214,9 @@ async function restore(): Promise<void> {
   }
   render()
 }
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => undefined)
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => undefined)
+  })
+}
 void restore().catch((error) => { state.status = error instanceof Error ? error.message : '初始化失败'; render() })
