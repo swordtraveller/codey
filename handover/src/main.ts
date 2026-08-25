@@ -22,12 +22,13 @@ let conversationRefreshTimer: ReturnType<typeof setInterval> | undefined
 let conversationRefreshInFlight = false
 let app: HandoverApp | undefined
 let composerDraft = ''
+let markdownModulePromise: Promise<typeof import('./markdown')> | undefined
 
 function openDb(): Promise<IDBDatabase> { return new Promise((resolve, reject) => { const request = indexedDB.open(DB_NAME, 1); request.onupgradeneeded = () => request.result.createObjectStore(STORE_NAME); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error ?? new Error('无法打开本地存储')) }) }
 async function loadPersisted(): Promise<void> { const db = await openDb(); const value = await new Promise<Persisted | undefined>((resolve, reject) => { const request = db.transaction(STORE_NAME).objectStore(STORE_NAME).get(STATE_KEY); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) }); db.close(); if (value) Object.assign(state, value) }
 async function savePersisted(): Promise<void> { const { status: _status, catalog: _catalog, conversation: _conversation, selectedProjectId: _project, selectedConversationId: _conversationId, pendingUserMessages: _pendingUserMessages, visibleMessageCount: _visible, collapsedProjects: _collapsedProjects, mobileSidebarOpen: _mobile, loadingOlder: _loading, ...persisted } = state; const db = await openDb(); await new Promise<void>((resolve, reject) => { const request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(persisted, STATE_KEY); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error) }); db.close() }
 function b64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '') }
-function unb64(value: string): Uint8Array { const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4); return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)) }
+function unb64(value: string): Uint8Array<ArrayBuffer> { const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4); return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)) as Uint8Array<ArrayBuffer> }
 function localHost(hostname: string): boolean { return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1' }
 function normalizeBridgeUrl(value: string): string { const url = new URL(value); if (!['http:', 'https:'].includes(url.protocol) || (url.protocol === 'http:' && !localHost(url.hostname))) throw new Error('远程 Bridge 必须使用 HTTPS'); if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('配对内容中的 Bridge 地址无效'); return url.origin }
 async function api<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> { const response = await fetch(`${state.invitation?.bridge ?? ''}${path}`, { ...init, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(init.headers ?? {}) } }); const result = await response.json() as T & { error?: string }; if (!response.ok) throw new Error(result.error || 'Bridge 请求失败'); return result }
@@ -43,7 +44,7 @@ async function waitApproval(): Promise<void> { for (let i = 0; i < 40; i += 1) {
 async function loadCatalog(): Promise<void> { const result = await api<{ envelope: BridgeEnvelope }>(`/v1/channels/${state.invitation!.channel}/snapshots/catalog`, {}, state.deviceToken); state.catalog = await decrypt(await dataKey(), result.envelope, `${state.invitation!.channel}:catalog`); state.conversation = undefined; startConversationRefresh() }
 function reconcilePendingUserMessages(conversation: HandoverConversation): boolean { const before = state.pendingUserMessages.length; state.pendingUserMessages = state.pendingUserMessages.filter((pending) => !conversation.messages.some((message) => pending.projectId === conversation.projectId && pending.conversationId === conversation.conversationId && message.role === 'user' && message.content === pending.content && Date.parse(message.createdAt ?? '') >= pending.sentAt - 5_000)); return state.pendingUserMessages.length !== before }
 function pendingMessagesForSelectedConversation(): HandoverConversation['messages'] { return state.pendingUserMessages.filter((pending) => pending.projectId === state.selectedProjectId && pending.conversationId === state.selectedConversationId).map((pending) => ({ id: `pending-${pending.id}`, role: 'user' as const, content: pending.content, createdAt: new Date(pending.sentAt).toISOString() })) }
-async function loadConversation(projectId: string, conversationId: string): Promise<void> { state.selectedProjectId = projectId; state.selectedConversationId = conversationId; state.visibleMessageCount = 5; state.conversation = undefined; state.status = '正在加载会话…'; app?.requestUpdate(); const result = await api<{ envelope: BridgeEnvelope }>(`/v1/channels/${state.invitation!.channel}/snapshots/conversation-${encodeURIComponent(conversationId)}`, {}, state.deviceToken); if (state.selectedProjectId !== projectId || state.selectedConversationId !== conversationId) return; state.conversation = await decrypt(await dataKey(), result.envelope, `${state.invitation!.channel}:conversation-${conversationId}`); reconcilePendingUserMessages(state.conversation); state.status = '已连接'; app?.requestUpdate(); await app?.scrollToLatest() }
+async function loadConversation(projectId: string, conversationId: string): Promise<void> { state.selectedProjectId = projectId; state.selectedConversationId = conversationId; state.visibleMessageCount = 5; state.conversation = undefined; state.status = '正在加载会话…'; app?.requestUpdate(); const result = await api<{ envelope: BridgeEnvelope }>(`/v1/channels/${state.invitation!.channel}/snapshots/conversation-${encodeURIComponent(conversationId)}`, {}, state.deviceToken); if (state.selectedProjectId !== projectId || state.selectedConversationId !== conversationId) return; const conversation = await decrypt<HandoverConversation>(await dataKey(), result.envelope, `${state.invitation!.channel}:conversation-${conversationId}`); state.conversation = conversation; reconcilePendingUserMessages(conversation); state.status = '已连接'; app?.requestUpdate(); await app?.scrollToLatest() }
 async function refreshSelectedConversation(): Promise<void> { if (conversationRefreshInFlight || !state.invitation || !state.deviceToken || !state.dataKey || !state.selectedProjectId || !state.selectedConversationId) return; const projectId = state.selectedProjectId; const conversationId = state.selectedConversationId; conversationRefreshInFlight = true; try { const result = await api<{ envelope: BridgeEnvelope }>(`/v1/channels/${state.invitation.channel}/snapshots/conversation-${encodeURIComponent(conversationId)}`, {}, state.deviceToken); const conversation = await decrypt<HandoverConversation>(await dataKey(), result.envelope, `${state.invitation.channel}:conversation-${conversationId}`); if (state.selectedProjectId === projectId && state.selectedConversationId === conversationId) { const previous = state.conversation; const previousLastMessage = previous?.messages.at(-1); const nextLastMessage = conversation.messages.at(-1); const changed = !previous || previous.updatedAt !== conversation.updatedAt || previous.messages.length !== conversation.messages.length || previousLastMessage?.id !== nextLastMessage?.id; state.conversation = conversation; const pendingReconciled = reconcilePendingUserMessages(conversation); if (changed || pendingReconciled) app?.requestUpdate() } } catch { /* 后台刷新失败时保留当前界面，下一轮继续尝试。 */ } finally { conversationRefreshInFlight = false } }
 function startConversationRefresh(): void { if (conversationRefreshTimer !== undefined) return; conversationRefreshTimer = setInterval(() => { void refreshSelectedConversation() }, 3000) }
 async function sendMessage(rawContent: string): Promise<void> { const content = rawContent.trim(); if (!content || !state.selectedProjectId || !state.selectedConversationId) return; const id = crypto.randomUUID(); const projectId = state.selectedProjectId; const conversationId = state.selectedConversationId; const envelope = await encrypt(await dataKey(), { projectId, conversationId, clientMessageId: id, content }, `${state.invitation!.channel}:event:${id}`); await api(`/v1/channels/${state.invitation!.channel}/events`, { method: 'POST', body: JSON.stringify({ id, envelope }) }, state.deviceToken); state.pendingUserMessages.push({ projectId, conversationId, id, content, sentAt: Date.now() }); state.status = '消息已排队，等待 Codey 处理'; state.visibleMessageCount = Math.max(state.visibleMessageCount, 5); app?.requestUpdate(); await app?.scrollToLatest() }
@@ -55,12 +56,27 @@ function isProjectCollapsed(projectId: string): boolean { return state.collapsed
 function toggleProject(projectId: string): void { state.collapsedProjects = { ...state.collapsedProjects, [projectId]: !isProjectCollapsed(projectId) }; app?.requestUpdate() }
 function conversationList(): TemplateResult { return html`${repeat(state.catalog?.projects ?? [], (project) => { const collapsed = isProjectCollapsed(project.id); return html`<section class="project"><button class="project-toggle" aria-expanded=${String(!collapsed)} @click=${() => toggleProject(project.id)}><span class="project-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span><span class="project-name">${project.name}</span><span class="project-count">${project.conversations.length}</span></button>${collapsed ? nothing : html`<div class="project-conversations">${repeat(project.conversations, (conversation) => html`<button class="conversation ${state.selectedConversationId === conversation.id ? 'selected' : ''}" @click=${() => { state.mobileSidebarOpen = false; void loadConversation(project.id, conversation.id).catch(showError) }}>${conversation.title}</button>`)}</div>`}</section>` })}` }
 function showError(error: unknown, fallback = '操作失败'): void { state.status = error instanceof Error ? error.message : fallback; app?.requestUpdate() }
+function deferredMarkdownContent(content: string): HTMLElement {
+  const container = document.createElement('div')
+  container.className = 'markdown-content'
+  container.textContent = content
+  markdownModulePromise ??= import('./markdown')
+  void markdownModulePromise.then(({ renderMarkdownContent }) => {
+    if (!container.isConnected) return
+    const root = container.getRootNode()
+    const scroller = root instanceof ShadowRoot ? root.querySelector<HTMLElement>('.message-scroll') : null
+    const stickToBottom = scroller ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 : false
+    renderMarkdownContent(container, content)
+    if (stickToBottom && scroller) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight })
+  }).catch(() => undefined)
+  return container
+}
 
 
 class HandoverThread extends HTMLElement {
   private readonly header: HTMLElement
   private readonly count: HTMLElement
-  private readonly scroll: HTMLElement
+  private readonly scrollContainer: HTMLElement
   private readonly input: HTMLTextAreaElement
   private readonly sendButton: HTMLButtonElement
   private renderedConversationKey = ''
@@ -79,9 +95,31 @@ class HandoverThread extends HTMLElement {
         small { display: block; margin-top: 4px; color: #8894a4; }
         .message-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 18px 20px; overscroll-behavior: contain; }
         .older-hint { position: sticky; top: 0; z-index: 1; width: fit-content; margin: -5px auto 10px; padding: 5px 10px; border-radius: 99px; color: #64748b; background: #f1f5f9; font-size: .75rem; }
-        .message { max-width: min(780px, 92%); margin: 9px 0; padding: 10px 13px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
-        .message strong { display: block; margin-bottom: 4px; font-size: .76rem; color: #64748b; }
-        .message p { line-height: 1.5; }
+        .message { max-width: min(780px, 92%); margin: 9px 0; padding: 10px 13px; border-radius: 14px; overflow-wrap: anywhere; }
+        .message-author { display: block; margin-bottom: 4px; font-size: .76rem; color: #64748b; }
+        .markdown-content { min-width: 0; max-width: 100%; line-height: 1.55; }
+        .markdown-content > :first-child { margin-top: 0; }
+        .markdown-content > :last-child { margin-bottom: 0; }
+        .markdown-content p, .markdown-content ul, .markdown-content ol, .markdown-content blockquote, .markdown-content pre, .markdown-content .markdown-table-scroll { margin: .65em 0; }
+        .markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4, .markdown-content h5, .markdown-content h6 { margin: .85em 0 .45em; line-height: 1.3; }
+        .markdown-content h1 { font-size: 1.35em; }
+        .markdown-content h2 { font-size: 1.2em; }
+        .markdown-content h3 { font-size: 1.08em; }
+        .markdown-content ul, .markdown-content ol { padding-left: 1.5em; }
+        .markdown-content blockquote { padding-left: .85em; border-left: 3px solid #94a3b8; color: #526174; }
+        .markdown-content a { color: #175fc2; }
+        .markdown-content code { padding: .12em .35em; border-radius: 5px; background: #dce3ea; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
+        .markdown-content pre { max-width: 100%; overflow-x: auto; padding: 10px 12px; border-radius: 9px; background: #1f2937; color: #f8fafc; }
+        .markdown-content pre code { padding: 0; background: transparent; color: inherit; }
+        .markdown-table-scroll { max-width: 100%; overflow-x: auto; }
+        .markdown-content table { width: max-content; min-width: 100%; border-collapse: collapse; }
+        .markdown-content th, .markdown-content td { padding: 6px 9px; border: 1px solid #cbd5e1; text-align: left; }
+        .markdown-content th { background: #e7ebf0; }
+        .markdown-content img { max-width: 100%; height: auto; border-radius: 8px; }
+        .markdown-content .task-list-container { padding-left: .35em; list-style: none; }
+        .markdown-content .task-list-item { display: flex; align-items: baseline; gap: .45em; }
+        .markdown-content .task-list-item-checkbox { flex: 0 0 auto; margin: 0; }
+        .markdown-content .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .2em 0; }
         .message.user { margin-left: auto; background: #e4f2ff; }
         .message.assistant { margin-right: auto; background: #f1f3f5; }
         .empty-thread { flex: 1; display: grid; place-items: center; color: #8792a1; }
@@ -102,13 +140,13 @@ class HandoverThread extends HTMLElement {
     `
     this.header = shadow.querySelector('h2')!
     this.count = shadow.querySelector('small')!
-    this.scroll = shadow.querySelector('.message-scroll')!
+    this.scrollContainer = shadow.querySelector('.message-scroll')!
     this.input = shadow.querySelector('textarea')!
     this.sendButton = shadow.querySelector('button')!
     this.input.value = composerDraft
     this.input.addEventListener('input', () => { composerDraft = this.input.value })
-    this.scroll.addEventListener('scroll', () => {
-      if (this.scroll.scrollTop <= 40) this.dispatchEvent(new CustomEvent('thread-load-older', { bubbles: true, composed: true }))
+    this.scrollContainer.addEventListener('scroll', () => {
+      if (this.scrollContainer.scrollTop <= 40) this.dispatchEvent(new CustomEvent('thread-load-older', { bubbles: true, composed: true }))
     })
     shadow.querySelector('form')!.addEventListener('submit', (event) => {
       event.preventDefault()
@@ -125,44 +163,41 @@ class HandoverThread extends HTMLElement {
     this.setComposerDisabled(!conversation)
     const changed = key !== this.renderedConversationKey || visibleCount !== this.renderedVisibleCount || loadingOlder !== this.renderedLoadingOlder
     if (!changed) return
-    const oldHeight = this.scroll.scrollHeight
-    const oldTop = this.scroll.scrollTop
+    const oldHeight = this.scrollContainer.scrollHeight
+    const oldTop = this.scrollContainer.scrollTop
     const visible = messages.slice(-Math.max(1, visibleCount))
-    this.scroll.replaceChildren()
+    this.scrollContainer.replaceChildren()
     const olderCount = Math.max(0, messages.length - visible.length)
     if (!conversation) {
       const empty = document.createElement('div')
       empty.className = 'empty-thread'
       empty.innerHTML = '<p>消息会显示在这里。</p>'
-      this.scroll.append(empty)
+      this.scrollContainer.append(empty)
     } else {
       if (olderCount > 0) {
         const hint = document.createElement('div')
         hint.className = 'older-hint'
         hint.textContent = loadingOlder ? '正在加载更早消息…' : '上滑加载更早消息'
-        this.scroll.append(hint)
+        this.scrollContainer.append(hint)
       }
       for (const message of visible) {
         const article = document.createElement('article')
         article.className = `message ${message.role}`
         const author = document.createElement('strong')
+        author.className = 'message-author'
         author.textContent = message.role === 'user' ? '你' : 'Codey'
         article.append(author)
-        const content = document.createElement('p')
-        content.textContent = message.content
-        article.append(content)
+        if (message.content) article.append(deferredMarkdownContent(message.content))
         for (const block of message.blocks ?? []) {
-          const blockContent = document.createElement('p')
-          blockContent.textContent = block.content
-          article.append(blockContent)
+          if (block.content) article.append(deferredMarkdownContent(block.content))
         }
-        this.scroll.append(article)
+        this.scrollContainer.append(article)
       }
     }
     this.renderedConversationKey = key
     this.renderedVisibleCount = visibleCount
     this.renderedLoadingOlder = loadingOlder
-    if (loadingOlder) requestAnimationFrame(() => { this.scroll.scrollTop = oldTop + (this.scroll.scrollHeight - oldHeight) })
+    if (loadingOlder) requestAnimationFrame(() => { this.scrollContainer.scrollTop = oldTop + (this.scrollContainer.scrollHeight - oldHeight) })
   }
 
   disconnectedCallback(): void { composerDraft = this.input.value }
@@ -175,7 +210,7 @@ class HandoverThread extends HTMLElement {
     if (this.input.disabled !== disabled) this.input.disabled = disabled
     if (this.sendButton.disabled !== disabled) this.sendButton.disabled = disabled
   }
-  async scrollToLatest(): Promise<void> { await Promise.resolve(); this.scroll.scrollTop = this.scroll.scrollHeight }
+  async scrollToLatest(): Promise<void> { await Promise.resolve(); this.scrollContainer.scrollTop = this.scrollContainer.scrollHeight }
 }
 customElements.define('handover-thread', HandoverThread)
 
