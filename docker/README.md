@@ -79,6 +79,13 @@ docker image prune -f
 
 Handover 的静态文件会在镜像构建阶段重新生成；Bridge 的 `bridge.json` 不会因上述操作而清空。
 
+### 仅更新 handover 的步骤
+
+1. 服务器更新 handover 目录
+2. `sudo docker compose up -d --build caddy`
+3. `sudo docker compose ps`
+4. 浏览器 / PWA 强制刷新
+
 ## 备份与恢复要点
 
 `bridge-data` 保存频道、设备授权和加密载荷，是必须备份的运行数据。建议在低峰期先停止 Bridge，再备份命名卷：

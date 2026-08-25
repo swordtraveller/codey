@@ -47,13 +47,20 @@ h2 { font-size: .9rem; font-weight: 700; }
 .fingerprint code { font-weight: 650; overflow-wrap: anywhere; }
 .fingerprint small { color: #5e6873; }
 .mobile-only { display: none; }
+.drawer-peek { display: none; }
 wa-drawer { --size: min(88vw, 340px); }
 wa-drawer .project { padding: 8px 14px; }
 @media (max-width: 700px) {
   .shell { padding: 12px; }
   .app-header { min-height: 52px; }
+  .title { padding-left: 40px; }
   .mobile-only { display: inline-flex; }
-  .app-header > wa-button { font-size: .82rem; }
+  .drawer-peek { position: fixed; z-index: 2; left: 0; top: 12px; display: flex; width: 34px; min-height: 52px; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 10px 6px; border: 1px solid #dbe4ef; border-left: 0; border-radius: 0 14px 14px 0; color: #174ea6; background: #fff; box-shadow: 0 4px 14px #2030471a; cursor: pointer; font: inherit; }
+  .drawer-peek:hover { color: #123d86; background: #f5f9ff; }
+  .drawer-peek:active { background: #eaf2ff; }
+  .drawer-peek:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+  .drawer-peek-arrow { font-size: 1.2rem; line-height: .8; }
+  .drawer-peek > span:last-child { writing-mode: vertical-rl; font-size: .78rem; font-weight: 650; letter-spacing: .05em; }
   .layout { grid-template-columns: 1fr; height: calc(100dvh - 84px); }
   .conversation-sidebar { display: none; }
   .thread-header { padding: 12px 14px; }

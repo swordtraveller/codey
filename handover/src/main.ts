@@ -120,7 +120,7 @@ class HandoverThread extends HTMLElement {
 
   update(conversation: HandoverConversation | undefined, messages: HandoverConversation['messages'], visibleCount: number, loadingOlder: boolean): void {
     const key = conversation ? `${conversation.projectId}:${conversation.conversationId}:${conversation.updatedAt}:${messages.length}` : ''
-    this.header.textContent = conversation?.title ?? '选择一个会话'
+    this.header.textContent = conversation?.title ?? ''
     this.count.textContent = conversation ? `${messages.length} 条消息，已显示最近 ${Math.min(messages.length, Math.max(1, visibleCount))} 条` : ''
     this.setComposerDisabled(!conversation)
     const changed = key !== this.renderedConversationKey || visibleCount !== this.renderedVisibleCount || loadingOlder !== this.renderedLoadingOlder
@@ -133,7 +133,7 @@ class HandoverThread extends HTMLElement {
     if (!conversation) {
       const empty = document.createElement('div')
       empty.className = 'empty-thread'
-      empty.innerHTML = '<p>选择一个会话查看消息。</p>'
+      empty.innerHTML = '<p>消息会显示在这里。</p>'
       this.scroll.append(empty)
     } else {
       if (olderCount > 0) {
@@ -206,7 +206,7 @@ class HandoverApp extends LitElement {
   render(): TemplateResult {
     if (!state.invitation) return html`<main class="shell onboarding"><h1>Codey Handover</h1><p>将 Codey 提供的配对内容粘贴到这里。</p><textarea id="pairing" placeholder="codey-handover://pair?..." rows="6"></textarea><wa-button id="pair" @click=${() => void pair((this.renderRoot.querySelector('#pairing') as HTMLTextAreaElement).value).catch(showError)}>连接</wa-button><p class="status">${state.status}</p></main>`
     if (!state.catalog) return html`<main class="shell onboarding"><h1>Handover</h1><p>${state.status}</p>${state.deviceFingerprint ? html`<p class="fingerprint">设备指纹：<code>${state.deviceFingerprint}</code><br><small>请在 Codey 核对该指纹后再允许。</small></p>` : nothing}<wa-button @click=${resetPairing}>重新配对</wa-button></main>`
-    return html`<main class="shell app-shell"><header class="app-header"><div class="title"><wa-button appearance="plain" class="mobile-only" @click=${() => { state.mobileSidebarOpen = true; this.requestUpdate() }}>☰</wa-button><div><h1>Handover</h1><span class="status">${state.status}</span></div></div></header><div class="layout"><aside class="conversation-sidebar"><div class="sidebar-heading"><strong>会话</strong><span>${state.catalog.projects.reduce((total, project) => total + project.conversations.length, 0)}</span></div>${conversationList()}</aside><section class="thread-panel"><handover-thread></handover-thread></section></div><wa-drawer label="会话列表" ?open=${state.mobileSidebarOpen} @wa-after-hide=${() => { state.mobileSidebarOpen = false; this.requestUpdate() }}>${conversationList()}</wa-drawer></main>`
+    return html`<main class="shell app-shell"><header class="app-header"><div class="title"><div><h1>Handover</h1><span class="status">${state.status}</span></div></div></header><button class="drawer-peek mobile-only" ?hidden=${state.mobileSidebarOpen} aria-label="打开会话列表" @click=${() => { state.mobileSidebarOpen = true; this.requestUpdate() }}><span class="drawer-peek-arrow" aria-hidden="true">›</span><span>会话</span></button><div class="layout"><aside class="conversation-sidebar"><div class="sidebar-heading"><strong>会话</strong><span>${state.catalog.projects.reduce((total, project) => total + project.conversations.length, 0)}</span></div>${conversationList()}</aside><section class="thread-panel"><handover-thread></handover-thread></section></div><wa-drawer label="会话列表" ?open=${state.mobileSidebarOpen} @wa-after-hide=${() => { state.mobileSidebarOpen = false; this.requestUpdate() }}>${conversationList()}</wa-drawer></main>`
   }
   private async onComposerSubmit(event: CustomEvent<{ content: string }>): Promise<void> { try { await sendMessage(event.detail.content); this.thread?.clearComposerIfValue(event.detail.content) } catch (error) { showError(error) } }
   private onMessageScroll(): void { if (state.loadingOlder || !state.conversation) return; const all = messageList(); if (state.visibleMessageCount >= all.length) return; state.loadingOlder = true; state.visibleMessageCount = Math.min(all.length, state.visibleMessageCount + 5); this.requestUpdate(); void this.updateComplete.then(() => { state.loadingOlder = false; this.requestUpdate() }) }
