@@ -316,6 +316,7 @@ export type ContextAuditEvent = {
   type:
     | 'hot_to_warm'
     | 'warm_to_cold'
+    | 'warm_to_hot'
     | 'cold_recall'
     | 'pin_changed'
     | 'manual_demotion'

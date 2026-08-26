@@ -437,14 +437,15 @@ export async function readContextRecords(projectId: string, conversationId: stri
   return result
 }
 
-export async function readConversationWorkingSet(projectId: string, conversationId: string, config: ContextManagementConfig, query: string, rememberedWarm: AgentContextMessage[] = []): Promise<AgentContextMessage[]> {
+export async function readConversationWorkingSet(projectId: string, conversationId: string, config: ContextManagementConfig, query: string, rememberedWarm: AgentContextMessage[] = [], promotedHot: AgentContextMessage[] = []): Promise<AgentContextMessage[]> {
   const index = await readConversationIndex(projectId, conversationId)
   const rounds = splitRounds(index)
   const recentStart = Math.max(0, rounds.length - config.recentKeepRounds)
   const older = rounds.slice(0, recentStart).flat()
   const recent = rounds.slice(recentStart).flat()
   const resident = older.filter((item) => migratePin(item) || item.contextRegion === 'long-term')
-  const residentIds = new Set([...resident, ...recent].map((item) => item.id))
+  const promotedById = new Map(promotedHot.flatMap((message) => message.id ? [[message.id, message] as const] : []))
+  const residentIds = new Set([...resident, ...recent].map((item) => item.id).concat([...promotedById.keys()]))
   const warmById = new Map<string, AgentContextMessage>()
 
   for (const item of older.filter((candidate) => !residentIds.has(candidate.id) && candidate.manualContextLayer === 'warm')) {
@@ -488,6 +489,9 @@ export async function readConversationWorkingSet(projectId: string, conversation
   for (const item of [...resident, ...recent].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
     const message = await readConversationMessage(projectId, conversationId, item.id)
     result.push({ ...message, contextLayer: 'hot', contextRegion: item.contextRegion ?? 'newborn', contextSource: 'live', representation: 'original', truthRefs: [item.id] })
+  }
+  for (const message of [...promotedById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''))) {
+    result.push({ ...message, pinnedToHot: false, manualContextLayer: undefined, contextLayer: 'hot', contextRegion: 'newborn', contextSource: message.contextSource ?? 'warm-recall' })
   }
   result.push(...[...warmById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')))
   result.push(...recalled)

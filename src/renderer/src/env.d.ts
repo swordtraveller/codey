@@ -82,6 +82,7 @@ declare global {
       readColdMessage(projectId: string, conversationId: string, messageId: string): Promise<ContextDebugMessage>
       readContextLayerMessage(projectId: string, conversationId: string, messageId: string): Promise<ContextDebugMessage>
       searchColdContext(projectId: string, conversationId: string, query: string): Promise<ColdRecallPreview>
+      promoteContext(projectId: string, conversationId: string, messageId: string): Promise<void>
       setContextPin(
         projectId: string,
         conversationId: string,

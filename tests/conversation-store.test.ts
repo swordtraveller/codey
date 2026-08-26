@@ -231,6 +231,27 @@ describe('conversation context store', () => {
       }))
   })
 
+  it('keeps manually promoted Warm messages in Hot without pinning them', async () => {
+    const messages: AgentContextMessage[] = [
+      { id: 'warm-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Promoted context', manualContextLayer: 'warm' },
+      { id: 'recent-user', createdAt: '2026-01-01T00:00:01.000Z', role: 'user', content: 'Latest request' },
+    ]
+    await writeConversationMessages('project', 'conversation', messages)
+
+    const workingSet = await readConversationWorkingSet(
+      'project',
+      'conversation',
+      { ...defaultContextManagementConfig, recentKeepRounds: 1, coldRecallTokenBudget: 0 },
+      'No matching query',
+      [],
+      [{ ...messages[0], pinnedToHot: false, manualContextLayer: undefined, contextLayer: 'hot', contextSource: 'warm-recall' }],
+    )
+
+    expect(workingSet.filter((message) => message.id === 'warm-user')).toEqual([
+      expect.objectContaining({ contextLayer: 'hot', contextSource: 'warm-recall', pinnedToHot: false, manualContextLayer: undefined }),
+    ])
+  })
+
   it('loads pinned, recent and remembered Warm messages while leaving unrelated Cold data unread', async () => {
     const messages: AgentContextMessage[] = [
       { id: 'old-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Unrelated old request' },

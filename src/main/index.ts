@@ -27,9 +27,11 @@ import {
   demoteContext,
   getContextDebugOverview,
   getContextDebugRevision,
+  getPromotedHotMessages,
   getRememberedWarmMessages,
   hasContextDebugSnapshot,
   persistContextDebugMessages,
+  promoteContext,
   readColdContextMessage,
   readContextSnapshotMessage,
   rememberInitializedSnapshot,
@@ -265,6 +267,7 @@ async function developProject(
         contextConfig,
         normalizedContent,
         getRememberedWarmMessages(projectId, conversationId),
+        getPromotedHotMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
   if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
@@ -496,6 +499,7 @@ async function initializeContextDebugContext(
         contextConfig,
         '',
         getRememberedWarmMessages(projectId, conversationId),
+        getPromotedHotMessages(projectId, conversationId),
       )
     : await readConversationMessages(projectId, conversationId)
   const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, { allow: appConfig.developerMode && conversation.contextConfigOverride !== null })
@@ -693,6 +697,8 @@ app.whenReady().then(() => {
     readContextSnapshotMessage(projectId, conversationId, messageId))
   ipcMain.handle('context-debug:search', (_event, projectId: string, conversationId: string, query: string) =>
     runDebugOperation(projectId, conversationId, () => searchColdContext(projectId, conversationId, query)))
+  ipcMain.handle('context-debug:promote', (_event, projectId: string, conversationId: string, messageId: string) =>
+    runDebugOperation(projectId, conversationId, () => promoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:set-pin', (_event, projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
     runDebugOperation(projectId, conversationId, () => setContextPin(projectId, conversationId, messageId, pinnedToHot)))
   ipcMain.handle('context-debug:demote', (_event, projectId: string, conversationId: string, messageId?: string) =>
