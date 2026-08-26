@@ -1,0 +1,26 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$BRIDGE_DOMAIN} {
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+    reverse_proxy bridge:8787
+}
+
+{$HANDOVER_DOMAIN} {
+    root * /srv/handover
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+    try_files {path} /index.html
+    file_server
+}

@@ -6,9 +6,11 @@ import type {
   ConversationStateChange,
   DevelopmentProgress,
   ImageAttachment,
+  Project,
   ScreenshotSelection,
   ScreenshotSource,
 } from '../shared/types'
+import type { BridgeChannelStatus } from '../shared/bridge'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -21,6 +23,13 @@ contextBridge.exposeInMainWorld(
     getConfig: () => ipcRenderer.invoke('config:get'),
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
+    createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
+    approveBridgeRequest: (channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:approve', channelId, requestId, devicePublicKey),
+    rejectBridgeRequest: (channelId: string, requestId: string): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:reject', channelId, requestId),
+    syncBridge: (channelId?: string): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:sync', channelId),
+    refreshBridgeEnrollment: (channelId: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:refresh', channelId),
+    removeBridgeChannel: (channelId: string): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:remove', channelId),
     createProject: (name: string) => ipcRenderer.invoke('projects:create', name),
     addProjectFolder: (projectId: string) =>
       ipcRenderer.invoke('projects:add-folder', projectId),
@@ -90,6 +99,11 @@ contextBridge.exposeInMainWorld(
         listener(change)
       ipcRenderer.on('conversation:state-change', handler)
       return () => ipcRenderer.removeListener('conversation:state-change', handler)
+    },
+    onProjectUpdated: (listener: (project: Project) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, project: Project) => listener(project)
+      ipcRenderer.on('project:updated', handler)
+      return () => ipcRenderer.removeListener('project:updated', handler)
     },
     openContextDebug: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('context-debug:open', projectId, conversationId),

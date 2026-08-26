@@ -45,6 +45,7 @@ import {
   readConversationWorkingSet,
 } from './conversation-store'
 import { log } from './logger'
+import { BridgeHandoverService } from './bridge'
 import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
@@ -82,6 +83,8 @@ let mainWindow: BrowserWindow | null = null
 let keepAwakeBlockerId: number | null = null
 let keepAwakeEnabled = false
 let keepAwakeOnlyWhileWorking = true
+const bridgeHandover = new BridgeHandoverService()
+let bridgePollInFlight = false
 
 function updateKeepAwake(config?: AppConfig): void {
   if (config) {
@@ -200,6 +203,7 @@ async function developProject(
   onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
+  onProjectUpdated?: (project: Project) => Promise<void> | void,
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
@@ -250,6 +254,8 @@ async function developProject(
     userMessageId,
   )
   await appendConversationMessages(projectId, conversationId, [currentUserMessage])
+  // 先发布已持久化的用户消息，再开始远端模型请求，避免远端发送端长期只看到“处理中”。
+  await onProjectUpdated?.(project)
 
   const roundId = randomUUID()
   const requestHistory = contextConfig.layeredEnabled
@@ -324,6 +330,52 @@ async function developProject(
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
+async function processBridgeMessage(message: import('../shared/bridge').HandoverUserMessage): Promise<boolean> {
+  if (getConversationState(message.projectId, message.conversationId) !== 'idle') return false
+  const key = conversationKey(message.projectId, message.conversationId)
+  const controller = new AbortController()
+  const publishProject = async (project: Project): Promise<void> => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', project)
+    try {
+      await bridgeHandover.sync(await getProjects())
+    } catch (error) {
+      // 同步失败不能导致消息事件重复消费，否则会重复写入用户消息。
+      log.warn('bridge.sync.failed', error)
+    }
+  }
+  conversationControllers.set(key, controller)
+  setConversationState(message.projectId, message.conversationId, 'running')
+  try {
+    // developProject 在写入用户消息后立即调用 publishProject；模型完成后再发布含回复的完整快照。
+    const result = await developProject(
+      message.projectId,
+      message.conversationId,
+      message.content,
+      [],
+      undefined,
+      controller.signal,
+      Date.now(),
+      publishProject,
+    )
+    if (result.project) await publishProject(result.project)
+    if (result.error || result.stopped) {
+      log.warn('bridge.event.development.incomplete', { projectId: message.projectId, conversationId: message.conversationId, error: result.error, stopped: result.stopped })
+    }
+    // 事件只应被处理一次；否则同步失败或模型报错会导致重复消费并重复写入用户消息。
+    return true
+  } finally {
+    if (conversationControllers.get(key) === controller) conversationControllers.delete(key)
+    setConversationState(message.projectId, message.conversationId, 'idle')
+  }
+}
+
+async function pollBridge(): Promise<void> {
+  if (bridgePollInFlight) return
+  bridgePollInFlight = true
+  try { await bridgeHandover.processEvents(processBridgeMessage) }
+  catch (error) { log.warn('bridge.poll.failed', error) }
+  finally { bridgePollInFlight = false }
+}
 function loadRenderer(window: BrowserWindow, query?: Record<string, string>): void {
   if (process.env.ELECTRON_RENDERER_URL) {
     const url = new URL(process.env.ELECTRON_RENDERER_URL)
@@ -502,6 +554,25 @@ app.whenReady().then(() => {
     return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('bridge:status', () => bridgeHandover.status())
+  ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
+  ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
+    await bridgeHandover.approve(channelId, requestId, devicePublicKey, await getProjects())
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:reject', async (_event, channelId: string, requestId: string) => {
+    await bridgeHandover.reject(channelId, requestId)
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:sync', async (_event, channelId?: string) => {
+    await bridgeHandover.sync(await getProjects(), channelId)
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:refresh', async (_event, channelId: string) => bridgeHandover.refreshEnrollment(channelId))
+  ipcMain.handle('bridge:remove', async (_event, channelId: string) => {
+    await bridgeHandover.removeChannel(channelId)
+    return bridgeHandover.status()
+  })
   ipcMain.handle('projects:create', async (_event, name: string) => {
     const config = await readConfig()
     return createProject(name, config.activeModelConfigId)
@@ -577,12 +648,16 @@ app.whenReady().then(() => {
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, images, (timeline) => {
+      const result = await developProject(projectId, conversationId, content, images, (timeline) => {
         if (!event.sender.isDestroyed()) {
           const progress: DevelopmentProgress = { projectId, conversationId, timeline }
           event.sender.send('development:progress', progress)
         }
       }, controller.signal, startedAt)
+      if (!result.error && !result.stopped) {
+        void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
+      }
+      return result
     } finally {
       if (conversationControllers.get(key) === controller) {
         conversationControllers.delete(key)
@@ -629,6 +704,8 @@ app.whenReady().then(() => {
     .then(updateKeepAwake)
     .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
+  void pollBridge()
+  setInterval(() => void pollBridge(), 4_000)
   createMainWindow()
   app.on('activate', () => {
     if (!mainWindow) createMainWindow()

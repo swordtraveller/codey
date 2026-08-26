@@ -19,6 +19,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
+import type { BridgeChannelStatus } from '../../shared/bridge'
 import type {
   AgentLimitsConfig,
   AppLanguage,
@@ -512,6 +513,11 @@ export function App(): React.JSX.Element {
   const [contextProjectId, setContextProjectId] = useState('')
   const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
   const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
+  const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false)
+  const [bridgeUrl, setBridgeUrl] = useState('http://127.0.0.1:8787')
+  const [bridgeChannels, setBridgeChannels] = useState<BridgeChannelStatus[]>([])
+  const [bridgeError, setBridgeError] = useState('')
+  const [bridgeBusy, setBridgeBusy] = useState(false)
   const [agentLimitsDialogOpen, setAgentLimitsDialogOpen] = useState(false)
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
@@ -627,6 +633,10 @@ export function App(): React.JSX.Element {
     }))
   }), [])
 
+  useEffect(() => window.codey.onProjectUpdated((project) => {
+    setProjects((current) => current.map((item) => item.id === project.id ? project : item))
+  }), [])
+
   useEffect(() => {
     function openDebugger(event: KeyboardEvent): void {
       if (
@@ -693,6 +703,100 @@ export function App(): React.JSX.Element {
     setSettingsOpen(true)
   }
 
+  async function openBridgeDialog(): Promise<void> {
+    setBridgeDialogOpen(true)
+    setBridgeError('')
+    try {
+      setBridgeChannels(await window.codey.getBridgeChannels())
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '无法读取 Bridge 状态')
+    }
+  }
+
+  async function createBridgeChannel(): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      await window.codey.createBridgeChannel(bridgeUrl)
+      setBridgeChannels(await window.codey.getBridgeChannels())
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '创建频道失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function approveBridgeRequest(channelId: string, request: BridgeChannelStatus['pendingRequests'][number]): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeChannels(await window.codey.approveBridgeRequest(channelId, request.id, request.devicePublicKey))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '审批失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function rejectBridgeRequest(channelId: string, requestId: string): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeChannels(await window.codey.rejectBridgeRequest(channelId, requestId))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '拒绝失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function copyBridgeInvitation(channel: BridgeChannelStatus): Promise<void> {
+    if (!channel.invitation) return
+    try {
+      await navigator.clipboard.writeText(channel.invitation)
+      setBridgeError('配对内容已复制')
+    } catch {
+      setBridgeError('复制失败，请手动复制')
+    }
+  }
+
+  async function syncBridgeNow(channelId?: string): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeChannels(await window.codey.syncBridge(channelId))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '同步失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function refreshBridgeEnrollment(channelId: string): Promise<void> {
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      const refreshed = await window.codey.refreshBridgeEnrollment(channelId)
+      setBridgeChannels((channels) => channels.map((channel) => channel.channelId === refreshed.channelId ? refreshed : channel))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '刷新配对内容失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function removeBridgeChannel(channel: BridgeChannelStatus): Promise<void> {
+    if (!window.confirm(`确定要从 Codey 移除频道 ${channel.channelId} 吗？这只会停止本机同步；Bridge 上的频道和已批准设备不会被删除。`)) return
+    setBridgeBusy(true)
+    setBridgeError('')
+    try {
+      setBridgeChannels(await window.codey.removeBridgeChannel(channel.channelId))
+    } catch (error) {
+      setBridgeError(error instanceof Error ? error.message : '移除频道失败')
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
   function updateAppContextConfig(patch: Partial<ContextManagementConfig>): void {
     setConfigDraft((current) => ({
       ...current,
@@ -1249,6 +1353,9 @@ export function App(): React.JSX.Element {
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
+          <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
+            Handover
+          </Button>
         </aside>
 
         <section className="workspace">
@@ -1787,6 +1894,59 @@ export function App(): React.JSX.Element {
               >
                 {saving ? t('saving') : t('save')}
               </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={bridgeDialogOpen} onOpenChange={(_, data) => setBridgeDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Handover 频道</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Field label="Bridge 地址" hint="本机可用 HTTP；远程 Bridge 必须使用 HTTPS。">
+                <Input value={bridgeUrl} onChange={(_, data) => setBridgeUrl(data.value)} disabled={bridgeBusy} placeholder="http://127.0.0.1:8787" />
+              </Field>
+              <div className="bridge-actions">
+                <Button appearance="primary" disabled={bridgeBusy || !bridgeUrl.trim()} onClick={() => void createBridgeChannel()}>
+                  {bridgeBusy ? '创建中…' : '创建配对频道'}
+                </Button>
+                {bridgeChannels.length > 0 && <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow()}>同步全部频道</Button>}
+              </div>
+              <p className="status">每个频道有独立的配对密钥、已批准设备和同步数据。</p>
+              {bridgeChannels.length === 0 ? <p className="status">尚未创建频道</p> : bridgeChannels.map((channel) => (
+                <section className="bridge-channel" key={channel.channelId}>
+                  <div className="bridge-channel-heading">
+                    <div>
+                      <strong>频道：<code>{channel.channelId}</code></strong>
+                      <small>{channel.bridgeUrl} · 配对有效期：{new Date(channel.enrollmentExpiresAt).toLocaleString()}</small>
+                    </div>
+                    <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void removeBridgeChannel(channel)}>从 Codey 移除</Button>
+                  </div>
+                  <Field label="配对内容" hint="仅交给要配对的 Handover 设备；过期后可刷新配对内容，无需创建新频道。">
+                    <Textarea className="bridge-invitation" readOnly value={channel.invitation} rows={4} />
+                  </Field>
+                  <div className="bridge-actions">
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void copyBridgeInvitation(channel)}>复制配对内容</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow(channel.channelId)}>立即同步</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void refreshBridgeEnrollment(channel.channelId)}>刷新配对内容</Button>
+                  </div>
+                  <h3>待审批设备</h3>
+                  <p className="status">请与 Handover 上显示的设备指纹核对后再允许。</p>
+                  {channel.pendingRequests.length === 0 ? <p className="status">暂无请求</p> : channel.pendingRequests.map((request) => (
+                    <div className="bridge-request" key={request.id}>
+                      <span>{request.deviceName}<small>设备指纹：<code>{request.fingerprint}</code></small></span>
+                      <Button size="small" appearance="primary" disabled={bridgeBusy} onClick={() => void approveBridgeRequest(channel.channelId, request)}>允许</Button>
+                      <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void rejectBridgeRequest(channel.channelId, request.id)}>拒绝</Button>
+                    </div>
+                  ))}
+                  <p className="status">已批准设备：{channel.approvedDevices.length}</p>
+                </section>
+              ))}
+              {bridgeError && <p className="dialog-error">{bridgeError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setBridgeDialogOpen(false)}>关闭</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>
