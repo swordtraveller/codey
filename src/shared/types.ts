@@ -166,6 +166,8 @@ export type AgentContextMessage = {
   contextSource?: ContextSource
   recalledAtRoundId?: string
   lastAccessedAt?: string
+  enteredHotAt?: string
+  reuseCount?: number
   manualContextLayer?: 'warm'
   /** Legacy persisted fields, read only for migration. */
   manualProtected?: boolean
@@ -245,6 +247,10 @@ export type ContextLayerItem = {
   region: ContextRegion
   source: 'system' | ContextSource
   pendingDemotion: boolean
+  enteredHotAt: string
+  lastAccessedAt?: string
+  reuseCount: number
+  importanceScore: number
 }
 
 export type ContextDebugSnapshot = {
@@ -257,6 +263,8 @@ export type ContextDebugSnapshot = {
   toolDefinitionTokens: number
   hotTokens: number
   hotTokenBudget: number
+  hotHighWatermark: number
+  hotLowWatermark: number
   warmTokens: number
   warmTokenBudget: number
   pinnedHotTokens: number

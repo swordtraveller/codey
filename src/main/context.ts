@@ -21,6 +21,8 @@ export type ContextMessage = {
   contextSource?: 'live' | 'hot-demotion' | 'warm-recall' | 'cold-summary-recall' | 'cold-truth-recall' | 'hot' | 'warm' | 'cold-recall'
   recalledAtRoundId?: string
   lastAccessedAt?: string
+  enteredHotAt?: string
+  reuseCount?: number
   manualContextLayer?: 'warm'
   /** Legacy persisted values, accepted only for migration. */
   manualProtected?: boolean
@@ -37,6 +39,13 @@ export type ContextResult = {
   summaryArtifacts: ContextSummaryArtifact[]
   metrics: ContextMetrics
   toolDefinitionTokens: number
+  hotTokenBudget?: number
+  hotHighWatermark?: number
+  hotLowWatermark?: number
+  overflow?: {
+    reason: 'latest_user_too_large' | 'pinned_hot_overflow' | 'current_round_too_large' | 'hot_overflow'
+    requiredReleaseTokens: number
+  }
 }
 
 export const SUMMARY_LABEL = '[SUMMARY — LOSSY, NOT AUTHORITATIVE]'
@@ -58,6 +67,43 @@ function isRecalled(message: ContextMessage): boolean {
   return ['warm-recall', 'cold-summary-recall', 'cold-truth-recall', 'cold-recall'].includes(message.contextSource ?? '')
 }
 
+function timestamp(value?: string): number {
+  const parsed = Date.parse(value ?? '')
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function normalizedContent(message: ContextMessage): string {
+  return `${message.role}:${message.content ?? ''}`.replace(/\r\n/g, '\n').trim()
+}
+
+function replaceableIds(messages: ContextMessage[]): Set<string> {
+  const replaceable = new Set<string>()
+  const latestByContent = new Map<string, ContextMessage>()
+  const originalTruthRefs = new Set(messages.filter((message) => message.representation !== 'summary').flatMap(refsFor))
+  for (const message of messages) {
+    const key = normalizedContent(message)
+    const previous = latestByContent.get(key)
+    if (previous?.id) replaceable.add(previous.id)
+    latestByContent.set(key, message)
+    if (message.representation === 'summary' && refsFor(message).some((ref) => originalTruthRefs.has(ref)) && message.id) {
+      replaceable.add(message.id)
+    }
+  }
+  return replaceable
+}
+
+export function contextImportanceScore(message: ContextMessage, replaceable = false, now = Date.now()): number {
+  const sourceScore = message.role === 'tool' ? 24
+    : message.tool_calls?.length ? 22
+      : message.role === 'user' ? 18
+        : message.representation === 'summary' ? 6 : 12
+  const enteredAgeDays = Math.max(0, (now - timestamp(message.enteredHotAt ?? message.createdAt)) / 86_400_000)
+  const accessedAgeDays = Math.max(0, (now - timestamp(message.lastAccessedAt)) / 86_400_000)
+  const enteredScore = Math.max(0, 20 - Math.floor(enteredAgeDays))
+  const accessedScore = message.lastAccessedAt ? Math.max(0, 12 - Math.floor(accessedAgeDays)) : 0
+  const reuseScore = Math.min(5, Math.max(0, message.reuseCount ?? 0)) * 3
+  return sourceScore + enteredScore + accessedScore + reuseScore - (replaceable ? 20 : 0)
+}
 function refsFor(message: ContextMessage): string[] {
   return message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : []
 }
@@ -105,6 +151,34 @@ function splitRounds(messages: ContextMessage[]): ContextMessage[][] {
     else rounds.at(-1)?.push(message)
   }
   return rounds
+}
+
+function splitClosedUnits(messages: ContextMessage[]): { units: ContextMessage[][]; hasOpenTail: boolean } {
+  const units: ContextMessage[][] = []
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const expected = new Set(message.tool_calls.map((toolCall) => toolCall.id))
+      const unit = [message]
+      let next = index + 1
+      while (next < messages.length && messages[next].role === 'tool') {
+        unit.push(messages[next])
+        next += 1
+      }
+      const received = new Set(unit.slice(1).map((item) => item.tool_call_id))
+      const complete = unit.length - 1 === expected.size
+        && expected.size === received.size
+        && [...expected].every((id) => received.has(id))
+      if (!complete) return { units, hasOpenTail: true }
+      units.push(unit)
+      index = next - 1
+    } else if (message.role === 'tool') {
+      return { units, hasOpenTail: true }
+    } else {
+      units.push([message])
+    }
+  }
+  return { units, hasOpenTail: false }
 }
 
 function getRecentStart(messages: ContextMessage[], rounds: number): number {
@@ -226,57 +300,129 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
   }
 }
 
-function manageLayered(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig): ContextResult {
+function manageLayered(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig, runtime: ContextManagementRuntime): ContextResult {
   const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
-  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, triggerThreshold))
+  const toolDefinitionTokens = countContextTokens(tools)
+  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, triggerThreshold - toolDefinitionTokens))
+  const highWatermark = Math.max(1, Math.floor(hotBudget * 0.9))
+  const lowWatermark = Math.max(1, Math.floor(hotBudget * 0.8))
   const requestCount = (items: ContextMessage[]) => countContextTokens({ messages: items, tools })
   const layerCount = (items: ContextMessage[]) => countContextTokens(items)
   const originalTokens = requestCount(messages)
+  const now = new Date().toISOString()
   const system = messages.filter((message) => message.role === 'system').map((message) => ({
     ...message,
     contextLayer: 'hot' as const,
     contextRegion: 'permanent' as const,
     contextSource: 'live' as const,
     representation: 'original' as const,
+    enteredHotAt: message.enteredHotAt ?? message.createdAt ?? now,
   }))
   const nonSystem = messages.filter((message) => message.role !== 'system')
   const explicitWarm = nonSystem.filter((message) => !isResident(message) && (message.contextLayer === 'warm' || message.manualContextLayer === 'warm'))
-  const recalled = nonSystem.filter((message) => isRecalled(message))
+  const recalled = nonSystem.filter((message) => isRecalled(message) && !explicitWarm.includes(message))
   const eligible = nonSystem.filter((message) => !explicitWarm.includes(message) && !recalled.includes(message))
-  const recentStart = getRecentStart([{ role: 'system', content: null }, ...eligible], contextConfig.recentKeepRounds) - 1
-  const older = eligible.slice(0, Math.max(0, recentStart))
-  const recent = eligible.slice(Math.max(0, recentStart))
+  let currentStart = runtime.latestUserMessageId
+    ? eligible.findIndex((message) => message.id === runtime.latestUserMessageId && message.role === 'user')
+    : -1
+  if (currentStart < 0) {
+    currentStart = eligible.reduce((found, message, index) => message.role === 'user' ? index : found, 0)
+  }
+  const historical = eligible.slice(0, currentStart)
+  const current = eligible.slice(currentStart)
   const warmCandidates = [...explicitWarm]
-  const toHot = (message: ContextMessage): ContextMessage => ({
+  const toHot = (message: ContextMessage, fresh = false): ContextMessage => ({
     ...message,
     contextLayer: 'hot',
     contextRegion: message.contextRegion ?? (isLongTermCandidate(message) ? 'long-term' : 'newborn'),
     contextSource: message.contextSource ?? 'live',
     representation: message.representation ?? 'original',
     truthRefs: refsFor(message),
+    enteredHotAt: fresh ? now : message.enteredHotAt ?? message.createdAt ?? now,
+    reuseCount: Math.max(0, message.reuseCount ?? 0),
   })
-  let hot = [...older, ...recent].map(toHot)
-  for (const round of splitRounds(older)) {
-    if (requestCount([...system, ...hot]) < triggerThreshold && layerCount(hot) <= hotBudget) break
-    const demoted = round.filter((message) => !isResident(message) && !isRecalled(message))
-    if (demoted.length === 0) continue
-    const ids = new Set(demoted.map((message) => message.id))
-    hot = hot.filter((message) => !ids.has(message.id))
-    warmCandidates.push(...demoted)
+  const historicalHot = historical.map((message) => toHot(message))
+  const currentHot = current.map((message) => toHot(message))
+  let hot = [...historicalHot, ...currentHot]
+  const hotTokens = () => layerCount([...system, ...hot])
+  const fitsHardLimit = () => hotTokens() < hotBudget && requestCount([...system, ...hot]) < triggerThreshold
+  const replacementSet = replaceableIds([...historicalHot, ...recalled, ...currentHot])
+  const demote = (items: ContextMessage[]): void => {
+    const selected = new Set(items)
+    hot = hot.filter((message) => !selected.has(message))
+    warmCandidates.push(...items)
   }
-  for (const message of recalled) {
-    const candidate = [...hot, toHot(message)]
-    if (requestCount([...system, ...candidate]) >= triggerThreshold || layerCount(candidate) > hotBudget) continue
-    hot = candidate
-  }
-  const managed = normalizeToolCallSequence([...system, ...hot])
+  const historicalCandidates = splitRounds(historicalHot)
+    .map((round) => splitClosedUnits(round).units
+      .filter((unit) => unit.every((message) => !isResident(message)))
+      .flat())
+    .filter((round) => round.length > 0)
+    .map((round) => ({
+      messages: round,
+      score: Math.max(...round.map((message) => contextImportanceScore(message, Boolean(message.id && replacementSet.has(message.id))))),
+      lastAccessedAt: Math.max(...round.map((message) => timestamp(message.lastAccessedAt))),
+      enteredHotAt: Math.max(...round.map((message) => timestamp(message.enteredHotAt ?? message.createdAt))),
+      tokens: layerCount(round),
+    }))
+    .sort((left, right) => left.score - right.score || left.lastAccessedAt - right.lastAccessedAt || left.enteredHotAt - right.enteredHotAt || right.tokens - left.tokens)
 
+  if (hotTokens() >= highWatermark) {
+    for (const candidate of historicalCandidates) {
+      if (hotTokens() <= lowWatermark) break
+      demote(candidate.messages)
+    }
+  }
+
+  for (const message of recalled) {
+    const promoted = toHot(message, !message.enteredHotAt)
+    const insertAt = Math.max(0, hot.length - currentHot.filter((item) => hot.includes(item)).length)
+    hot.splice(insertAt, 0, promoted)
+    if (hotTokens() > highWatermark || !fitsHardLimit()) {
+      hot.splice(hot.indexOf(promoted), 1)
+      if (message.contextSource === 'warm-recall') warmCandidates.push({ ...message, contextLayer: 'warm', contextSource: 'hot-demotion' })
+    }
+  }
+
+  const latestUser = runtime.latestUserMessageId
+    ? hot.find((message) => message.id === runtime.latestUserMessageId && message.role === 'user')
+    : currentHot.find((message) => message.role === 'user')
+  const latestOnly = latestUser ? [...system, latestUser] : system
+  let overflow: ContextResult['overflow']
+  if (latestUser && (layerCount(latestOnly) >= hotBudget || requestCount(latestOnly) >= triggerThreshold)) {
+    overflow = {
+      reason: 'latest_user_too_large',
+      requiredReleaseTokens: Math.max(1, layerCount(latestOnly) - hotBudget + 1, requestCount(latestOnly) - triggerThreshold + 1),
+    }
+  }
+
+  if (!overflow && !fitsHardLimit()) {
+    const currentInHot = currentHot.filter((message) => hot.includes(message))
+    const { units, hasOpenTail } = splitClosedUnits(currentInHot.slice(1))
+    const demotableUnits = (hasOpenTail ? units : units.slice(0, -1))
+      .filter((unit) => unit.every((message) => !isResident(message)))
+    for (const unit of demotableUnits) {
+      if (hotTokens() <= highWatermark && fitsHardLimit()) break
+      demote(unit)
+    }
+  }
+
+  if (!overflow && !fitsHardLimit()) {
+    const pinnedBlockers = hot.some((message) => message.pinnedToHot === true)
+    overflow = {
+      reason: pinnedBlockers ? 'pinned_hot_overflow' : current.length > 1 ? 'current_round_too_large' : 'hot_overflow',
+      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, requestCount([...system, ...hot]) - triggerThreshold + 1),
+    }
+  }
+
+  const managed = normalizeToolCallSequence([...system, ...hot])
   let filtered = false
   let rewritten = false
   const warmMessages: ContextMessage[] = []
   const summaryArtifacts: ContextSummaryArtifact[] = []
   let warmTokens = 0
-  const orderedWarm = [...new Set(warmCandidates)].sort((left, right) => messages.indexOf(left) - messages.indexOf(right))
+  const warmById = new Map<string, ContextMessage>()
+  for (const message of warmCandidates) warmById.set(message.id ?? `${message.role}:${message.createdAt ?? ''}:${warmById.size}`, message)
+  const orderedWarm = [...warmById.values()].sort((left, right) => messages.indexOf(left) - messages.indexOf(right))
   for (let index = orderedWarm.length - 1; index >= 0; index -= 1) {
     const original = orderedWarm[index]
     const prepared: ContextMessage = {
@@ -328,7 +474,11 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
       rewritten,
       truncated: false,
     }),
-    toolDefinitionTokens: countContextTokens(tools),
+    toolDefinitionTokens,
+    hotTokenBudget: hotBudget,
+    hotHighWatermark: highWatermark,
+    hotLowWatermark: lowWatermark,
+    overflow,
   }
 }
 export type ContextManagementRuntime = {
@@ -366,5 +516,5 @@ export function manageContext(
       toolDefinitionTokens: countContextTokens(tools),
     }
   }
-  return contextConfig.layeredEnabled ? manageLayered(messages, tools, modelConfig, contextConfig) : manageSingleLayer(messages, tools, modelConfig, contextConfig)
+  return contextConfig.layeredEnabled ? manageLayered(messages, tools, modelConfig, contextConfig, runtime) : manageSingleLayer(messages, tools, modelConfig, contextConfig)
 }

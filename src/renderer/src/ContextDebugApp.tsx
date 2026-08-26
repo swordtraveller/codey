@@ -344,6 +344,14 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
             <section>
               <h2>{t('hot')} <small>{snapshot?.hot.length ?? 0}</small></h2>
               <p>{t('hotDescription')}</p>
+              <Button
+                appearance="subtle"
+                size="small"
+                disabled={!idle || busy || !snapshot || snapshot.hotTokens < snapshot.hotHighWatermark || !snapshot.hot.some((item) => item.source !== 'system' && item.pinnedToHot)}
+                onClick={() => void run(() => window.codey.unpinLowestPriorityContext(projectId, conversationId))}
+              >
+                {t('unpinLowestPriority')}
+              </Button>
               <div className="context-debug-list">{snapshot?.hot.map((item) => layerCard(item, 'hot'))}</div>
             </section>
             <section>

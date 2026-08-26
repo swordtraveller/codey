@@ -90,6 +90,7 @@ declare global {
         pinnedToHot: boolean,
       ): Promise<void>
       demoteContext(projectId: string, conversationId: string, messageId?: string): Promise<void>
+      unpinLowestPriorityContext(projectId: string, conversationId: string): Promise<void>
       simulateTokenLimit(
         projectId: string,
         conversationId: string,

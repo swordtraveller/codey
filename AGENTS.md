@@ -23,16 +23,14 @@ details
 - `model_max_ctx`：模型最大上下文
 - `safe_output_margin`：输出预留token缓冲
 - `trigger_threshold = model_max_ctx - safe_output_margin`：压缩触发线
-- `recent_keep_rounds`：强制保留最近N轮（建议4‑6）
 
 #### 执行规则
 1. 本地统计全部输入token；输入token ≥ `trigger_threshold` 才触发压缩。
-2. 最近`recent_keep_rounds`轮完整保留，不参与压缩。
-3. 先执行Filter抽取：原样保留代码块、工具IO、报错堆栈；仅删除无关冗余片段，不改写原文。
-4. Filter后token达标，则直接跳过Rewrite。
-5. Filter仍超限，仅对**纯自然语言片段**做Rewrite；代码/报错/日志严禁送入Rewrite，禁止编造事实。
-6. 压缩完成重新统计token。
-7. 压缩后依旧超限：执行兜底截断，删除最早的完整历史消息；system与最近N轮不删除。
+2. 先执行Filter抽取：原样保留代码块、工具IO、报错堆栈；仅删除无关冗余片段，不改写原文。
+3. Filter后token达标，则直接跳过Rewrite。
+4. Filter仍超限，仅对**纯自然语言片段**做Rewrite；代码/报错/日志严禁送入Rewrite，禁止编造事实。
+5. 压缩完成重新统计token。
+6. 压缩后依旧超限：执行兜底截断，删除最早的完整历史消息；system与最近N轮不删除。
 
 #### 补充
 1. 不使用在线模型API自动truncation特性，而应当全部本地管控。

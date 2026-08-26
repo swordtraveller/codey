@@ -123,6 +123,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:set-pin', projectId, conversationId, messageId, pinnedToHot),
     demoteContext: (projectId: string, conversationId: string, messageId?: string) =>
       ipcRenderer.invoke('context-debug:demote', projectId, conversationId, messageId),
+    unpinLowestPriorityContext: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:unpin-lowest', projectId, conversationId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
       ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
   }),

@@ -88,6 +88,8 @@ function toApiMessages(messages: AgentContextMessage[]): ContextMessage[] {
     contextSource: message.contextSource,
     recalledAtRoundId: message.recalledAtRoundId,
     lastAccessedAt: message.lastAccessedAt,
+    enteredHotAt: message.enteredHotAt,
+    reuseCount: message.reuseCount,
     manualContextLayer: message.manualContextLayer,
   }))
 }
@@ -573,6 +575,9 @@ export async function develop(
         stored.pinnedToHot = message.pinnedToHot
         stored.representation = message.representation
         stored.truthRefs = message.truthRefs
+        stored.lastAccessedAt = message.lastAccessedAt
+        stored.enteredHotAt = message.enteredHotAt
+        stored.reuseCount = message.reuseCount
       }
       for (const summary of managed.summaryArtifacts) {
         if (!summaryArtifacts.some((candidate) => candidate.id === summary.id)) summaryArtifacts.push(summary)
@@ -589,8 +594,17 @@ export async function develop(
         managed.metrics.rewritten && 'rewrite',
         managed.metrics.truncated && 'truncate',
       ].filter((method): method is string => Boolean(method))
+      if (managed.overflow) {
+        const messages = {
+          latest_user_too_large: 'The latest user message is too large for the available Hot context budget. Shorten the message or increase the model context window.',
+          pinned_hot_overflow: 'Pinned Hot messages leave insufficient input capacity. Unpin lower-priority messages or increase the model context window.',
+          current_round_too_large: 'The current conversation round exceeds the available Hot context budget. Start a new round with a shorter request or increase the model context window.',
+          hot_overflow: 'Hot context exceeds the available input budget. Demote Hot messages or increase the model context window.',
+        } as const
+        throw new Error(messages[managed.overflow.reason])
+      }
       if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
-        throw new Error('Hot context exceeds the configured input budget. Unpin or demote Hot messages, reduce recent rounds, or increase the model context window.')
+        throw new Error('The prepared model input exceeds the configured input budget. Reduce Hot content or increase the model context window.')
       }
       if (methods.length > 0) {
         timeline.push({
