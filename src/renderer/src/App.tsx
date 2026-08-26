@@ -553,6 +553,14 @@ export function App(): React.JSX.Element {
   const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
+  const outputMarginError = effectiveModelConfig &&
+    effectiveContextConfig.safeOutputMargin >= effectiveModelConfig.modelMaxContext
+    ? t('outputMarginContextError', {
+        margin: effectiveContextConfig.safeOutputMargin.toLocaleString(),
+        context: effectiveModelConfig.modelMaxContext.toLocaleString(),
+        model: effectiveModelConfig.name,
+      })
+    : ''
   const effectiveContextStrategyLabel = effectiveContextConfig.customStrategyEnabled
     ? t('contextStrategyCustom')
     : effectiveContextConfig.layeredEnabled
@@ -1098,6 +1106,11 @@ export function App(): React.JSX.Element {
       return
     }
 
+    if (outputMarginError) {
+      setError(outputMarginError)
+      return
+    }
+
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
@@ -1566,7 +1579,6 @@ export function App(): React.JSX.Element {
                 )}
               </div>
             )}
-              {error && <p className="error" role="alert">{error}</p>}
             </div>
             {showScrollToBottom && (
               <Button
@@ -1582,6 +1594,7 @@ export function App(): React.JSX.Element {
             )}
           </div>
 
+          {error && <p className="composer-error" role="alert">{error}</p>}
           <form className="composer" onSubmit={sendMessage}>
             <input
               accept={supportedImageMediaTypes.join(',')}

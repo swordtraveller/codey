@@ -596,12 +596,9 @@ h1 {
   font-size: 18px;
 }
 
-.error {
-  position: absolute;
-  right: 32px;
-  bottom: 16px;
-  left: 32px;
-  margin: 0 auto;
+.composer-error {
+  width: min(calc(100% - 64px), 760px);
+  margin: 0 auto 8px;
   color: #bc2f32;
   text-align: center;
 }
