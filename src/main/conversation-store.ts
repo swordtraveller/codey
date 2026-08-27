@@ -11,12 +11,14 @@ import type {
   ContextSummaryArtifact,
 } from '../shared/types'
 import { countContextTokens, SUMMARY_LABEL } from './context'
+import { hydrateImageAttachments, persistImageAttachments, type StoredImageReference } from './image-store'
 
 type MessageOverride = Pick<AgentContextMessage, 'manualContextLayer' | 'pinnedToHot' | 'contextRegion'> & {
   manualProtected?: boolean
   protection?: 'none' | 'partial' | 'full'
 }
 type StoredOverrides = Record<string, MessageOverride>
+type PersistedContextMessage = Omit<AgentContextMessage, 'images'> & { images?: AgentContextMessage['images'] | StoredImageReference[] }
 type LegacyPin = { pinnedToHot?: boolean; protection?: 'none' | 'partial' | 'full'; manualProtected?: boolean }
 type IndexCacheEntry = { signature: string; items: ColdIndexItem[] }
 
@@ -153,6 +155,17 @@ function truthMessage(value: AgentContextMessage, id: string, createdAt: string)
   return { ...truth, id, createdAt }
 }
 
+async function storedContextMessage(
+  projectId: string,
+  conversationId: string,
+  message: AgentContextMessage,
+): Promise<PersistedContextMessage> {
+  return {
+    ...message,
+    images: await persistImageAttachments(projectId, conversationId, message.images),
+  }
+}
+
 function truthIndexItem(message: AgentContextMessage, offset: number, length: number): ColdIndexItem {
   const id = message.id ?? randomUUID()
   return {
@@ -225,10 +238,11 @@ export async function writeConversationMessages(projectId: string, conversationI
     const id = value.id ?? randomUUID()
     // The truth log stores original messages only. Derived layer metadata stays in overrides/indexes.
     const truth = truthMessage(value, id, value.createdAt ?? new Date(0).toISOString())
+    const storedTruth = await storedContextMessage(projectId, conversationId, truth)
     const override = captureOverride(value, overrides[id])
     overrides[id] = override
     const normalized = applyOverride(truth, override)
-    const line = `${JSON.stringify(truth)}\n`
+    const line = `${JSON.stringify(storedTruth)}\n`
     const length = Buffer.byteLength(line, 'utf8')
     lines.push(line)
     index.push(truthIndexItem(normalized, offset, length))
@@ -263,10 +277,11 @@ export async function appendConversationMessages(projectId: string, conversation
   for (const value of additions) {
     const id = value.id ?? randomUUID()
     const truth = truthMessage(value, id, value.createdAt ?? new Date().toISOString())
+    const storedTruth = await storedContextMessage(projectId, conversationId, truth)
     const override = captureOverride(value, overrides[id])
     overrides[id] = override
     const normalized = applyOverride(truth, override)
-    const line = `${JSON.stringify(truth)}\n`
+    const line = `${JSON.stringify(storedTruth)}\n`
     const length = Buffer.byteLength(line, 'utf8')
     lines.push(line)
     index.push(truthIndexItem(normalized, offset, length))
@@ -373,7 +388,8 @@ export async function readConversationMessage(projectId: string, conversationId:
   const item = (await readConversationIndex(projectId, conversationId)).find((candidate) => candidate.id === messageId)
   if (!item) throw new Error('Cold truth message not found')
   const override = (await readOverrides(projectId, conversationId))[messageId]
-  return applyOverride(await readAt<AgentContextMessage>(paths(projectId, conversationId).messages, item), override)
+  const message = await readAt<PersistedContextMessage>(paths(projectId, conversationId).messages, item)
+  return applyOverride({ ...message, images: await hydrateImageAttachments(message.images) }, override)
 }
 
 export async function readConversationSummary(projectId: string, conversationId: string, summaryId: string): Promise<ContextSummaryArtifact> {

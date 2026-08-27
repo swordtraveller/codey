@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -355,108 +355,219 @@ const MemoCompressionMessage = memo(CompressionMessage)
 const MemoAssistantContent = memo(AssistantContent)
 const MemoFunctionCallMessage = memo(FunctionCallMessage)
 
-const ConversationHistory = memo(function ConversationHistory({
-  messages,
+const ConversationMessage = memo(function ConversationMessage({
+  message,
   projectId,
   conversationId,
   conversationTurn,
 }: {
-  messages: ChatMessage[]
+  message: ChatMessage
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const messageTurn = message.turn ?? (
+    conversationTurn && conversationTurn.userMessageId === message.id
+      ? conversationTurn
+      : undefined
+  )
 
   return (
     <>
-      {messages.map((message) => {
-        const messageTurn = message.turn ?? (
-          conversationTurn && conversationTurn.userMessageId === message.id
-            ? conversationTurn
-            : undefined
-        )
-
-        return (
-          <Fragment key={message.id}>
-            <div className={`message ${message.role}`}>
-              {message.compression ? (
-                <MemoCompressionMessage compression={message.compression} />
-              ) : message.role === 'assistant' && message.blocks?.length ? (
-                message.blocks.map((block, index) =>
-                  block.type === 'content' ? (
-                    <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
-                  ) : (
-                    <MemoFunctionCallMessage
-                      block={block}
-                      projectId={projectId}
-                      conversationId={conversationId}
-                      key={block.id}
-                    />
-                  ),
-                )
-              ) : message.role === 'assistant' ? (
-                <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
-              ) : (
-                <div className="user-message-content">
-                  <div className="message-card-header">
-                    {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
-                    <Button
-                      aria-label={t('copyMessage')}
-                      appearance="subtle"
-                      size="small"
-                      title={t('copyMessage')}
-                      onClick={() => copyText(message.content)}
-                    >
-                      {t('copy')}
-                    </Button>
-                  </div>
-                  {message.images?.length ? (
-                    <div className="message-images">
-                      {message.images.map((image) => (
-                        <img alt={image.name} key={image.id} src={image.dataUrl} />
-                      ))}
-                    </div>
-                  ) : null}
-                  {message.content && <p>{message.content}</p>}
-                </div>
-              )}
+      <div className={`message ${message.role}`}>
+        {message.compression ? (
+          <MemoCompressionMessage compression={message.compression} />
+        ) : message.role === 'assistant' && message.blocks?.length ? (
+          message.blocks.map((block, index) =>
+            block.type === 'content' ? (
+              <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
+            ) : (
+              <MemoFunctionCallMessage
+                block={block}
+                projectId={projectId}
+                conversationId={conversationId}
+                key={block.id}
+              />
+            ),
+          )
+        ) : message.role === 'assistant' ? (
+          <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
+        ) : (
+          <div className="user-message-content">
+            <div className="message-card-header">
+              {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              <Button
+                aria-label={t('copyMessage')}
+                appearance="subtle"
+                size="small"
+                title={t('copyMessage')}
+                onClick={() => copyText(message.content)}
+              >
+                {t('copy')}
+              </Button>
             </div>
-            {messageTurn && <ConversationStopwatch turn={messageTurn} />}
-          </Fragment>
-        )
-      })}
+            {message.images?.length ? (
+              <div className="message-images">
+                {message.images.map((image) => (
+                  <img alt={image.name} key={image.id} src={image.dataUrl} />
+                ))}
+              </div>
+            ) : null}
+            {message.content && <p>{message.content}</p>}
+          </div>
+        )}
+      </div>
+      {messageTurn && <ConversationStopwatch turn={messageTurn} />}
     </>
   )
 })
 
+type VirtualWindow = { start: number; end: number }
 
-const IncrementalConversationHistory = memo(function IncrementalConversationHistory({
+const conversationEstimatedRowHeight = 180
+const conversationVirtualOverscan = 5
+
+function updateVirtualWindow(
+  current: VirtualWindow,
+  offsets: number[],
+  scrollTop: number,
+  viewportHeight: number,
+): VirtualWindow {
+  const total = offsets.length - 1
+  if (total <= 0) return { start: 0, end: 0 }
+  const lowerBound = (value: number): number => {
+    let low = 0
+    let high = total
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (offsets[middle + 1] <= value) low = middle + 1
+      else high = middle
+    }
+    return Math.min(low, total - 1)
+  }
+  const start = Math.max(0, lowerBound(Math.max(0, scrollTop)) - conversationVirtualOverscan)
+  const end = Math.min(total, lowerBound(Math.max(0, scrollTop + viewportHeight)) + conversationVirtualOverscan + 1)
+  return current.start === start && current.end === end ? current : { start, end }
+}
+
+const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
   projectId,
   conversationId,
   conversationTurn,
   scrollContainerRef,
+  shouldStickToBottom,
 }: {
   messages: ChatMessage[]
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
   scrollContainerRef: RefObject<HTMLDivElement | null>
+  shouldStickToBottom: boolean
 }): React.JSX.Element {
   const [startIndex, setStartIndex] = useState(() => initialConversationWindowStart(messages.length))
   const historyStartRef = useRef<HTMLDivElement>(null)
   const loadingOlderRef = useRef(false)
   const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const historyExpandedRef = useRef(false)
+  const heightCacheRef = useRef(new Map<string, number>())
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const observedRowsRef = useRef(new Map<string, HTMLDivElement>())
+  const rowRefCallbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
+  const [heightVersion, setHeightVersion] = useState(0)
+  const initialVisibleMessageCount = messages.length - initialConversationWindowStart(messages.length)
+  const [virtualWindow, setVirtualWindow] = useState<VirtualWindow>(() => ({
+    start: Math.max(0, initialVisibleMessageCount - 12),
+    end: initialVisibleMessageCount,
+  }))
+  const scrollFrameRef = useRef<number | null>(null)
   const latestInitialStart = initialConversationWindowStart(messages.length)
-  const visibleStartIndex = Math.min(startIndex, latestInitialStart)
+  const visibleStartIndex = historyExpandedRef.current
+    ? Math.min(startIndex, latestInitialStart)
+    : latestInitialStart
   const hasOlderMessages = visibleStartIndex > 0
-  const visibleMessages = messages.slice(visibleStartIndex)
+  const visibleMessages = useMemo(() => messages.slice(visibleStartIndex), [messages, visibleStartIndex])
+  const layout = useMemo(() => {
+    const offsets = [0]
+    for (const message of visibleMessages) {
+      offsets.push(offsets.at(-1)! + (heightCacheRef.current.get(message.id) ?? conversationEstimatedRowHeight))
+    }
+    return { offsets, totalHeight: offsets.at(-1) ?? 0 }
+  }, [visibleMessages, heightVersion])
 
-  useLayoutEffect(() => {
+  const updateWindow = useCallback(() => {
     const container = scrollContainerRef.current
-    if (container) container.scrollTop = container.scrollHeight
-  }, [scrollContainerRef])
+    if (!container) return
+    const next = updateVirtualWindow(
+      { start: 0, end: 0 },
+      layout.offsets,
+      container.scrollTop,
+      container.clientHeight,
+    )
+    setVirtualWindow({
+      start: visibleStartIndex + next.start,
+      end: visibleStartIndex + next.end,
+    })
+  }, [layout.offsets, scrollContainerRef, visibleStartIndex])
+
+  const scheduleWindowUpdate = useCallback(() => {
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      updateWindow()
+    })
+  }, [updateWindow])
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+  }, [])
+
+  useEffect(() => {
+    const observer = new ResizeObserver((entries) => {
+      let changed = false
+      for (const entry of entries) {
+        const id = entry.target.getAttribute('data-message-id')
+        if (!id) continue
+        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
+        if (height > 0 && heightCacheRef.current.get(id) !== height) {
+          heightCacheRef.current.set(id, height)
+          changed = true
+        }
+      }
+      if (changed) setHeightVersion((version) => version + 1)
+    })
+    resizeObserverRef.current = observer
+    return () => {
+      observer.disconnect()
+      observedRowsRef.current.clear()
+      rowRefCallbacksRef.current.clear()
+      resizeObserverRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    const onScroll = (): void => {
+      scheduleWindowUpdate()
+    }
+    container.addEventListener('scroll', onScroll, { passive: true })
+    return () => container.removeEventListener('scroll', onScroll)
+  }, [scheduleWindowUpdate, scrollContainerRef])
+
+  // Stream progress is rendered outside this component, so this effect only runs for
+  // history changes and never performs layout work for individual stream deltas.
+  useEffect(() => {
+    if (!shouldStickToBottom) return
+    const container = scrollContainerRef.current
+    if (!container) return
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollTo({ top: Number.MAX_SAFE_INTEGER })
+      scheduleWindowUpdate()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages.length, scheduleWindowUpdate, scrollContainerRef, shouldStickToBottom])
 
   useLayoutEffect(() => {
     const anchor = pendingAnchorRef.current
@@ -465,7 +576,23 @@ const IncrementalConversationHistory = memo(function IncrementalConversationHist
     container.scrollTop = anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight)
     pendingAnchorRef.current = null
     loadingOlderRef.current = false
-  }, [scrollContainerRef, visibleStartIndex])
+    scheduleWindowUpdate()
+  }, [scheduleWindowUpdate, scrollContainerRef, visibleStartIndex])
+
+  const previousMessageCountRef = useRef(messages.length)
+  useLayoutEffect(() => {
+    if (previousMessageCountRef.current === messages.length) return
+    previousMessageCountRef.current = messages.length
+    if (!shouldStickToBottom) return
+    const nextStart = historyExpandedRef.current
+      ? visibleStartIndex
+      : initialConversationWindowStart(messages.length)
+    const nextLength = messages.length - nextStart
+    setVirtualWindow({
+      start: nextStart + Math.max(0, nextLength - 12),
+      end: messages.length,
+    })
+  }, [messages.length, shouldStickToBottom, visibleStartIndex])
 
   useEffect(() => {
     const container = scrollContainerRef.current
@@ -475,6 +602,7 @@ const IncrementalConversationHistory = memo(function IncrementalConversationHist
     const observer = new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting || loadingOlderRef.current) return
       loadingOlderRef.current = true
+      historyExpandedRef.current = true
       pendingAnchorRef.current = {
         scrollHeight: container.scrollHeight,
         scrollTop: container.scrollTop,
@@ -493,18 +621,59 @@ const IncrementalConversationHistory = memo(function IncrementalConversationHist
     return () => observer.disconnect()
   }, [hasOlderMessages, messages.length, scrollContainerRef, visibleStartIndex])
 
+  useEffect(() => {
+    scheduleWindowUpdate()
+  }, [layout.offsets, scheduleWindowUpdate])
+
+  const getRowRef = useCallback((id: string) => {
+    const existing = rowRefCallbacksRef.current.get(id)
+    if (existing) return existing
+    const callback = (node: HTMLDivElement | null): void => {
+      const previous = observedRowsRef.current.get(id)
+      if (previous && previous !== node) {
+        resizeObserverRef.current?.unobserve(previous)
+        observedRowsRef.current.delete(id)
+      }
+      if (!node) {
+        rowRefCallbacksRef.current.delete(id)
+        return
+      }
+      observedRowsRef.current.set(id, node)
+      resizeObserverRef.current?.observe(node)
+    }
+    rowRefCallbacksRef.current.set(id, callback)
+    return callback
+  }, [])
+  const renderedStart = Math.min(
+    Math.max(0, virtualWindow.start - visibleStartIndex),
+    visibleMessages.length,
+  )
+  const renderedEnd = Math.min(
+    Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
+    visibleMessages.length,
+  )
+  const topHeight = layout.offsets[renderedStart] ?? 0
+  const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
+
   return (
     <>
       {hasOlderMessages && <div aria-hidden="true" className="conversation-history-start" ref={historyStartRef} />}
-      <ConversationHistory
-        messages={visibleMessages}
-        projectId={projectId}
-        conversationId={conversationId}
-        conversationTurn={conversationTurn}
-      />
+      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: topHeight }} />
+      {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
+        <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
+          <ConversationMessage
+            message={message}
+            projectId={projectId}
+            conversationId={conversationId}
+            conversationTurn={conversationTurn}
+          />
+        </div>
+      ))}
+      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: bottomHeight }} />
     </>
   )
 })
+
 
 function LiveAssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
   const { t } = useTranslation()
@@ -1935,13 +2104,14 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
-                <IncrementalConversationHistory
+                <VirtualizedConversationHistory
                   key={activeConversationKey}
                   messages={activeConversation.messages}
                   projectId={activeProjectId}
                   conversationId={activeConversation.id}
                   conversationTurn={conversationTurn}
                   scrollContainerRef={conversationRef}
+                  shouldStickToBottom={!showScrollToBottom}
                 />
                 <LiveDevelopmentResponse
                   conversationKey={activeConversationKey}

@@ -278,7 +278,6 @@ async function developProject(
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
   }
 
-  await prepareContextDebugStorage(projectId, conversationId)
   const userMessageId = randomUUID()
   const currentUserMessage = {
     id: userMessageId,
@@ -300,9 +299,10 @@ async function developProject(
     images,
     userMessageId,
   )
-  await appendConversationMessages(projectId, conversationId, [currentUserMessage])
-  // 先发布已持久化的用户消息，再开始远端模型请求，避免远端发送端长期只看到“处理中”。
+  // 用户消息已经写入对应会话分片；先发布这个快照，再做上下文索引准备和远端请求。
   await onProjectUpdated?.(project)
+  await prepareContextDebugStorage(projectId, conversationId)
+  await appendConversationMessages(projectId, conversationId, [currentUserMessage])
 
   const roundId = randomUUID()
   const requestHistory = contextConfig.layeredEnabled
@@ -710,7 +710,9 @@ app.whenReady().then(() => {
     try {
       const result = await developProject(projectId, conversationId, content, images, (update) => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
-      }, controller.signal, startedAt)
+      }, controller.signal, startedAt, async (project) => {
+        if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
+      })
       if (!result.error && !result.stopped) {
         void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
       }

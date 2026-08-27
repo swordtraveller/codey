@@ -440,6 +440,15 @@ h1 {
   height: 1px;
 }
 
+.conversation-virtual-spacer {
+  flex: none;
+}
+
+.conversation-message-row {
+  display: flow-root;
+  contain: layout paint;
+}
+
 .markdown-content > :first-child {
   margin-top: 0;
 }
