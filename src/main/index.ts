@@ -453,9 +453,10 @@ function createMainWindow(): void {
     },
   })
   mainWindow = window
+  const webContentsId = window.webContents.id
   window.on('closed', () => {
-    developmentProgressSubscriptions.delete(window.webContents.id)
-    mainWindow = null
+    developmentProgressSubscriptions.delete(webContentsId)
+    if (mainWindow === window) mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
     closeAllPendingScreenshots()
