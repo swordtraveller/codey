@@ -219,10 +219,21 @@ export type Project = {
   conversations: Conversation[]
 }
 
+export type DevelopmentProgressUpdate =
+  | { type: 'append'; items: DevelopmentTimelineItem[] }
+  | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
+  | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
+  | { type: 'update-tool-result'; toolCallId: string; result: string; resultError: boolean }
+
 export type DevelopmentProgress = {
   projectId: string
   conversationId: string
+  update: DevelopmentProgressUpdate
+}
+
+export type DevelopmentProgressState = {
   timeline: DevelopmentTimelineItem[]
+  streamingBlocks: AssistantMessageBlock[]
 }
 
 export type DevelopmentResult = {

@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -24,15 +24,27 @@ import type {
   AgentLimitsConfig,
   AppLanguage,
   AssistantMessageBlock,
+  ChatMessage,
   ContextCompressionNotice,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationTurnRecord,
-  DevelopmentTimelineItem,
   ImageAttachment,
   ImageMediaType,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
+import {
+  clearDevelopmentProgress,
+  getDevelopmentProgress,
+  resetDevelopmentProgress,
+  subscribeDevelopmentProgress,
+  updateDevelopmentProgress,
+} from './development-progress-store'
+import {
+  conversationHistoryBatchSize,
+  expandConversationWindowStart,
+  initialConversationWindowStart,
+} from '../../shared/conversation-window'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -42,6 +54,8 @@ import {
   type ModelConfig,
   type Project,
 } from '../../shared/types'
+
+const markdownPlugins = [remarkGfm]
 
 function readImage(file: File): Promise<ImageAttachment> {
   return new Promise((resolve, reject) => {
@@ -196,7 +210,7 @@ function AssistantContent({ content, createdAt }: { content: string; createdAt?:
       {looksLikeMarkdown(content) ? (
         <MarkdownErrorBoundary fallback={fallback}>
           <div className="markdown-content">
-            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+            <Markdown remarkPlugins={markdownPlugins}>{content}</Markdown>
           </div>
         </MarkdownErrorBoundary>
       ) : (
@@ -335,6 +349,249 @@ function FunctionCallMessage({
     </details>
   )
 }
+
+const MemoCompressionMessage = memo(CompressionMessage)
+const MemoAssistantContent = memo(AssistantContent)
+const MemoFunctionCallMessage = memo(FunctionCallMessage)
+
+const ConversationHistory = memo(function ConversationHistory({
+  messages,
+  projectId,
+  conversationId,
+  conversationTurn,
+}: {
+  messages: ChatMessage[]
+  projectId: string
+  conversationId: string
+  conversationTurn?: ConversationTurn
+}): React.JSX.Element {
+  const { t } = useTranslation()
+
+  return (
+    <>
+      {messages.map((message) => {
+        const messageTurn = message.turn ?? (
+          conversationTurn && conversationTurn.userMessageId === message.id
+            ? conversationTurn
+            : undefined
+        )
+
+        return (
+          <Fragment key={message.id}>
+            <div className={`message ${message.role}`}>
+              {message.compression ? (
+                <MemoCompressionMessage compression={message.compression} />
+              ) : message.role === 'assistant' && message.blocks?.length ? (
+                message.blocks.map((block, index) =>
+                  block.type === 'content' ? (
+                    <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
+                  ) : (
+                    <MemoFunctionCallMessage
+                      block={block}
+                      projectId={projectId}
+                      conversationId={conversationId}
+                      key={block.id}
+                    />
+                  ),
+                )
+              ) : message.role === 'assistant' ? (
+                <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
+              ) : (
+                <div className="user-message-content">
+                  <div className="message-card-header">
+                    {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+                    <Button
+                      aria-label={t('copyMessage')}
+                      appearance="subtle"
+                      size="small"
+                      title={t('copyMessage')}
+                      onClick={() => copyText(message.content)}
+                    >
+                      {t('copy')}
+                    </Button>
+                  </div>
+                  {message.images?.length ? (
+                    <div className="message-images">
+                      {message.images.map((image) => (
+                        <img alt={image.name} key={image.id} src={image.dataUrl} />
+                      ))}
+                    </div>
+                  ) : null}
+                  {message.content && <p>{message.content}</p>}
+                </div>
+              )}
+            </div>
+            {messageTurn && <ConversationStopwatch turn={messageTurn} />}
+          </Fragment>
+        )
+      })}
+    </>
+  )
+})
+
+
+const IncrementalConversationHistory = memo(function IncrementalConversationHistory({
+  messages,
+  projectId,
+  conversationId,
+  conversationTurn,
+  scrollContainerRef,
+}: {
+  messages: ChatMessage[]
+  projectId: string
+  conversationId: string
+  conversationTurn?: ConversationTurn
+  scrollContainerRef: RefObject<HTMLDivElement | null>
+}): React.JSX.Element {
+  const [startIndex, setStartIndex] = useState(() => initialConversationWindowStart(messages.length))
+  const historyStartRef = useRef<HTMLDivElement>(null)
+  const loadingOlderRef = useRef(false)
+  const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const latestInitialStart = initialConversationWindowStart(messages.length)
+  const visibleStartIndex = Math.min(startIndex, latestInitialStart)
+  const hasOlderMessages = visibleStartIndex > 0
+  const visibleMessages = messages.slice(visibleStartIndex)
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current
+    if (container) container.scrollTop = container.scrollHeight
+  }, [scrollContainerRef])
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current
+    const container = scrollContainerRef.current
+    if (!anchor || !container) return
+    container.scrollTop = anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight)
+    pendingAnchorRef.current = null
+    loadingOlderRef.current = false
+  }, [scrollContainerRef, visibleStartIndex])
+
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    const historyStart = historyStartRef.current
+    if (!container || !historyStart || !hasOlderMessages) return
+
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting || loadingOlderRef.current) return
+      loadingOlderRef.current = true
+      pendingAnchorRef.current = {
+        scrollHeight: container.scrollHeight,
+        scrollTop: container.scrollTop,
+      }
+      setStartIndex((current) => expandConversationWindowStart(
+        Math.min(current, initialConversationWindowStart(messages.length)),
+        conversationHistoryBatchSize,
+      ))
+    }, {
+      root: container,
+      rootMargin: '240px 0px 0px',
+      threshold: 0,
+    })
+
+    observer.observe(historyStart)
+    return () => observer.disconnect()
+  }, [hasOlderMessages, messages.length, scrollContainerRef, visibleStartIndex])
+
+  return (
+    <>
+      {hasOlderMessages && <div aria-hidden="true" className="conversation-history-start" ref={historyStartRef} />}
+      <ConversationHistory
+        messages={visibleMessages}
+        projectId={projectId}
+        conversationId={conversationId}
+        conversationTurn={conversationTurn}
+      />
+    </>
+  )
+})
+
+function LiveAssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
+  const { t } = useTranslation()
+  const timestamp = formatMessageTime(createdAt)
+
+  return (
+    <div className="message-card">
+      <div className="message-card-header">
+        {timestamp && <time>{timestamp}</time>}
+        <Button
+          aria-label={t('copyMessage')}
+          appearance="subtle"
+          size="small"
+          title={t('copyMessage')}
+          onClick={() => copyText(content)}
+        >
+          {t('copy')}
+        </Button>
+      </div>
+      <p className="live-response-text">{content}</p>
+    </div>
+  )
+}
+
+function LiveFunctionCallMessage({
+  block,
+}: {
+  block: Extract<AssistantMessageBlock, { type: 'function_call' }>
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <details className="function-call">
+      <summary>{block.name}</summary>
+      <div className="tool-output-section">
+        <span>{t('toolParameters')}</span>
+        <pre>{block.parameters}</pre>
+      </div>
+    </details>
+  )
+}
+
+function LiveDevelopmentResponse({
+  conversationKey,
+  projectId,
+  conversationId,
+  createdAt,
+}: {
+  conversationKey: string
+  projectId: string
+  conversationId: string
+  createdAt?: string
+}): React.JSX.Element | null {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
+    [conversationKey],
+  )
+  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
+  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+
+  if (progress.timeline.length === 0 && progress.streamingBlocks.length === 0) return null
+
+  return (
+    <div className="message assistant live-response">
+      {progress.timeline.map((item, index) =>
+        item.type === 'compression' ? (
+          <MemoCompressionMessage compression={item.compression} key={`live-compression-${index}`} />
+        ) : item.block.type === 'content' ? (
+          <MemoAssistantContent content={item.block.content} createdAt={createdAt} key={`live-block-${index}`} />
+        ) : (
+          <MemoFunctionCallMessage
+            block={item.block}
+            projectId={projectId}
+            conversationId={conversationId}
+            key={item.block.id || `live-block-${index}`}
+          />
+        ),
+      )}
+      {progress.streamingBlocks.map((block, index) =>
+        block.type === 'content' ? (
+          <LiveAssistantContent content={block.content} createdAt={createdAt} key={`stream-block-${index}`} />
+        ) : (
+          <LiveFunctionCallMessage block={block} key={block.id || `stream-block-${index}`} />
+        ),
+      )}
+    </div>
+  )
+}
+
 type ContextStrategyMode = 'default' | 'layered' | 'custom'
 
 function contextStrategyMode(value: ContextManagementConfig, customStrategyAvailable: boolean): ContextStrategyMode {
@@ -533,13 +790,9 @@ export function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [projectError, setProjectError] = useState('')
-  const [liveResponses, setLiveResponses] = useState<Record<string, {
-    projectId: string
-    conversationId: string
-    timeline: DevelopmentTimelineItem[]
-  }>>({})
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const conversationEndRef = useRef<HTMLDivElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
@@ -582,9 +835,6 @@ export function App(): React.JSX.Element {
   const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
   const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
-  const liveTimeline = activeConversationKey
-    ? liveResponses[activeConversationKey]?.timeline ?? []
-    : []
   activeConversationKeyRef.current = activeConversationKey
 
   useEffect(() => {
@@ -629,10 +879,7 @@ export function App(): React.JSX.Element {
       document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
     }
   }, [attachmentMenuOpen])
-  useEffect(() => window.codey.onDevelopmentProgress((progress) => {
-    const key = `${progress.projectId}:${progress.conversationId}`
-    setLiveResponses((current) => ({ ...current, [key]: progress }))
-  }), [])
+  useEffect(() => window.codey.onDevelopmentProgress(updateDevelopmentProgress), [])
 
   useEffect(() => window.codey.onConversationStateChange((change) => {
     setConversationStates((current) => ({
@@ -666,22 +913,25 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', openDebugger)
   }, [activeConversationId, activeProjectId, config.developerMode, t])
 
-  function updateScrollButton(): void {
-    const element = conversationRef.current
-    if (element) {
-      setShowScrollToBottom(element.scrollHeight - element.scrollTop - element.clientHeight > 24)
-    }
-  }
-
   function scrollToBottom(): void {
     setShowScrollToBottom(false)
-    conversationRef.current?.scrollTo({
-      top: conversationRef.current.scrollHeight,
-      behavior: 'smooth',
-    })
+    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }
 
-  useEffect(updateScrollButton, [activeConversation?.messages, liveTimeline, interactionLocked])
+  useEffect(() => {
+    const root = conversationRef.current
+    const end = conversationEndRef.current
+    if (!root || !end) {
+      setShowScrollToBottom(false)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setShowScrollToBottom(!entry.isIntersecting),
+      { root, threshold: 0.9 },
+    )
+    observer.observe(end)
+    return () => observer.disconnect()
+  }, [activeConversationId, activeConversation?.messages.length])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -1133,14 +1383,7 @@ export function App(): React.JSX.Element {
       ),
     }
     replaceProject(optimisticProject)
-    setLiveResponses((current) => ({
-      ...current,
-      [conversationKey]: {
-        projectId,
-        conversationId,
-        timeline: [],
-      },
-    }))
+    resetDevelopmentProgress(conversationKey)
     setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
     setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
     setConversationTurns((current) => ({
@@ -1206,12 +1449,7 @@ export function App(): React.JSX.Element {
       setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
     } finally {
-      setLiveResponses((current) => {
-        if (!current[conversationKey]) return current
-        const next = { ...current }
-        delete next[conversationKey]
-        return next
-      })
+      clearDevelopmentProgress(conversationKey)
       setStoppingConversations((current) => {
         if (!current[conversationKey]) return current
         const next = { ...current }
@@ -1476,7 +1714,6 @@ export function App(): React.JSX.Element {
               ref={conversationRef}
               className="conversation"
               aria-label={t('conversation')}
-              onScroll={updateScrollButton}
             >
             {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
@@ -1496,87 +1733,21 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
-                {activeConversation.messages.map((message) => {
-                  const messageTurn = message.turn ?? (
-                    conversationTurn && conversationTurn.userMessageId === message.id
-                      ? conversationTurn
-                      : undefined
-                  )
-
-                  return (
-                    <Fragment key={message.id}>
-                      <div className={`message ${message.role}`}>
-                        {message.compression ? (
-                          <CompressionMessage compression={message.compression} />
-                        ) : message.role === 'assistant' && message.blocks?.length ? (
-                          message.blocks.map((block, index) =>
-                            block.type === 'content' ? (
-                              <AssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
-                            ) : (
-                              <FunctionCallMessage
-                                block={block}
-                                projectId={activeProject?.id}
-                                conversationId={activeConversation.id}
-                                key={block.id}
-                              />
-                            ),
-                          )
-                        ) : message.role === 'assistant' ? (
-                          <AssistantContent content={message.content} createdAt={message.createdAt} />
-                        ) : (
-                          <div className="user-message-content">
-                            <div className="message-card-header">
-                              {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
-                              <Button
-                                aria-label={t('copyMessage')}
-                                appearance="subtle"
-                                size="small"
-                                title={t('copyMessage')}
-                                onClick={() => copyText(message.content)}
-                              >
-                                {t('copy')}
-                              </Button>
-                            </div>
-                            {message.images?.length ? (
-                              <div className="message-images">
-                                {message.images.map((image) => (
-                                  <img alt={image.name} key={image.id} src={image.dataUrl} />
-                                ))}
-                              </div>
-                            ) : null}
-                            {message.content && <p>{message.content}</p>}
-                          </div>
-                        )}
-                      </div>
-                      {messageTurn && <ConversationStopwatch turn={messageTurn} />}
-                    </Fragment>
-                  )
-                })}
-                {liveTimeline.length > 0 && (
-                  <div className="message assistant live-response">
-                    {liveTimeline.map((item, index) =>
-                      item.type === 'compression' ? (
-                        <CompressionMessage
-                          compression={item.compression}
-                          key={`live-compression-${index}`}
-                        />
-                      ) : item.block.type === 'content' ? (
-                        <AssistantContent
-                          content={item.block.content}
-                          createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
-                          key={`live-block-${index}`}
-                        />
-                      ) : (
-                        <FunctionCallMessage
-                          block={item.block}
-                          projectId={activeProject?.id}
-                          conversationId={activeConversation.id}
-                          key={item.block.id || `live-block-${index}`}
-                        />
-                      ),
-                    )}
-                  </div>
-                )}
+                <IncrementalConversationHistory
+                  key={activeConversationKey}
+                  messages={activeConversation.messages}
+                  projectId={activeProjectId}
+                  conversationId={activeConversation.id}
+                  conversationTurn={conversationTurn}
+                  scrollContainerRef={conversationRef}
+                />
+                <LiveDevelopmentResponse
+                  conversationKey={activeConversationKey}
+                  projectId={activeProjectId}
+                  conversationId={activeConversation.id}
+                  createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
+                />
+                <div aria-hidden="true" className="conversation-end" ref={conversationEndRef} />
               </div>
             )}
             </div>

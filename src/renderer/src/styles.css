@@ -423,6 +423,17 @@ h1 {
   color: rgb(255 255 255 / 86%);
 }
 
+.live-response-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.conversation-history-start,
+.conversation-end {
+  height: 1px;
+}
+
 .markdown-content > :first-child {
   margin-top: 0;
 }

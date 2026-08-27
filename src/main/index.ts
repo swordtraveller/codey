@@ -10,8 +10,8 @@ import type {
   ConversationStateChange,
   ConversationTurnRecord,
   DevelopmentProgress,
+  DevelopmentProgressUpdate,
   DevelopmentResult,
-  DevelopmentTimelineItem,
   ImageAttachment,
   ScreenshotSelection,
   ScreenshotSource,
@@ -203,7 +203,7 @@ async function developProject(
   conversationId: string,
   content: string,
   images: ImageAttachment[] = [],
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
   onProjectUpdated?: (project: Project) => Promise<void> | void,
@@ -656,9 +656,9 @@ app.whenReady().then(() => {
     conversationControllers.set(key, controller)
     setConversationState(projectId, conversationId, 'running')
     try {
-      const result = await developProject(projectId, conversationId, content, images, (timeline) => {
+      const result = await developProject(projectId, conversationId, content, images, (update) => {
         if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, timeline }
+          const progress: DevelopmentProgress = { projectId, conversationId, update }
           event.sender.send('development:progress', progress)
         }
       }, controller.signal, startedAt)

@@ -5,6 +5,7 @@ import type {
   AssistantMessageBlock,
   ContextManagementConfig,
   ContextMetrics,
+  DevelopmentProgressUpdate,
   DevelopmentTimelineItem,
   ModelConfig,
   Project,
@@ -268,7 +269,7 @@ async function requestCompletionAttempt(
     if (!onUpdate || publishTimer) {
       return
     }
-    const delay = Math.max(0, 50 - (Date.now() - lastPublished))
+    const delay = Math.max(0, 100 - (Date.now() - lastPublished))
     if (delay === 0) {
       publish()
     } else {
@@ -514,7 +515,7 @@ export async function develop(
   contextConfig: ContextManagementConfig,
   agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onProgress?: (update: DevelopmentProgressUpdate) => void,
   onContextSnapshot?: (result: ContextResult) => void,
   runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
   networkAccessEnabled = false,
@@ -607,7 +608,7 @@ export async function develop(
         throw new Error('The prepared model input exceeds the configured input budget. Reduce Hot content or increase the model context window.')
       }
       if (methods.length > 0) {
-        timeline.push({
+        const compressionItem: DevelopmentTimelineItem = {
           type: 'compression',
           compression: {
             originalTokens: managed.metrics.originalTokens,
@@ -615,23 +616,22 @@ export async function develop(
             compressionRatio: managed.metrics.compressionRatio,
             method: methods.join(', '),
           },
-        })
-        onProgress?.([...timeline])
+        }
+        timeline.push(compressionItem)
+        onProgress?.({ type: 'append', items: [compressionItem] })
       }
       let response: ChatResponse
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
-          onProgress?.([
-            ...timeline,
-            ...toMessageBlocks(message).map((block) => ({ type: 'block' as const, block })),
-          ])
+          onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
         }, runtime?.signal)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
         if (partialBlocks.length > 0) {
-          timeline.push(...partialBlocks.map((block) => ({ type: 'block' as const, block })))
-          onProgress?.([...timeline])
+          const items = partialBlocks.map((block) => ({ type: 'block' as const, block }))
+          timeline.push(...items)
+          onProgress?.({ type: 'commit-stream', items })
         }
         if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
@@ -655,8 +655,9 @@ export async function develop(
           throw new Error('The model returned an empty response')
         }
         const block = { type: 'content' as const, content: reply }
-        timeline.push({ type: 'block', block })
-        onProgress?.([...timeline])
+        const item = { type: 'block' as const, block }
+        timeline.push(item)
+        onProgress?.({ type: 'commit-stream', items: [item] })
         history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
           writtenFiles,
@@ -668,8 +669,9 @@ export async function develop(
       }
 
       const responseBlocks = toMessageBlocks(message)
-      timeline.push(...responseBlocks.map((block) => ({ type: 'block' as const, block })))
-      onProgress?.([...timeline])
+      const responseItems = responseBlocks.map((block) => ({ type: 'block' as const, block }))
+      timeline.push(...responseItems)
+      onProgress?.({ type: 'commit-stream', items: responseItems })
       history.push({
         role: 'assistant',
         content: message.content ?? null,
@@ -702,8 +704,13 @@ export async function develop(
                 contextSource: 'live',
               })
               updateToolCallResult(timeline, pending.id, stoppedContent, true)
+              onProgress?.({
+                type: 'update-tool-result',
+                toolCallId: pending.id,
+                result: stoppedContent,
+                resultError: true,
+              })
             }
-            onProgress?.([...timeline])
             throw error
           }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
@@ -719,7 +726,12 @@ export async function develop(
           contextSource: 'live',
         })
         updateToolCallResult(timeline, toolCall.id, content, isError)
-        onProgress?.([...timeline])
+        onProgress?.({
+          type: 'update-tool-result',
+          toolCallId: toolCall.id,
+          result: content,
+          resultError: isError,
+        })
         if (runtime?.signal?.aborted) {
           for (const pending of toolCalls.slice(index + 1)) {
             const stoppedContent = 'Stopped by user before completion'
@@ -733,8 +745,13 @@ export async function develop(
               contextSource: 'live',
             })
             updateToolCallResult(timeline, pending.id, stoppedContent, true)
+            onProgress?.({
+              type: 'update-tool-result',
+              toolCallId: pending.id,
+              result: stoppedContent,
+              resultError: true,
+            })
           }
-          onProgress?.([...timeline])
           throw abortError()
         }
       }
