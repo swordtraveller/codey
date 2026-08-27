@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { applyDevelopmentProgressUpdate, createDevelopmentProgressState } from '../src/shared/development-progress'
+import {
+  applyDevelopmentProgressUpdate,
+  compactDevelopmentProgressUpdate,
+  createDevelopmentProgressState,
+} from '../src/shared/development-progress'
 
 describe('development progress updates', () => {
   it('keeps committed items stable while replacing streamed blocks', () => {
@@ -57,4 +61,58 @@ describe('development progress updates', () => {
       block: { ...second.block, result: 'done', resultError: false },
     })
   })
+  it('compacts cumulative stream snapshots into append-only IPC deltas', () => {
+    const initial = applyDevelopmentProgressUpdate(createDevelopmentProgressState(), {
+      type: 'replace-stream',
+      blocks: [
+        { type: 'content', content: 'hello' },
+        { type: 'function_call', id: 'call_', name: 'read', parameters: '{' },
+      ],
+    })
+    const cumulative = {
+      type: 'replace-stream' as const,
+      blocks: [
+        { type: 'content' as const, content: 'hello world' },
+        { type: 'function_call' as const, id: 'call_1', name: 'read_file', parameters: '{}'},
+      ],
+    }
+    const compacted = compactDevelopmentProgressUpdate(initial, cumulative)
+
+    expect(compacted).toEqual({
+      type: 'append-stream',
+      delta: {
+        content: ' world',
+        toolCalls: [{ index: 0, id: '1', name: '_file', parameters: '}' }],
+      },
+    })
+    expect(applyDevelopmentProgressUpdate(initial, compacted!)).toEqual(
+      applyDevelopmentProgressUpdate(initial, cumulative),
+    )
+  })
+
+  it('falls back to replacement when streamed content is rewritten', () => {
+    const initial = applyDevelopmentProgressUpdate(createDevelopmentProgressState(), {
+      type: 'replace-stream',
+      blocks: [{ type: 'content', content: 'draft' }],
+    })
+    const rewritten = {
+      type: 'replace-stream' as const,
+      blocks: [{ type: 'content' as const, content: 'final' }],
+    }
+
+    expect(compactDevelopmentProgressUpdate(initial, rewritten)).toBe(rewritten)
+  })
+
+  it('resets all transient and committed progress', () => {
+    const state = {
+      timeline: [{ type: 'block' as const, block: { type: 'content' as const, content: 'done' } }],
+      streamingBlocks: [{ type: 'content' as const, content: 'partial' }],
+    }
+
+    expect(applyDevelopmentProgressUpdate(state, { type: 'reset' })).toEqual({
+      timeline: [],
+      streamingBlocks: [],
+    })
+  })
+
 })

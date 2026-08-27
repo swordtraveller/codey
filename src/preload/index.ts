@@ -5,6 +5,7 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
+  DevelopmentProgressState,
   ImageAttachment,
   Project,
   ScreenshotSelection,
@@ -86,6 +87,11 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.send('clipboard:screenshot-cancel', captureId),
     stopDevelopment: (projectId: string, conversationId: string) =>
       ipcRenderer.invoke('development:stop', projectId, conversationId),
+    subscribeDevelopmentProgress: (
+      projectId: string | null,
+      conversationId: string | null,
+    ): Promise<DevelopmentProgressState> =>
+      ipcRenderer.invoke('development:subscribe', projectId, conversationId),
     openFrontendPreview: (projectId: string, conversationId: string, serverId: string) =>
       ipcRenderer.invoke('frontend:open-preview', projectId, conversationId, serverId),
     onDevelopmentProgress: (listener: (progress: DevelopmentProgress) => void) => {

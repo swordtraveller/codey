@@ -22,6 +22,14 @@ export function updateDevelopmentProgress(progress: DevelopmentProgress): void {
   notify(key)
 }
 
+export function replaceDevelopmentProgress(
+  key: string,
+  state: DevelopmentProgressState,
+): void {
+  states.set(key, state)
+  notify(key)
+}
+
 export function resetDevelopmentProgress(key: string): void {
   states.set(key, createDevelopmentProgressState())
   notify(key)

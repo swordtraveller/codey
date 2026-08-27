@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, type Display, type NativeImage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, type Display, type NativeImage, type WebContents } from 'electron'
 import { join } from 'node:path'
 import type {
   AgentLimitsConfig,
@@ -10,6 +10,7 @@ import type {
   ConversationStateChange,
   ConversationTurnRecord,
   DevelopmentProgress,
+  DevelopmentProgressState,
   DevelopmentProgressUpdate,
   DevelopmentResult,
   ImageAttachment,
@@ -19,6 +20,11 @@ import type {
   Project,
 } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
+import {
+  applyDevelopmentProgressUpdate,
+  compactDevelopmentProgressUpdate,
+  createDevelopmentProgressState,
+} from '../shared/development-progress'
 import { buildAgentContext, develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
@@ -72,6 +78,8 @@ import {
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
+const developmentProgressStates = new Map<string, DevelopmentProgressState>()
+const developmentProgressSubscriptions = new Map<number, string>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
 type PendingScreenshot = {
   window: BrowserWindow
@@ -113,6 +121,42 @@ function conversationKey(projectId: string, conversationId: string): string {
 
 function getConversationState(projectId: string, conversationId: string): ConversationRuntimeState {
   return conversationStates.get(conversationKey(projectId, conversationId)) ?? 'idle'
+}
+
+function publishDevelopmentProgress(
+  sender: WebContents,
+  projectId: string,
+  conversationId: string,
+  update: DevelopmentProgressUpdate,
+): void {
+  const key = conversationKey(projectId, conversationId)
+  const current = developmentProgressStates.get(key) ?? createDevelopmentProgressState()
+  const transportUpdate = compactDevelopmentProgressUpdate(current, update)
+  const next = applyDevelopmentProgressUpdate(current, update)
+  developmentProgressStates.set(key, next)
+
+  if (
+    transportUpdate &&
+    developmentProgressSubscriptions.get(sender.id) === key &&
+    !sender.isDestroyed()
+  ) {
+    const progress: DevelopmentProgress = { projectId, conversationId, update: transportUpdate }
+    sender.send('development:progress', progress)
+  }
+}
+
+function subscribeDevelopmentProgress(
+  sender: WebContents,
+  projectId: string | null,
+  conversationId: string | null,
+): DevelopmentProgressState {
+  if (!projectId || !conversationId) {
+    developmentProgressSubscriptions.delete(sender.id)
+    return createDevelopmentProgressState()
+  }
+  const key = conversationKey(projectId, conversationId)
+  developmentProgressSubscriptions.set(sender.id, key)
+  return developmentProgressStates.get(key) ?? createDevelopmentProgressState()
 }
 
 function setConversationState(
@@ -410,6 +454,7 @@ function createMainWindow(): void {
   })
   mainWindow = window
   window.on('closed', () => {
+    developmentProgressSubscriptions.delete(window.webContents.id)
     mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
@@ -555,6 +600,11 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
+  ipcMain.handle(
+    'development:subscribe',
+    (event, projectId: string | null, conversationId: string | null) =>
+      subscribeDevelopmentProgress(event.sender, projectId, conversationId),
+  )
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
@@ -654,19 +704,18 @@ app.whenReady().then(() => {
     const controller = new AbortController()
     const startedAt = Date.now()
     conversationControllers.set(key, controller)
+    publishDevelopmentProgress(event.sender, projectId, conversationId, { type: 'reset' })
     setConversationState(projectId, conversationId, 'running')
     try {
       const result = await developProject(projectId, conversationId, content, images, (update) => {
-        if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, update }
-          event.sender.send('development:progress', progress)
-        }
+        publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt)
       if (!result.error && !result.stopped) {
         void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
       }
       return result
     } finally {
+      developmentProgressStates.delete(key)
       if (conversationControllers.get(key) === controller) {
         conversationControllers.delete(key)
       }

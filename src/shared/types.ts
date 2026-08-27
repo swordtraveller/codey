@@ -219,9 +219,21 @@ export type Project = {
   conversations: Conversation[]
 }
 
+export type DevelopmentStreamDelta = {
+  content?: string
+  toolCalls?: Array<{
+    index: number
+    id?: string
+    name?: string
+    parameters?: string
+  }>
+}
+
 export type DevelopmentProgressUpdate =
+  | { type: 'reset' }
   | { type: 'append'; items: DevelopmentTimelineItem[] }
   | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
+  | { type: 'append-stream'; delta: DevelopmentStreamDelta }
   | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
   | { type: 'update-tool-result'; toolCallId: string; result: string; resultError: boolean }
 

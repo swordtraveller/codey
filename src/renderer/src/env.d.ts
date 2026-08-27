@@ -8,6 +8,7 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
+  DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
   Project,
@@ -64,6 +65,10 @@ declare global {
         images?: ImageAttachment[],
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
+      subscribeDevelopmentProgress(
+        projectId: string | null,
+        conversationId: string | null,
+      ): Promise<DevelopmentProgressState>
       screenshot(hideWindow: boolean): Promise<ImageAttachment | null>
       onScreenshotSource(listener: (source: ScreenshotSource) => void): () => void
       completeScreenshotSelection(captureId: string, selection: ScreenshotSelection): void

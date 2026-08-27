@@ -36,6 +36,7 @@ import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMed
 import {
   clearDevelopmentProgress,
   getDevelopmentProgress,
+  replaceDevelopmentProgress,
   resetDevelopmentProgress,
   subscribeDevelopmentProgress,
   updateDevelopmentProgress,
@@ -754,14 +755,286 @@ function ContextSettingsFields({
     </div>
   )
 }
+type ComposerProps = {
+  canSend: boolean
+  configured: boolean
+  conversationWorking: boolean
+  hasActiveConversation: boolean
+  hasProjectFolders: boolean
+  interactionLocked: boolean
+  networkAccessEnabled: boolean
+  stopping: boolean
+  onError: (message: string) => void
+  onNetworkAccessChange: (enabled: boolean) => void
+  onStop: () => void
+  onSubmit: (content: string, images: ImageAttachment[]) => boolean
+}
+
+const Composer = memo(function Composer({
+  canSend,
+  configured,
+  conversationWorking,
+  hasActiveConversation,
+  hasProjectFolders,
+  interactionLocked,
+  networkAccessEnabled,
+  stopping,
+  onError,
+  onNetworkAccessChange,
+  onStop,
+  onSubmit,
+}: ComposerProps): React.JSX.Element {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const attachmentMenuRef = useRef<HTMLDivElement>(null)
+  const draftImagesRef = useRef<ImageAttachment[]>([])
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!attachmentMenuOpen) return
+    function closeAttachmentMenu(event: MouseEvent): void {
+      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
+    }
+    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setAttachmentMenuOpen(false)
+    }
+    document.addEventListener('mousedown', closeAttachmentMenu)
+    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeAttachmentMenu)
+      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
+    }
+  }, [attachmentMenuOpen])
+
+  function replaceDraftImages(images: ImageAttachment[]): void {
+    draftImagesRef.current = images
+    setDraftImages(images)
+  }
+
+  function appendImageAttachments(attachments: ImageAttachment[]): void {
+    const current = draftImagesRef.current
+    if (current.length + attachments.length > maximumImageAttachments) {
+      onError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    replaceDraftImages([...current, ...attachments])
+    onError('')
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return
+    if (draftImagesRef.current.length + files.length > maximumImageAttachments) {
+      onError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
+      onError(t('unsupportedImage'))
+      return
+    }
+    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
+      onError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map(readImage))
+      if (mountedRef.current) appendImageAttachments(attachments)
+    } catch {
+      if (mountedRef.current) onError(t('imageReadFailed'))
+    }
+  }
+
+  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addImageFiles(files)
+  }
+
+  async function captureScreen(hideWindow: boolean): Promise<void> {
+    if (!canSend || interactionLocked) return
+    try {
+      const attachment = await window.codey.screenshot(hideWindow)
+      if (attachment && mountedRef.current) appendImageAttachments([attachment])
+    } catch {
+      if (mountedRef.current) onError(t('screenshotFailed'))
+    }
+  }
+
+  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const image = [...event.clipboardData.items]
+      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
+      ?.getAsFile()
+    if (!image) return
+
+    event.preventDefault()
+    await addImageFiles([image])
+  }
+
+  function submitMessage(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault()
+    const content = draft.trim()
+    const images = draftImages
+    if ((!content && images.length === 0) || !canSend || interactionLocked) return
+    if (!onSubmit(content, images)) return
+    setDraft('')
+    replaceDraftImages([])
+    setAttachmentMenuOpen(false)
+  }
+
+  return (
+    <form className="composer" onSubmit={submitMessage}>
+      <input
+        accept={supportedImageMediaTypes.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectImages(event)}
+        ref={imageInputRef}
+        type="file"
+      />
+      {draftImages.length > 0 && (
+        <div className="draft-images">
+          {draftImages.map((image) => (
+            <div className="draft-image" key={image.id}>
+              <img alt={image.name} src={image.dataUrl} />
+              <Button
+                aria-label={t('removeImage')}
+                appearance="subtle"
+                onClick={() => replaceDraftImages(draftImagesRef.current.filter((item) => item.id !== image.id))}
+                shape="circular"
+                size="small"
+                title={t('removeImage')}
+                type="button"
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="composer-side-controls">
+        <div className="attachment-menu" ref={attachmentMenuRef}>
+          <Button
+            appearance="secondary"
+            aria-expanded={attachmentMenuOpen}
+            aria-haspopup="menu"
+            disabled={!canSend || interactionLocked}
+            onClick={() => setAttachmentMenuOpen((open) => !open)}
+            title={t('addAttachment')}
+            type="button"
+          >
+            +
+          </Button>
+          {attachmentMenuOpen && (
+            <div className="attachment-menu-popover" role="menu">
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  void captureScreen(false)
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('captureScreenshot')}
+              </Button>
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  void captureScreen(true)
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('captureScreenshotHideWindow')}
+              </Button>
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  imageInputRef.current?.click()
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('uploadImage')}
+              </Button>
+            </div>
+          )}
+        </div>
+        <Switch
+          checked={networkAccessEnabled}
+          className="network-access-switch"
+          disabled={interactionLocked}
+          label={t('networkAccess')}
+          onChange={(_, data) => onNetworkAccessChange(data.checked)}
+          title={t('networkAccessWarning')}
+        />
+      </div>
+      <Textarea
+        aria-label={t('developmentRequest')}
+        className="message-input"
+        disabled={!canSend || interactionLocked}
+        size="large"
+        value={draft}
+        onChange={(_, data) => setDraft(data.value)}
+        onPaste={(event) => void handlePaste(event)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            event.currentTarget.form?.requestSubmit()
+          }
+        }}
+        placeholder={
+          !configured
+            ? t('configureModel')
+            : !hasProjectFolders
+              ? t('addFolderFirst')
+              : t('describeTask')
+        }
+      />
+      {conversationWorking ? (
+        <Button
+          appearance="primary"
+          disabled={stopping || !hasActiveConversation}
+          onClick={onStop}
+          size="large"
+          type="button"
+        >
+          {t('stop')}
+        </Button>
+      ) : (
+        <Button
+          appearance="primary"
+          disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
+          size="large"
+          type="submit"
+        >
+          {t('send')}
+        </Button>
+      )}
+    </form>
+  )
+})
+
 export function App(): React.JSX.Element {
   const { t } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
-  const [draft, setDraft] = useState('')
-  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -793,8 +1066,6 @@ export function App(): React.JSX.Element {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
-  const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
@@ -860,26 +1131,29 @@ export function App(): React.JSX.Element {
       .catch(() => setError(t('unableLoadProjects')))
   }, [])
 
-  useEffect(() => {
-    setDraftImages([])
-  }, [activeProjectId, activeConversationId])
+  useEffect(() => window.codey.onDevelopmentProgress(updateDevelopmentProgress), [])
 
   useEffect(() => {
-    if (!attachmentMenuOpen) return
-    function closeAttachmentMenu(event: MouseEvent): void {
-      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
-    }
-    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
-      if (event.key === 'Escape') setAttachmentMenuOpen(false)
-    }
-    document.addEventListener('mousedown', closeAttachmentMenu)
-    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
+    let cancelled = false
+    const projectId = activeProjectId || null
+    const conversationId = activeConversationId || null
+    const key = projectId && conversationId ? `${projectId}:${conversationId}` : ''
+    void window.codey
+      .subscribeDevelopmentProgress(projectId, conversationId)
+      .then((state) => {
+        if (!cancelled && key && activeConversationKeyRef.current === key) {
+          replaceDevelopmentProgress(key, state)
+        }
+      })
+      .catch(() => undefined)
     return () => {
-      document.removeEventListener('mousedown', closeAttachmentMenu)
-      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
+      cancelled = true
     }
-  }, [attachmentMenuOpen])
-  useEffect(() => window.codey.onDevelopmentProgress(updateDevelopmentProgress), [])
+  }, [activeConversationId, activeProjectId])
+
+  useEffect(() => () => {
+    void window.codey.subscribeDevelopmentProgress(null, null)
+  }, [])
 
   useEffect(() => window.codey.onConversationStateChange((change) => {
     setConversationStates((current) => ({
@@ -943,7 +1217,6 @@ export function App(): React.JSX.Element {
     setActiveProjectId(project.id)
     setActiveConversationId(project.conversations[0]?.id ?? '')
     setOpenProjectMenuId(null)
-    setDraft('')
     setError('')
   }
 
@@ -1280,92 +1553,20 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.createConversation(activeProject.id)
       replaceProject(updated)
       setActiveConversationId(updated.conversations.at(-1)?.id ?? '')
-      setDraft('')
       setError('')
     } catch {
       setError(t('unableCreateConversation'))
     }
   }
 
-  function appendImageAttachments(attachments: ImageAttachment[]): boolean {
-    if (draftImages.length + attachments.length > maximumImageAttachments) {
-      setError(t('tooManyImages', { count: maximumImageAttachments }))
-      return false
-    }
-    setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
-    setError('')
-    return true
-  }
-
-  async function addImageFiles(files: File[]): Promise<void> {
-    const conversationKey = activeConversationKeyRef.current
-    if (files.length === 0) return
-    if (draftImages.length + files.length > maximumImageAttachments) {
-      setError(t('tooManyImages', { count: maximumImageAttachments }))
-      return
-    }
-    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
-      setError(t('unsupportedImage'))
-      return
-    }
-    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
-      setError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
-      return
-    }
-
-    try {
-      const attachments = await Promise.all(files.map(readImage))
-      if (conversationKey !== activeConversationKeyRef.current) return
-      appendImageAttachments(attachments)
-    } catch {
-      setError(t('imageReadFailed'))
-    }
-  }
-
-  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const files = [...(event.target.files ?? [])]
-    event.target.value = ''
-    await addImageFiles(files)
-  }
-
-  async function captureScreen(hideWindow: boolean): Promise<void> {
-    if (!canSend || interactionLocked) return
-    try {
-      const attachment = await window.codey.screenshot(hideWindow)
-      if (attachment) appendImageAttachments([attachment])
-    } catch {
-      setError(t('screenshotFailed'))
-    }
-  }
-
-  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
-    const image = [...event.clipboardData.items]
-      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
-      ?.getAsFile()
-    if (!image) return
-
-    event.preventDefault()
-    await addImageFiles([image])
-  }
-  async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault()
-
-    const content = draft.trim()
-    const images = draftImages
+  async function sendMessage(content: string, images: ImageAttachment[]): Promise<void> {
     if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
-      return
-    }
-
-    if (outputMarginError) {
-      setError(outputMarginError)
       return
     }
 
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
-    setDraft('')
-    setDraftImages([])
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
@@ -1590,7 +1791,6 @@ export function App(): React.JSX.Element {
                     key={conversation.id}
                     onClick={() => {
                       setActiveConversationId(conversation.id)
-                      setDraft('')
                       setError('')
                     }}
                   >
@@ -1766,141 +1966,29 @@ export function App(): React.JSX.Element {
           </div>
 
           {error && <p className="composer-error" role="alert">{error}</p>}
-          <form className="composer" onSubmit={sendMessage}>
-            <input
-              accept={supportedImageMediaTypes.join(',')}
-              hidden
-              multiple
-              onChange={(event) => void selectImages(event)}
-              ref={imageInputRef}
-              type="file"
-            />
-            {draftImages.length > 0 && (
-              <div className="draft-images">
-                {draftImages.map((image) => (
-                  <div className="draft-image" key={image.id}>
-                    <img alt={image.name} src={image.dataUrl} />
-                    <Button
-                      aria-label={t('removeImage')}
-                      appearance="subtle"
-                      onClick={() => setDraftImages((current) => current.filter((item) => item.id !== image.id))}
-                      shape="circular"
-                      size="small"
-                      title={t('removeImage')}
-                      type="button"
-                    >
-                      ×
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="composer-side-controls">
-              <div className="attachment-menu" ref={attachmentMenuRef}>
-                <Button
-                  appearance="secondary"
-                  aria-expanded={attachmentMenuOpen}
-                  aria-haspopup="menu"
-                  disabled={!canSend || interactionLocked}
-                  onClick={() => setAttachmentMenuOpen((open) => !open)}
-                  title={t('addAttachment')}
-                  type="button"
-                >
-                  +
-                </Button>
-                {attachmentMenuOpen && (
-                  <div className="attachment-menu-popover" role="menu">
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        void captureScreen(false)
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('captureScreenshot')}
-                    </Button>
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        void captureScreen(true)
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('captureScreenshotHideWindow')}
-                    </Button>
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        imageInputRef.current?.click()
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('uploadImage')}
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <Switch
-                checked={config.networkAccessEnabled}
-                className="network-access-switch"
-                disabled={interactionLocked}
-                label={t('networkAccess')}
-                onChange={(_, data) => void setNetworkAccess(data.checked)}
-                title={t('networkAccessWarning')}
-              />
-            </div>
-            <Textarea
-              aria-label={t('developmentRequest')}
-              className="message-input"
-              disabled={!canSend || interactionLocked}
-              size="large"
-              value={draft}
-              onChange={(_, data) => setDraft(data.value)}
-              onPaste={(event) => void handlePaste(event)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault()
-                  event.currentTarget.form?.requestSubmit()
-                }
-              }}
-              placeholder={
-                !configured
-                  ? t('configureModel')
-                  : !activeProject?.folders.length
-                    ? t('addFolderFirst')
-                    : t('describeTask')
+          <Composer
+            key={activeConversationKey || 'no-conversation'}
+            canSend={canSend}
+            configured={configured}
+            conversationWorking={conversationWorking}
+            hasActiveConversation={Boolean(activeConversation)}
+            hasProjectFolders={Boolean(activeProject?.folders.length)}
+            interactionLocked={interactionLocked}
+            networkAccessEnabled={config.networkAccessEnabled}
+            stopping={stopping}
+            onError={setError}
+            onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
+            onStop={() => void stopMessage()}
+            onSubmit={(content, images) => {
+              if (outputMarginError) {
+                setError(outputMarginError)
+                return false
               }
-            />
-            {conversationWorking ? (
-              <Button
-                appearance="primary"
-                disabled={stopping || !activeProject || !activeConversation}
-                onClick={() => void stopMessage()}
-                size="large"
-                type="button"
-              >
-                {t('stop')}
-              </Button>
-            ) : (
-              <Button
-                appearance="primary"
-                disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
-                size="large"
-                type="submit"
-              >
-                {t('send')}
-              </Button>
-            )}
-          </form>
+              if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
+              void sendMessage(content, images)
+              return true
+            }}
+          />
         </section>
       </main>
 
