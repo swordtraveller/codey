@@ -145,6 +145,12 @@ body {
   text-align: right;
 }
 
+.conversation-round-count {
+  color: var(--colorNeutralForeground3);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
 .topbar-row {
   display: flex !important;
   flex-direction: row !important;

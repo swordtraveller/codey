@@ -1091,6 +1091,7 @@ export function App(): React.JSX.Element {
       ? t('contextStrategyLayeredShort')
       : t('contextStrategyDefault')
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
+  const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
@@ -1851,6 +1852,7 @@ export function App(): React.JSX.Element {
               )}
               {activeConversation && (
                 <div className="topbar-row">
+                  <span className="conversation-round-count">{t('conversationRoundCount', { count: conversationRoundCount })}</span>
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
