@@ -231,12 +231,65 @@ describe('conversation context store', () => {
       }))
   })
 
-  it('loads pinned, recent and remembered Warm messages while leaving unrelated Cold data unread', async () => {
+  it('keeps manually promoted Warm messages in Hot without pinning them', async () => {
     const messages: AgentContextMessage[] = [
-      { id: 'old-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Unrelated old request' },
+      { id: 'warm-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Promoted context', manualContextLayer: 'warm' },
+      { id: 'recent-user', createdAt: '2026-01-01T00:00:01.000Z', role: 'user', content: 'Latest request' },
+    ]
+    await writeConversationMessages('project', 'conversation', messages)
+
+    const workingSet = await readConversationWorkingSet(
+      'project',
+      'conversation',
+      { ...defaultContextManagementConfig, recentKeepRounds: 1, coldRecallTokenBudget: 0 },
+      'No matching query',
+      [],
+      [{ ...messages[0], pinnedToHot: false, manualContextLayer: undefined, contextLayer: 'hot', contextSource: 'warm-recall' }],
+    )
+
+    expect(workingSet.filter((message) => message.id === 'warm-user')).toEqual([
+      expect.objectContaining({ contextLayer: 'hot', contextSource: 'warm-recall', pinnedToHot: false, manualContextLayer: undefined }),
+    ])
+  })
+
+  it('preserves persisted Hot entry metadata across working-set rebuilds', async () => {
+    const messages: AgentContextMessage[] = [
+      { id: 'old-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Old request' },
+      { id: 'latest-user', createdAt: '2026-08-26T00:00:00.000Z', role: 'user', content: 'Latest request' },
+    ]
+    await writeConversationMessages('project', 'conversation', messages)
+    const rememberedHot: AgentContextMessage[] = [{
+      ...messages[0],
+      contextLayer: 'hot',
+      enteredHotAt: '2026-08-20T00:00:00.000Z',
+      lastAccessedAt: '2026-08-21T00:00:00.000Z',
+      reuseCount: 3,
+    }]
+
+    const workingSet = await readConversationWorkingSet(
+      'project',
+      'conversation',
+      { ...defaultContextManagementConfig, coldRecallTokenBudget: 0 },
+      '',
+      [],
+      [],
+      rememberedHot,
+      'latest-user',
+    )
+
+    expect(workingSet.find((message) => message.id === 'old-user')).toEqual(expect.objectContaining({
+      enteredHotAt: '2026-08-20T00:00:00.000Z',
+      lastAccessedAt: '2026-08-21T00:00:00.000Z',
+      reuseCount: 3,
+    }))
+    expect(workingSet.find((message) => message.id === 'latest-user')).toEqual(expect.objectContaining({ contextLayer: 'hot' }))
+  })
+  it('initializes a budgeted Hot working set while leaving unrelated Cold data unread', async () => {
+    const messages: AgentContextMessage[] = [
+      { id: 'old-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Unrelated old request '.repeat(2_000) },
       { id: 'pinned', createdAt: '2026-01-01T00:00:01.000Z', role: 'assistant', content: 'Pinned decision', pinnedToHot: true },
       { id: 'warm-user', createdAt: '2026-01-01T00:00:02.000Z', role: 'user', content: 'Manual warm request', manualContextLayer: 'warm' },
-      { id: 'cold-reply', createdAt: '2026-01-01T00:00:03.000Z', role: 'assistant', content: 'Unrelated Cold reply' },
+      { id: 'cold-reply', createdAt: '2026-01-01T00:00:03.000Z', role: 'assistant', content: 'Unrelated Cold reply '.repeat(2_000) },
       { id: 'recent-user', createdAt: '2026-01-01T00:00:04.000Z', role: 'user', content: 'Latest request' },
       { id: 'recent-reply', createdAt: '2026-01-01T00:00:05.000Z', role: 'assistant', content: 'Latest response' },
     ]
@@ -248,6 +301,7 @@ describe('conversation context store', () => {
       {
         ...defaultContextManagementConfig,
         recentKeepRounds: 1,
+        hotTokenBudget: 1_000,
         warmTokenBudget: 0,
         coldRecallTokenBudget: 0,
       },

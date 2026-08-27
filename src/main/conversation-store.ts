@@ -428,34 +428,105 @@ export async function readContextRecords(projectId: string, conversationId: stri
   for (const id of ids.slice(0, 20)) {
     if (truth.has(id)) {
       const message = await readConversationMessage(projectId, conversationId, id)
-      result.push({ ...message, representation: 'original', truthRefs: [id], contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-truth-recall', lastAccessedAt: new Date().toISOString() })
+      result.push({ ...message, representation: 'original', truthRefs: [id], contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-truth-recall', lastAccessedAt: new Date().toISOString(), enteredHotAt: new Date().toISOString(), reuseCount: (message.reuseCount ?? 0) + 1 })
     } else if (summaries.has(id)) {
       const summary = await readConversationSummary(projectId, conversationId, id)
-      result.push({ id: summary.id, createdAt: summary.createdAt, role: summary.role, content: summary.content, representation: 'summary', truthRefs: summary.sourceMessageIds, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-summary-recall', lastAccessedAt: new Date().toISOString() })
+      result.push({ id: summary.id, createdAt: summary.createdAt, role: summary.role, content: summary.content, representation: 'summary', truthRefs: summary.sourceMessageIds, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-summary-recall', lastAccessedAt: new Date().toISOString(), enteredHotAt: new Date().toISOString(), reuseCount: 1 })
     }
   }
   return result
 }
 
-export async function readConversationWorkingSet(projectId: string, conversationId: string, config: ContextManagementConfig, query: string, rememberedWarm: AgentContextMessage[] = []): Promise<AgentContextMessage[]> {
+export async function readConversationWorkingSet(
+  projectId: string,
+  conversationId: string,
+  config: ContextManagementConfig,
+  query: string,
+  rememberedWarm: AgentContextMessage[] = [],
+  promotedHot: AgentContextMessage[] = [],
+  rememberedHot: AgentContextMessage[] = [],
+  latestUserMessageId?: string,
+): Promise<AgentContextMessage[]> {
   const index = await readConversationIndex(projectId, conversationId)
-  const rounds = splitRounds(index)
-  const recentStart = Math.max(0, rounds.length - config.recentKeepRounds)
-  const older = rounds.slice(0, recentStart).flat()
-  const recent = rounds.slice(recentStart).flat()
-  const resident = older.filter((item) => migratePin(item) || item.contextRegion === 'long-term')
-  const residentIds = new Set([...resident, ...recent].map((item) => item.id))
+  const indexById = new Map(index.map((item) => [item.id, item]))
+  const now = new Date().toISOString()
+  const hotById = new Map<string, AgentContextMessage>()
   const warmById = new Map<string, AgentContextMessage>()
-
-  for (const item of older.filter((candidate) => !residentIds.has(candidate.id) && candidate.manualContextLayer === 'warm')) {
-    const message = await readConversationMessage(projectId, conversationId, item.id)
-    warmById.set(item.id, { ...message, contextLayer: 'warm', contextRegion: item.contextRegion ?? 'newborn', contextSource: 'hot-demotion', representation: 'original', truthRefs: [item.id] })
+  const load = async (id: string): Promise<AgentContextMessage | undefined> => {
+    if (!indexById.has(id)) return undefined
+    return readConversationMessage(projectId, conversationId, id)
   }
-  for (const message of rememberedWarm) {
-    if (!message.id || residentIds.has(message.id) || message.representation === 'summary') continue
-    warmById.set(message.id, { ...message, contextLayer: 'warm', contextRegion: message.contextRegion ?? 'newborn', contextSource: 'hot-demotion', representation: 'original', truthRefs: message.truthRefs?.length ? message.truthRefs : [message.id] })
+  const asHot = (message: AgentContextMessage, fresh = false): AgentContextMessage => ({
+    ...message,
+    contextLayer: 'hot',
+    contextRegion: message.contextRegion ?? 'newborn',
+    contextSource: message.contextSource ?? 'live',
+    representation: message.representation ?? 'original',
+    truthRefs: message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : [],
+    enteredHotAt: fresh ? now : message.enteredHotAt ?? message.createdAt ?? now,
+    reuseCount: Math.max(0, message.reuseCount ?? 0),
+  })
+  const asWarm = (message: AgentContextMessage): AgentContextMessage => ({
+    ...message,
+    contextLayer: 'warm',
+    contextRegion: message.contextRegion ?? 'newborn',
+    contextSource: message.contextSource === 'cold-summary-recall' ? 'cold-summary-recall' : 'hot-demotion',
+    representation: message.representation ?? 'original',
+    truthRefs: message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : [],
+  })
+
+  for (const message of rememberedHot) if (message.id && message.contextLayer !== 'warm') hotById.set(message.id, asHot(message))
+  for (const message of rememberedWarm) if (message.id && message.representation !== 'summary') warmById.set(message.id, asWarm(message))
+  for (const message of promotedHot) {
+    if (!message.id) continue
+    hotById.set(message.id, asHot({
+      ...message,
+      pinnedToHot: false,
+      manualContextLayer: undefined,
+      contextSource: message.contextSource ?? 'warm-recall',
+      lastAccessedAt: now,
+      reuseCount: (message.reuseCount ?? 0) + 1,
+    }, true))
+    warmById.delete(message.id)
   }
 
+  for (const item of index.filter((candidate) => candidate.manualContextLayer === 'warm')) {
+    if (hotById.has(item.id) || warmById.has(item.id)) continue
+    const message = await load(item.id)
+    if (message) warmById.set(item.id, asWarm(message))
+  }
+  for (const item of index.filter((candidate) => migratePin(candidate) || candidate.contextRegion === 'long-term')) {
+    if (hotById.has(item.id)) continue
+    const message = await load(item.id)
+    if (message) hotById.set(item.id, asHot(message))
+    warmById.delete(item.id)
+  }
+
+  if (latestUserMessageId && !hotById.has(latestUserMessageId)) {
+    const message = await load(latestUserMessageId)
+    if (message) hotById.set(latestUserMessageId, asHot(message))
+    warmById.delete(latestUserMessageId)
+  }
+
+  if (rememberedHot.length === 0 && rememberedWarm.length === 0) {
+    const targetTokens = Math.max(1, Math.floor(config.hotTokenBudget * 0.8))
+    let selectedTokens = [...hotById.values()].reduce((sum, message) => sum + countContextTokens(message), 0)
+    const rounds = splitRounds(index.filter((item) => item.manualContextLayer !== 'warm'))
+    for (let roundIndex = rounds.length - 1; roundIndex >= 0; roundIndex -= 1) {
+      const round = rounds[roundIndex]
+      const missing = round.filter((item) => !hotById.has(item.id))
+      const roundTokens = missing.reduce((sum, item) => sum + item.tokenCount, 0)
+      if (missing.length === 0) continue
+      if (selectedTokens > 0 && selectedTokens + roundTokens > targetTokens) break
+      for (const item of missing) {
+        const message = await load(item.id)
+        if (message) hotById.set(item.id, asHot(message))
+      }
+      selectedTokens += roundTokens
+    }
+  }
+
+  const residentIds = new Set([...hotById.keys(), ...warmById.keys()])
   const terms = queryTerms(query)
   const warmMatches = [...warmById.values()].map((message) => ({
     message,
@@ -468,7 +539,12 @@ export async function readConversationWorkingSet(projectId: string, conversation
   for (const { message } of warmMatches) {
     const tokenCount = countContextTokens(message)
     if (recalledTokens + tokenCount > config.coldRecallTokenBudget) continue
-    recalled.push({ ...message, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'warm-recall', lastAccessedAt: new Date().toISOString() })
+    recalled.push(asHot({
+      ...message,
+      contextSource: 'warm-recall',
+      lastAccessedAt: now,
+      reuseCount: (message.reuseCount ?? 0) + 1,
+    }, true))
     warmById.delete(message.id ?? '')
     for (const truthRef of message.truthRefs ?? []) recalledTruthRefs.add(truthRef)
     recalledTokens += tokenCount
@@ -484,14 +560,11 @@ export async function readConversationWorkingSet(projectId: string, conversation
     recalledTokens += match.tokenCount
   }
 
-  const result: AgentContextMessage[] = []
-  for (const item of [...resident, ...recent].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
-    const message = await readConversationMessage(projectId, conversationId, item.id)
-    result.push({ ...message, contextLayer: 'hot', contextRegion: item.contextRegion ?? 'newborn', contextSource: 'live', representation: 'original', truthRefs: [item.id] })
-  }
-  result.push(...[...warmById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')))
-  result.push(...recalled)
-  return result
+  return [
+    ...[...hotById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')),
+    ...[...warmById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')),
+    ...recalled,
+  ]
 }
 export async function updateConversationPin(projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean): Promise<void> {
   const items = await readConversationIndex(projectId, conversationId)

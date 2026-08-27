@@ -27,9 +27,11 @@ import {
   demoteContext,
   getContextDebugOverview,
   getContextDebugRevision,
+  getPromotedHotMessages,
   getRememberedWarmMessages,
   hasContextDebugSnapshot,
   persistContextDebugMessages,
+  promoteContext,
   readColdContextMessage,
   readContextSnapshotMessage,
   rememberInitializedSnapshot,
@@ -37,6 +39,7 @@ import {
   searchColdContext,
   setContextPin,
   simulateTokenLimit,
+  unpinLowestPriorityContext,
 } from './context-debug'
 import {
   appendConversationMessages,
@@ -264,7 +267,10 @@ async function developProject(
         conversationId,
         contextConfig,
         normalizedContent,
-        getRememberedWarmMessages(projectId, conversationId),
+        [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
+        getPromotedHotMessages(projectId, conversationId),
+        conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
+        userMessageId,
       )
     : await readConversationMessages(projectId, conversationId)
   if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
@@ -495,7 +501,9 @@ async function initializeContextDebugContext(
         conversationId,
         contextConfig,
         '',
-        getRememberedWarmMessages(projectId, conversationId),
+        [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
+        getPromotedHotMessages(projectId, conversationId),
+        conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
       )
     : await readConversationMessages(projectId, conversationId)
   const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, { allow: appConfig.developerMode && conversation.contextConfigOverride !== null })
@@ -693,10 +701,14 @@ app.whenReady().then(() => {
     readContextSnapshotMessage(projectId, conversationId, messageId))
   ipcMain.handle('context-debug:search', (_event, projectId: string, conversationId: string, query: string) =>
     runDebugOperation(projectId, conversationId, () => searchColdContext(projectId, conversationId, query)))
+  ipcMain.handle('context-debug:promote', (_event, projectId: string, conversationId: string, messageId: string) =>
+    runDebugOperation(projectId, conversationId, () => promoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:set-pin', (_event, projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
     runDebugOperation(projectId, conversationId, () => setContextPin(projectId, conversationId, messageId, pinnedToHot)))
   ipcMain.handle('context-debug:demote', (_event, projectId: string, conversationId: string, messageId?: string) =>
     runDebugOperation(projectId, conversationId, () => demoteContext(projectId, conversationId, messageId)))
+  ipcMain.handle('context-debug:unpin-lowest', (_event, projectId: string, conversationId: string) =>
+    runDebugOperation(projectId, conversationId, () => unpinLowestPriorityContext(projectId, conversationId)))
   ipcMain.handle('context-debug:simulate', (_event, projectId: string, conversationId: string, requestTokens: number) =>
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
 

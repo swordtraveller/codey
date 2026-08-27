@@ -117,10 +117,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:read-layer', projectId, conversationId, messageId),
     searchColdContext: (projectId: string, conversationId: string, query: string) =>
       ipcRenderer.invoke('context-debug:search', projectId, conversationId, query),
+    promoteContext: (projectId: string, conversationId: string, messageId: string) =>
+      ipcRenderer.invoke('context-debug:promote', projectId, conversationId, messageId),
     setContextPin: (projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
       ipcRenderer.invoke('context-debug:set-pin', projectId, conversationId, messageId, pinnedToHot),
     demoteContext: (projectId: string, conversationId: string, messageId?: string) =>
       ipcRenderer.invoke('context-debug:demote', projectId, conversationId, messageId),
+    unpinLowestPriorityContext: (projectId: string, conversationId: string) =>
+      ipcRenderer.invoke('context-debug:unpin-lowest', projectId, conversationId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
       ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
   }),
