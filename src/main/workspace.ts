@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   defaultAgentLimitsConfig,
@@ -97,7 +97,61 @@ function conversationPath(projectId: string, conversationId: string): string {
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify(value), 'utf8')
+  const temporaryPath = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporaryPath, JSON.stringify(value), 'utf8')
+    // A forced exit can leave the temporary file behind, but never a truncated live shard.
+    await rename(temporaryPath, path)
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined)
+    throw error
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isWorkspaceManifest(value: unknown): value is WorkspaceManifest {
+  return isRecord(value)
+    && value.version === 2
+    && Array.isArray(value.projectIds)
+    && value.projectIds.every((projectId) => typeof projectId === 'string')
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+async function quarantineBrokenFile(path: string, error: unknown): Promise<void> {
+  const quarantinedPath = `${path}.corrupt-${Date.now()}-${randomUUID().slice(0, 8)}`
+  await rename(path, quarantinedPath).catch((renameError: NodeJS.ErrnoException) => {
+    if (!isMissingFile(renameError)) throw renameError
+  })
+  log.warn('workspace.storage.quarantined', {
+    path,
+    quarantinedPath,
+    error: error instanceof Error ? error.message : String(error),
+  })
+}
+
+async function discoverProjectIds(): Promise<string[]> {
+  const projectsDirectory = join(storageRoot(), 'projects')
+  try {
+    const entries = await readdir(projectsDirectory, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => ({
+        directoryName: entry.name,
+        projectId: Buffer.from(entry.name, 'base64url').toString('utf8'),
+      }))
+      .filter(({ directoryName, projectId }) => projectId.length > 0 && key(projectId) === directoryName)
+      .map(({ projectId }) => projectId)
+      .sort()
+  } catch (error) {
+    if (isMissingFile(error)) return []
+    throw error
+  }
 }
 
 function serializeWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
@@ -244,18 +298,94 @@ async function migrateLegacyProjects(stored: LegacyStoredProject[]): Promise<Pro
   return migrated
 }
 
-async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Project[]> {
+type ShardedLoadResult = {
+  projects: Project[]
+  repaired: boolean
+}
+
+async function loadShardedProjects(manifest: WorkspaceManifest): Promise<ShardedLoadResult> {
   const loaded: Project[] = []
+  let repaired = false
   for (const projectId of manifest.projectIds) {
-    const metadata = JSON.parse(await readFile(projectPath(projectId), 'utf8')) as StoredProjectMetadata
+    let projectRepaired = false
+    const metadataPath = projectPath(projectId)
+    let metadata: StoredProjectMetadata
+    try {
+      const parsed = JSON.parse(await readFile(metadataPath, 'utf8')) as unknown
+      if (
+        !isRecord(parsed)
+        || parsed.id !== projectId
+        || typeof parsed.name !== 'string'
+        || !Array.isArray(parsed.folders)
+        || !Array.isArray(parsed.conversationIds)
+      ) throw new Error('Invalid project metadata')
+      metadata = parsed as StoredProjectMetadata
+    } catch (error) {
+      if (!isMissingFile(error)) await quarantineBrokenFile(metadataPath, error)
+      log.warn('workspace.project.skipped', { projectId, error: error instanceof Error ? error.message : String(error) })
+      projectRepaired = true
+      repaired = true
+      continue
+    }
+
     const conversations: Conversation[] = []
     for (const conversationId of metadata.conversationIds) {
-      const stored = JSON.parse(await readFile(conversationPath(projectId, conversationId), 'utf8')) as StoredConversation
-      conversations.push(await normalizeConversation(stored))
+      if (typeof conversationId !== 'string') {
+        projectRepaired = true
+        repaired = true
+        continue
+      }
+      const storedPath = conversationPath(projectId, conversationId)
+      try {
+        const parsed = JSON.parse(await readFile(storedPath, 'utf8')) as unknown
+        if (!isRecord(parsed) || !Array.isArray(parsed.messages)) throw new Error('Invalid conversation data')
+        conversations.push(await normalizeConversation(parsed as StoredConversation))
+      } catch (error) {
+        if (!isMissingFile(error)) await quarantineBrokenFile(storedPath, error)
+        log.warn('workspace.conversation.skipped', {
+          projectId,
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        projectRepaired = true
+        repaired = true
+      }
     }
-    loaded.push(await normalizeProjectMetadata(metadata, conversations))
+
+    try {
+      const project = await normalizeProjectMetadata(metadata, conversations)
+      if (project.conversations.length === 0) {
+        const replacement = createConversationRecord(1)
+        project.conversations.push(replacement)
+        await persistConversation(project.id, replacement)
+        projectRepaired = true
+        repaired = true
+      }
+      if (project.conversations.length !== metadata.conversationIds.length) {
+        projectRepaired = true
+        repaired = true
+      }
+      if (projectRepaired) await persistProjectMetadata(project)
+      loaded.push(project)
+    } catch (error) {
+      await quarantineBrokenFile(metadataPath, error)
+      log.warn('workspace.project.skipped', { projectId, error: error instanceof Error ? error.message : String(error) })
+      projectRepaired = true
+      repaired = true
+    }
   }
-  return loaded
+  return { projects: loaded, repaired }
+}
+
+async function recoverShardedProjects(reason: unknown): Promise<Project[]> {
+  const projectIds = await discoverProjectIds()
+  const recovered = await loadShardedProjects({ version: 2, projectIds })
+  await persistManifest(recovered.projects)
+  log.warn('workspace.storage.recovered', {
+    projectCount: recovered.projects.length,
+    reason: reason instanceof Error ? reason.message : String(reason),
+  })
+  return recovered.projects
 }
 
 async function loadProjects(): Promise<Project[]> {
@@ -263,14 +393,26 @@ async function loadProjects(): Promise<Project[]> {
   if (projects) return projects
   if (projectsLoad) return projectsLoad
   projectsLoad = (async () => {
+    const workspacePath = getWorkspacePath()
     try {
-      const stored = JSON.parse(await readFile(getWorkspacePath(), 'utf8')) as WorkspaceManifest | LegacyStoredProject[]
-      projects = Array.isArray(stored)
-        ? await migrateLegacyProjects(stored)
-        : await loadShardedProjects(stored)
+      const stored = JSON.parse(await readFile(workspacePath, 'utf8')) as unknown
+      if (Array.isArray(stored)) {
+        projects = await migrateLegacyProjects(stored as LegacyStoredProject[])
+      } else if (isWorkspaceManifest(stored)) {
+        const loaded = await loadShardedProjects(stored)
+        projects = loaded.projects
+        if (loaded.repaired) await persistManifest(projects)
+      } else {
+        throw new Error('Invalid workspace manifest')
+      }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Unable to read projects')
-      projects = []
+      if (isMissingFile(error)) {
+        const projectIds = await discoverProjectIds()
+        projects = projectIds.length === 0 ? [] : await recoverShardedProjects(new Error('Workspace manifest was missing'))
+      } else {
+        await quarantineBrokenFile(workspacePath, error)
+        projects = await recoverShardedProjects(error)
+      }
     }
     return projects
   })()

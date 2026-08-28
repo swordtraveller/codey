@@ -12,7 +12,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { addMessage, createProject, getProjects } from '../src/main/workspace'
+import { addMessage, createProject, getProjects, getProjectsLive } from '../src/main/workspace'
 
 async function filesUnder(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -74,6 +74,69 @@ describe('sharded workspace storage', () => {
     expect((await getProjects()).map((project) => project.name)).toEqual(['First', 'Second'])
   })
 
+  async function reloadFromDisk(directory: string): Promise<void> {
+    const resetDirectory = await createTemporaryDirectory('codey-workspace-reload-')
+    electronState.userData = resetDirectory
+    await getProjectsLive()
+    await removeTemporaryDirectory(resetDirectory)
+    electronState.userData = directory
+  }
+
+  it('salvages valid projects and quarantines a damaged conversation after restart', async () => {
+    const first = await createProject('First')
+    const second = await createProject('Second')
+    const secondConversation = second.conversations[0]
+    await addMessage(first.id, first.conversations[0].id, 'user', 'keep me', undefined, undefined, undefined, undefined, undefined, undefined, 'keep-message')
+
+    const secondConversationPath = join(
+      electronState.userData,
+      'workspace-data',
+      'projects',
+      Buffer.from(second.id).toString('base64url'),
+      'conversations',
+      `${Buffer.from(secondConversation.id).toString('base64url')}.json`,
+    )
+    await writeFile(secondConversationPath, '{"messages":[', 'utf8')
+    await reloadFromDisk(electronState.userData)
+
+    const recovered = await getProjects()
+    expect(recovered.map((project) => project.id)).toEqual([first.id, second.id])
+    expect(recovered.find((project) => project.id === first.id)?.conversations[0].messages).toEqual([
+      expect.objectContaining({ id: 'keep-message', content: 'keep me' }),
+    ])
+    expect(recovered.find((project) => project.id === second.id)?.conversations).toHaveLength(1)
+    expect(recovered.find((project) => project.id === second.id)?.conversations[0].messages).toEqual([])
+
+    const projectMetadataPath = join(
+      electronState.userData,
+      'workspace-data',
+      'projects',
+      Buffer.from(second.id).toString('base64url'),
+      'project.json',
+    )
+    const metadata = JSON.parse(await readFile(projectMetadataPath, 'utf8')) as { conversationIds: string[] }
+    expect(metadata.conversationIds).toHaveLength(1)
+    expect(metadata.conversationIds[0]).not.toBe(secondConversation.id)
+    const files = await filesUnder(electronState.userData)
+    expect(files.some((path) => path.startsWith(`${secondConversationPath}.corrupt-`))).toBe(true)
+  })
+
+  it('rebuilds a damaged manifest from valid project shards', async () => {
+    const first = await createProject('First')
+    const second = await createProject('Second')
+    const workspacePath = join(electronState.userData, 'workspace.json')
+    await writeFile(workspacePath, '{"version":2,"projectIds":', 'utf8')
+    await reloadFromDisk(electronState.userData)
+
+    const recovered = await getProjects()
+    expect(new Set(recovered.map((project) => project.id))).toEqual(new Set([first.id, second.id]))
+    expect(JSON.parse(await readFile(workspacePath, 'utf8'))).toEqual({
+      version: 2,
+      projectIds: expect.arrayContaining([first.id, second.id]),
+    })
+    const files = await filesUnder(electronState.userData)
+    expect(files.some((path) => path.startsWith(`${workspacePath}.corrupt-`))).toBe(true)
+  })
   it('writes image bytes separately and never persists a data URL', async () => {
     const project = await createProject('Images')
     const conversation = project.conversations[0]
