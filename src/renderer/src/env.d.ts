@@ -12,6 +12,8 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   Project,
+  PerformanceTraceEvent,
+  PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
   TokenLimitSimulation,
@@ -26,6 +28,11 @@ declare global {
     readonly runtime?: RuntimeInfo
     readonly codey: {
       getConfig(): Promise<AppConfig>
+      getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      setPerformanceTracingEnabled(enabled: boolean): Promise<PerformanceTraceStatus>
+      exportPerformanceTraces(): Promise<string | null>
+      revealPerformanceTraces(): Promise<void>
+      recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
@@ -63,6 +70,7 @@ declare global {
         conversationId: string,
         content: string,
         images?: ImageAttachment[],
+        traceId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
       subscribeDevelopmentProgress(

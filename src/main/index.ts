@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, type Display, type NativeImage, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
   AgentLimitsConfig,
@@ -59,6 +60,14 @@ import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
+import {
+  exportPerformanceTraces,
+  flushPerformanceTraces,
+  getPerformanceTracePath,
+  getPerformanceTraceStatus,
+  recordPerformanceTrace,
+  setPerformanceTracingEnabled,
+} from './performance-trace'
 import {
   addMessage,
   addMessageImmediately,
@@ -254,7 +263,9 @@ async function developProject(
   signal?: AbortSignal,
   startedAt = Date.now(),
   onProjectUpdated?: (project: Project) => void,
+  traceId: string = randomUUID(),
 ): Promise<DevelopmentResult> {
+  const totalStartedAt = performance.now()
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
   if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
@@ -289,6 +300,7 @@ async function developProject(
     content: normalizedContent,
     images,
   }
+  const memoryWriteStartedAt = performance.now()
   project = await addMessageImmediately(
     projectId,
     conversationId,
@@ -302,12 +314,19 @@ async function developProject(
     images,
     userMessageId,
   )
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'user-message-memory-write', projectId, conversationId,
+    durationMs: performance.now() - memoryWriteStartedAt,
+    data: { contentChars: normalizedContent.length, imageCount: images.length },
+  })
   // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
   onProjectUpdated?.(project)
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'user-message-published', projectId, conversationId })
   // The latest message is supplied directly to context reads below, so no
   // context-store write needs to delay the first model request.
 
   const roundId = randomUUID()
+  const contextReadStartedAt = performance.now()
   const requestHistory = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
@@ -321,11 +340,19 @@ async function developProject(
         currentUserMessage,
       )
     : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'context-read', projectId, conversationId,
+    durationMs: performance.now() - contextReadStartedAt,
+    data: { messageCount: requestHistory.length, layered: contextConfig.layeredEnabled },
+  })
   if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
     return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
   }
+  const contextPersistStartedAt = performance.now()
   const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
+    .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
     .catch((error) => log.warn('context.latest-user.persist.failed', error))
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
   const result = await develop(
     project,
     modelConfig,
@@ -339,6 +366,8 @@ async function developProject(
     },
     {
       conversationId,
+      projectId,
+      traceId,
       signal,
       latestUserMessageId: userMessageId,
       allowCustomStrategy,
@@ -384,6 +413,11 @@ async function developProject(
     error: result.stopped ? undefined : result.error,
   }
   project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'develop-total', projectId, conversationId,
+    durationMs: performance.now() - totalStartedAt,
+    data: { result: turn.result, timelineItems: result.timeline.length },
+  })
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -606,6 +640,29 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
+  ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('performance:set-enabled', async (_event, enabled: boolean) => {
+    const config = await readConfig()
+    if (!config.developerMode && enabled) throw new Error('Developer mode is disabled')
+    const saved = await saveConfig({ ...config, performanceTracingEnabled: enabled })
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
+    return getPerformanceTraceStatus()
+  })
+  ipcMain.handle('performance:export', async () => {
+    const status = await getPerformanceTraceStatus()
+    if (status.sizeBytes === 0) return null
+    const result = await dialog.showSaveDialog({
+      defaultPath: 'performance-traces.jsonl',
+      filters: [{ name: 'JSONL', extensions: ['jsonl'] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    await exportPerformanceTraces(result.filePath)
+    return result.filePath
+  })
+  ipcMain.handle('performance:reveal', async () => {
+    shell.showItemInFolder(getPerformanceTracePath())
+  })
+  ipcMain.on('performance:record', (_event, event) => recordPerformanceTrace(event))
   ipcMain.handle(
     'development:subscribe',
     (event, projectId: string | null, conversationId: string | null) =>
@@ -615,6 +672,7 @@ app.whenReady().then(() => {
     ensureAllIdle()
     const saved = await saveConfig(config)
     updateKeepAwake(saved)
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
@@ -702,7 +760,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -717,7 +775,7 @@ app.whenReady().then(() => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt, (project) => {
         if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
-      })
+      }, traceId)
       if (!result.error && !result.stopped) {
         void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
       }
@@ -770,7 +828,10 @@ app.whenReady().then(() => {
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
 
   void readConfig()
-    .then(updateKeepAwake)
+    .then((config) => {
+      updateKeepAwake(config)
+      setPerformanceTracingEnabled(config.developerMode && config.performanceTracingEnabled)
+    })
     .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
   void pollBridge()
@@ -788,7 +849,7 @@ app.on('will-quit', (event) => {
   event.preventDefault()
   closeAllPendingScreenshots()
   closeAllPreviewWindows()
-  void stopAllFrontendServers().finally(() => app.quit())
+  void stopAllFrontendServers().then(() => flushPerformanceTraces()).finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

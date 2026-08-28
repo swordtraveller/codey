@@ -71,6 +71,7 @@ export type AppConfig = {
   keepAwakeEnabled: boolean
   keepAwakeOnlyWhileWorking: boolean
   networkAccessEnabled: boolean
+  performanceTracingEnabled: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -82,9 +83,30 @@ export const defaultAppConfig: AppConfig = {
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
+  performanceTracingEnabled: false,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
+export type PerformanceTraceScope = 'renderer' | 'main' | 'agent'
+
+export type PerformanceTraceValue = number | boolean | string | null
+
+export type PerformanceTraceEvent = {
+  traceId: string
+  scope: PerformanceTraceScope
+  phase: string
+  projectId?: string
+  conversationId?: string
+  durationMs?: number
+  data?: Record<string, PerformanceTraceValue>
+}
+
+export type PerformanceTraceStatus = {
+  enabled: boolean
+  path: string
+  sizeBytes: number
+}
+
 
 export type ContextMetrics = {
   originalTokens: number

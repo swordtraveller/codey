@@ -31,6 +31,7 @@ import type {
   ConversationTurnRecord,
   ImageAttachment,
   ImageMediaType,
+  PerformanceTraceStatus,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
 import {
@@ -1242,11 +1243,16 @@ export function App(): React.JSX.Element {
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
+  const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
+  const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
+  const [performanceError, setPerformanceError] = useState('')
   const [projectError, setProjectError] = useState('')
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
+  const activeTraceIdsRef = useRef<Record<string, string>>({})
+  const lastProgressTraceAtRef = useRef<Record<string, number>>({})
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const activeConversation = activeProject?.conversations.find(
@@ -1312,7 +1318,18 @@ export function App(): React.JSX.Element {
       .catch(() => setError(t('unableLoadProjects')))
   }, [])
 
-  useEffect(() => window.codey.onDevelopmentProgress(updateDevelopmentProgress), [])
+  useEffect(() => window.codey.onDevelopmentProgress((progress) => {
+    const key = `${progress.projectId}:${progress.conversationId}`
+    const now = performance.now()
+    if (now - (lastProgressTraceAtRef.current[key] ?? 0) >= 1_000) {
+      lastProgressTraceAtRef.current[key] = now
+      window.codey.recordPerformanceTrace({
+        traceId: activeTraceIdsRef.current[key] ?? 'renderer-session', scope: 'renderer', phase: 'progress-received',
+        projectId: progress.projectId, conversationId: progress.conversationId,
+      })
+    }
+    updateDevelopmentProgress(progress)
+  }), [])
 
   useEffect(() => {
     let cancelled = false
@@ -1344,6 +1361,7 @@ export function App(): React.JSX.Element {
   }), [])
 
   useEffect(() => window.codey.onProjectUpdated((project) => {
+    window.codey.recordPerformanceTrace({ traceId: 'renderer-session', scope: 'renderer', phase: 'project-update-received', projectId: project.id })
     setProjects((current) => current.map((item) => item.id === project.id ? project : item))
   }), [])
 
@@ -1413,6 +1431,47 @@ export function App(): React.JSX.Element {
     setConfigDraft(createSettingsDraft())
     setSettingsError('')
     setSettingsOpen(true)
+  }
+
+  async function openPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    setPerformanceDialogOpen(true)
+    try {
+      setPerformanceStatus(await window.codey.getPerformanceTraceStatus())
+    } catch {
+      setPerformanceError(t('unableLoadPerformanceTrace'))
+    }
+  }
+
+  async function togglePerformanceTracing(enabled: boolean): Promise<void> {
+    setPerformanceError('')
+    try {
+      setPerformanceStatus(await window.codey.setPerformanceTracingEnabled(enabled))
+    } catch {
+      setPerformanceError(t('unableUpdatePerformanceTrace'))
+    }
+  }
+
+  async function exportPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    try {
+      const path = await window.codey.exportPerformanceTraces()
+      if (path) {
+        setPerformanceError(t('performanceTraceExported'))
+        setPerformanceStatus(await window.codey.getPerformanceTraceStatus())
+      }
+    } catch {
+      setPerformanceError(t('unableExportPerformanceTrace'))
+    }
+  }
+
+  async function revealPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    try {
+      await window.codey.revealPerformanceTraces()
+    } catch {
+      setPerformanceError(t('unableRevealPerformanceTrace'))
+    }
   }
 
   async function openBridgeDialog(): Promise<void> {
@@ -1748,6 +1807,9 @@ export function App(): React.JSX.Element {
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
+    const traceId = crypto.randomUUID()
+    activeTraceIdsRef.current[conversationKey] = traceId
+    const sendStartedAt = performance.now()
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
@@ -1765,6 +1827,10 @@ export function App(): React.JSX.Element {
       ),
     }
     replaceProject(optimisticProject)
+    window.codey.recordPerformanceTrace({
+      traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
+      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length },
+    })
     resetDevelopmentProgress(conversationKey)
     setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
     setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
@@ -1780,7 +1846,8 @@ export function App(): React.JSX.Element {
     }))
 
     try {
-      const result = await window.codey.develop(projectId, conversationId, content, images)
+      window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
+      const result = await window.codey.develop(projectId, conversationId, content, images, traceId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
@@ -1831,6 +1898,7 @@ export function App(): React.JSX.Element {
       setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
     } finally {
+      delete activeTraceIdsRef.current[conversationKey]
       clearDevelopmentProgress(conversationKey)
       setStoppingConversations((current) => {
         if (!current[conversationKey]) return current
@@ -1984,6 +2052,9 @@ export function App(): React.JSX.Element {
 
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
+          </Button>
+          <Button appearance="subtle" disabled={!config.developerMode} onClick={() => void openPerformanceTracing()}>
+            {t('performanceTracing')}
           </Button>
           <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
             Handover
@@ -2208,6 +2279,34 @@ export function App(): React.JSX.Element {
               >
                 {creatingProject ? t('creating') : t('create')}
               </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={performanceDialogOpen} onOpenChange={(_, data) => setPerformanceDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('performanceTracing')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <p className="settings-description">{t('performanceTracingDescription')}</p>
+              {!config.developerMode && <p className="settings-warning">{t('performanceTracingRequiresDeveloperMode')}</p>}
+              {performanceStatus && (
+                <>
+                  <p className="status">{performanceStatus.enabled ? t('performanceTracingEnabled') : t('performanceTracingDisabled')}</p>
+                  <p className="status">{t('performanceTracePath')}: {performanceStatus.path}</p>
+                  <p className="status">{t('performanceTraceSize')}: {performanceStatus.sizeBytes.toLocaleString()} B</p>
+                </>
+              )}
+              {performanceError && <p className="dialog-error">{performanceError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceTraces')}</Button>
+              <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceTraces')}</Button>
+              <Button appearance="primary" onClick={() => void togglePerformanceTracing(!performanceStatus?.enabled)} disabled={!config.developerMode || !performanceStatus}>
+                {performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              </Button>
+              <Button appearance="secondary" onClick={() => setPerformanceDialogOpen(false)}>{t('close')}</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>

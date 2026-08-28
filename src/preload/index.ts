@@ -8,6 +8,8 @@ import type {
   DevelopmentProgressState,
   ImageAttachment,
   Project,
+  PerformanceTraceEvent,
+  PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
 } from '../shared/types'
@@ -22,6 +24,11 @@ contextBridge.exposeInMainWorld(
   'codey',
   Object.freeze({
     getConfig: () => ipcRenderer.invoke('config:get'),
+    getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
+    setPerformanceTracingEnabled: (enabled: boolean): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:set-enabled', enabled),
+    exportPerformanceTraces: (): Promise<string | null> => ipcRenderer.invoke('performance:export'),
+    revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
+    recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
@@ -72,8 +79,8 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
-    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content, images),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, traceId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
     onScreenshotSource: (listener: (source: ScreenshotSource) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, source: ScreenshotSource) => listener(source)

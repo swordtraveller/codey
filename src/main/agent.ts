@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import type {
   AgentContextMessage,
   AgentLimitsConfig,
@@ -12,6 +13,7 @@ import type {
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
+import { recordPerformanceTrace } from './performance-trace'
 import { toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
@@ -258,12 +260,20 @@ async function requestCompletionAttempt(
   tools: object[],
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string },
 ): Promise<ChatResponse> {
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
   }
 
+  const providerBuildStartedAt = performance.now()
   const providerMessages = toProviderMessages(messages)
+  recordPerformanceTrace({
+    traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'provider-message-build',
+    projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+    durationMs: performance.now() - providerBuildStartedAt,
+    data: { messageCount: providerMessages.length },
+  })
   const requestBody = {
     model: config.modelName,
     messages: providerMessages,
@@ -271,6 +281,14 @@ async function requestCompletionAttempt(
     tool_choice: 'auto',
     stream: true,
   }
+  const serializeStartedAt = performance.now()
+  const requestBodyJson = JSON.stringify(requestBody)
+  recordPerformanceTrace({
+    traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-body-serialize',
+    projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+    durationMs: performance.now() - serializeStartedAt,
+    data: { bodyBytes: Buffer.byteLength(requestBodyJson, 'utf8'), messageCount: providerMessages.length, toolCount: tools.length },
+  })
   log.debug('model.request', modelRequestSummary(config, messages, tools))
 
   let content = ''
@@ -278,6 +296,9 @@ async function requestCompletionAttempt(
   let buffer = ''
   let publishTimer: ReturnType<typeof setTimeout> | undefined
   let lastPublished = 0
+  let chunkCount = 0
+  let updateCount = 0
+  const requestStartedAt = performance.now()
   const currentMessage = (): ResponseMessage => ({
     content: content || null,
     tool_calls: toolCalls.length ? toolCalls.map((toolCall) => ({
@@ -288,6 +309,7 @@ async function requestCompletionAttempt(
   const publish = (): void => {
     publishTimer = undefined
     lastPublished = Date.now()
+    updateCount += 1
     onUpdate?.(currentMessage())
   }
   const schedulePublish = (): void => {
@@ -303,14 +325,20 @@ async function requestCompletionAttempt(
   }
 
   try {
+    recordPerformanceTrace({ traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'fetch-start', projectId: runtime?.projectId, conversationId: runtime?.conversationId })
     const response = await fetch(config.baseUrl + '/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + config.apiKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(requestBody),
+      body: requestBodyJson,
       signal,
+    })
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'response-headers',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { status: response.status },
     })
 
     if (!response.ok) {
@@ -337,6 +365,11 @@ async function requestCompletionAttempt(
       if (message) {
         onUpdate?.(message)
       }
+      recordPerformanceTrace({
+        traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
+        projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+        durationMs: performance.now() - requestStartedAt, data: { status: response.status, stream: false, updateCount },
+      })
       return data
     }
 
@@ -386,6 +419,7 @@ async function requestCompletionAttempt(
       if (result.done) {
         break
       }
+      chunkCount += 1
       buffer += decoder.decode(result.value, { stream: true })
       const events = buffer.split(/\r?\n\r?\n/)
       buffer = events.pop() ?? ''
@@ -405,6 +439,16 @@ async function requestCompletionAttempt(
     const message = currentMessage()
     const data: ChatResponse = { choices: [{ message }] }
     log.debug('model.response', modelResponseSummary(response.status, message, true))
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'stream-update',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { chunkCount, updateCount, contentChars: content.length },
+    })
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { status: response.status, stream: true, chunkCount, updateCount },
+    })
     return data
   } catch (error) {
     if (publishTimer) {
@@ -420,6 +464,7 @@ async function requestCompletion(
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
   signal?: AbortSignal,
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string },
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
@@ -445,7 +490,7 @@ async function requestCompletion(
     }
 
     try {
-      return await requestCompletionAttempt(config, messages, tools, controller.signal, update)
+      return await requestCompletionAttempt(config, messages, tools, controller.signal, update, runtime)
     } catch (error) {
       const details = errorDetails(error)
       const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -545,7 +590,7 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onProgress?: (update: DevelopmentProgressUpdate) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
+  runtime?: { conversationId: string; projectId?: string; traceId?: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
@@ -585,9 +630,16 @@ export async function develop(
     for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const contextManageStartedAt = performance.now()
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
+      })
+      recordPerformanceTrace({
+        traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'context-manage',
+        projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+        durationMs: performance.now() - contextManageStartedAt,
+        data: { requestIndex, inputMessages: activeHistory.length + 1, outputMessages: managed.messages.length, outputTokens: managed.metrics.compressedTokens },
       })
       if ((!runtime?.allowCustomStrategy || !contextConfig.customStrategyEnabled || !contextConfig.customStrategyScript?.trim()) &&
         runtime?.latestUserMessageId && !managed.messages.some((message) =>
@@ -652,7 +704,7 @@ export async function develop(
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
           onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
-        }, runtime?.signal)
+        }, runtime?.signal, runtime)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
