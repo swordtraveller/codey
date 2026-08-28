@@ -1976,10 +1976,6 @@ export function App(): React.JSX.Element {
     <FluentProvider className="app" theme={webLightTheme}>
       <main className="shell">
         <aside className="sidebar">
-          <div className="brand" aria-label="Codey">
-            <span className="brand-mark">C</span>
-            Codey
-          </div>
 
           <Button appearance="primary" onClick={openProjectDialog}>
             {t('newProject')}
@@ -2203,7 +2199,6 @@ export function App(): React.JSX.Element {
             >
             {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
-                <span className="welcome-mark">C</span>
                 <h1>{emptyTitle}</h1>
                 <p>{emptyDescription}</p>
                 {!activeProject && (
