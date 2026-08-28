@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, type Display, type NativeImage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
   AgentLimitsConfig,
@@ -10,8 +11,9 @@ import type {
   ConversationStateChange,
   ConversationTurnRecord,
   DevelopmentProgress,
+  DevelopmentProgressState,
+  DevelopmentProgressUpdate,
   DevelopmentResult,
-  DevelopmentTimelineItem,
   ImageAttachment,
   ScreenshotSelection,
   ScreenshotSource,
@@ -19,6 +21,11 @@ import type {
   Project,
 } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
+import {
+  applyDevelopmentProgressUpdate,
+  compactDevelopmentProgressUpdate,
+  createDevelopmentProgressState,
+} from '../shared/development-progress'
 import { buildAgentContext, develop } from './agent'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
@@ -54,12 +61,25 @@ import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreen
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
+  exportPerformanceTraces,
+  flushPerformanceTraces,
+  getPerformanceTracePath,
+  getPerformanceTraceStatus,
+  listPerformanceTraceFiles,
+  readPerformanceTraceFile,
+  recordPerformanceTrace,
+  setPerformanceTracingEnabled,
+} from './performance-trace'
+import {
   addMessage,
+  addMessageImmediately,
   addProjectFolder,
   createConversation,
   createProject,
   getProject,
+  getProjectLive,
   getProjects,
+  getProjectsLive,
   saveConversationContext,
   setConversationAgentLimits,
   setConversationContextConfig,
@@ -72,7 +92,10 @@ import {
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
+const developmentProgressStates = new Map<string, DevelopmentProgressState>()
+const developmentProgressSubscriptions = new Map<number, string>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
+let performanceTraceWindow: BrowserWindow | null = null
 type PendingScreenshot = {
   window: BrowserWindow
   image: NativeImage
@@ -113,6 +136,42 @@ function conversationKey(projectId: string, conversationId: string): string {
 
 function getConversationState(projectId: string, conversationId: string): ConversationRuntimeState {
   return conversationStates.get(conversationKey(projectId, conversationId)) ?? 'idle'
+}
+
+function publishDevelopmentProgress(
+  sender: WebContents,
+  projectId: string,
+  conversationId: string,
+  update: DevelopmentProgressUpdate,
+): void {
+  const key = conversationKey(projectId, conversationId)
+  const current = developmentProgressStates.get(key) ?? createDevelopmentProgressState()
+  const transportUpdate = compactDevelopmentProgressUpdate(current, update)
+  const next = applyDevelopmentProgressUpdate(current, update)
+  developmentProgressStates.set(key, next)
+
+  if (
+    transportUpdate &&
+    developmentProgressSubscriptions.get(sender.id) === key &&
+    !sender.isDestroyed()
+  ) {
+    const progress: DevelopmentProgress = { projectId, conversationId, update: transportUpdate }
+    sender.send('development:progress', progress)
+  }
+}
+
+function subscribeDevelopmentProgress(
+  sender: WebContents,
+  projectId: string | null,
+  conversationId: string | null,
+): DevelopmentProgressState {
+  if (!projectId || !conversationId) {
+    developmentProgressSubscriptions.delete(sender.id)
+    return createDevelopmentProgressState()
+  }
+  const key = conversationKey(projectId, conversationId)
+  developmentProgressSubscriptions.set(sender.id, key)
+  return developmentProgressStates.get(key) ?? createDevelopmentProgressState()
 }
 
 function setConversationState(
@@ -203,17 +262,19 @@ async function developProject(
   conversationId: string,
   content: string,
   images: ImageAttachment[] = [],
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
-  onProjectUpdated?: (project: Project) => Promise<void> | void,
+  onProjectUpdated?: (project: Project) => void,
+  traceId: string = randomUUID(),
 ): Promise<DevelopmentResult> {
+  const totalStartedAt = performance.now()
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
   if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
   if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
-  let project = await getProject(projectId)
+  let project = await getProjectLive(projectId)
   if (project.folders.length === 0) {
     return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
@@ -234,7 +295,6 @@ async function developProject(
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
   }
 
-  await prepareContextDebugStorage(projectId, conversationId)
   const userMessageId = randomUUID()
   const currentUserMessage = {
     id: userMessageId,
@@ -243,7 +303,8 @@ async function developProject(
     content: normalizedContent,
     images,
   }
-  project = await addMessage(
+  const memoryWriteStartedAt = performance.now()
+  project = await addMessageImmediately(
     projectId,
     conversationId,
     'user',
@@ -256,11 +317,19 @@ async function developProject(
     images,
     userMessageId,
   )
-  await appendConversationMessages(projectId, conversationId, [currentUserMessage])
-  // 先发布已持久化的用户消息，再开始远端模型请求，避免远端发送端长期只看到“处理中”。
-  await onProjectUpdated?.(project)
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'user-message-memory-write', projectId, conversationId,
+    durationMs: performance.now() - memoryWriteStartedAt,
+    data: { contentChars: normalizedContent.length, imageCount: images.length },
+  })
+  // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
+  onProjectUpdated?.(project)
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'user-message-published', projectId, conversationId })
+  // The latest message is supplied directly to context reads below, so no
+  // context-store write needs to delay the first model request.
 
   const roundId = randomUUID()
+  const contextReadStartedAt = performance.now()
   const requestHistory = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
@@ -271,11 +340,22 @@ async function developProject(
         getPromotedHotMessages(projectId, conversationId),
         conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
         userMessageId,
+        currentUserMessage,
       )
-    : await readConversationMessages(projectId, conversationId)
+    : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'context-read', projectId, conversationId,
+    durationMs: performance.now() - contextReadStartedAt,
+    data: { messageCount: requestHistory.length, layered: contextConfig.layeredEnabled },
+  })
   if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
     return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
   }
+  const contextPersistStartedAt = performance.now()
+  const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
+    .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
+    .catch((error) => log.warn('context.latest-user.persist.failed', error))
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
   const result = await develop(
     project,
     modelConfig,
@@ -289,6 +369,8 @@ async function developProject(
     },
     {
       conversationId,
+      projectId,
+      traceId,
       signal,
       latestUserMessageId: userMessageId,
       allowCustomStrategy,
@@ -302,6 +384,7 @@ async function developProject(
     result.context,
   )
   try {
+    await latestContextWrite
     await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
@@ -333,6 +416,11 @@ async function developProject(
     error: result.stopped ? undefined : result.error,
   }
   project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'develop-total', projectId, conversationId,
+    durationMs: performance.now() - totalStartedAt,
+    data: { result: turn.result, timelineItems: result.timeline.length },
+  })
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -340,14 +428,12 @@ async function processBridgeMessage(message: import('../shared/bridge').Handover
   if (getConversationState(message.projectId, message.conversationId) !== 'idle') return false
   const key = conversationKey(message.projectId, message.conversationId)
   const controller = new AbortController()
-  const publishProject = async (project: Project): Promise<void> => {
+  const publishProject = (project: Project): void => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', project)
-    try {
-      await bridgeHandover.sync(await getProjects())
-    } catch (error) {
-      // 同步失败不能导致消息事件重复消费，否则会重复写入用户消息。
-      log.warn('bridge.sync.failed', error)
-    }
+    // 使用内存快照同步 Bridge，不等待本轮消息的磁盘持久化；同步失败也不能阻塞模型请求。
+    void getProjectsLive()
+      .then((projects) => bridgeHandover.sync(projects))
+      .catch((error) => log.warn('bridge.sync.failed', error))
   }
   conversationControllers.set(key, controller)
   setConversationState(message.projectId, message.conversationId, 'running')
@@ -409,8 +495,10 @@ function createMainWindow(): void {
     },
   })
   mainWindow = window
+  const webContentsId = window.webContents.id
   window.on('closed', () => {
-    mainWindow = null
+    developmentProgressSubscriptions.delete(webContentsId)
+    if (mainWindow === window) mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
     closeAllPendingScreenshots()
@@ -553,12 +641,76 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
   loadRenderer(window, { view: 'context-debug', projectId, conversationId })
 }
 
+function openPerformanceTraceWindow(fileName: string): void {
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) {
+    if (performanceTraceWindow.isMinimized()) performanceTraceWindow.restore()
+    performanceTraceWindow.focus()
+    loadRenderer(performanceTraceWindow, { view: 'performance-trace', file: fileName })
+    return
+  }
+  const window = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 860,
+    minHeight: 560,
+    title: 'Codey Performance Trace',
+    autoHideMenuBar: true,
+    backgroundColor: '#f5f5f5',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, '../preload/index.js'),
+    },
+  })
+  performanceTraceWindow = window
+  window.on('closed', () => {
+    if (performanceTraceWindow === window) performanceTraceWindow = null
+  })
+  loadRenderer(window, { view: 'performance-trace', file: fileName })
+}
+
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
+  ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
+  ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
+  ipcMain.handle('performance:open-file', async (_event, fileName: string) => {
+    await readPerformanceTraceFile(fileName)
+    openPerformanceTraceWindow(fileName)
+  })
+  ipcMain.handle('performance:set-enabled', async (_event, enabled: boolean) => {
+    const config = await readConfig()
+    if (!config.developerMode && enabled) throw new Error('Developer mode is disabled')
+    const saved = await saveConfig({ ...config, performanceTracingEnabled: enabled })
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
+    return getPerformanceTraceStatus()
+  })
+  ipcMain.handle('performance:export', async () => {
+    const status = await getPerformanceTraceStatus()
+    if (status.sizeBytes === 0) return null
+    const result = await dialog.showSaveDialog({
+      defaultPath: 'performance-traces.jsonl',
+      filters: [{ name: 'JSONL', extensions: ['jsonl'] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    await exportPerformanceTraces(result.filePath)
+    return result.filePath
+  })
+  ipcMain.handle('performance:reveal', async () => {
+    shell.showItemInFolder(getPerformanceTracePath())
+  })
+  ipcMain.on('performance:record', (_event, event) => recordPerformanceTrace(event))
+  ipcMain.handle(
+    'development:subscribe',
+    (event, projectId: string | null, conversationId: string | null) =>
+      subscribeDevelopmentProgress(event.sender, projectId, conversationId),
+  )
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
     updateKeepAwake(saved)
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
@@ -646,7 +798,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = []) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -654,19 +806,20 @@ app.whenReady().then(() => {
     const controller = new AbortController()
     const startedAt = Date.now()
     conversationControllers.set(key, controller)
+    publishDevelopmentProgress(event.sender, projectId, conversationId, { type: 'reset' })
     setConversationState(projectId, conversationId, 'running')
     try {
-      const result = await developProject(projectId, conversationId, content, images, (timeline) => {
-        if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, timeline }
-          event.sender.send('development:progress', progress)
-        }
-      }, controller.signal, startedAt)
+      const result = await developProject(projectId, conversationId, content, images, (update) => {
+        publishDevelopmentProgress(event.sender, projectId, conversationId, update)
+      }, controller.signal, startedAt, (project) => {
+        if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
+      }, traceId)
       if (!result.error && !result.stopped) {
         void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
       }
       return result
     } finally {
+      developmentProgressStates.delete(key)
       if (conversationControllers.get(key) === controller) {
         conversationControllers.delete(key)
       }
@@ -713,7 +866,10 @@ app.whenReady().then(() => {
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
 
   void readConfig()
-    .then(updateKeepAwake)
+    .then((config) => {
+      updateKeepAwake(config)
+      setPerformanceTracingEnabled(config.developerMode && config.performanceTracingEnabled)
+    })
     .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
   void pollBridge()
@@ -731,7 +887,9 @@ app.on('will-quit', (event) => {
   event.preventDefault()
   closeAllPendingScreenshots()
   closeAllPreviewWindows()
-  void stopAllFrontendServers().finally(() => app.quit())
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) performanceTraceWindow.close()
+  performanceTraceWindow = null
+  void stopAllFrontendServers().then(() => flushPerformanceTraces()).finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

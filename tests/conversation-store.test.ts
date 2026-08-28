@@ -64,6 +64,57 @@ describe('conversation context store', () => {
     expect(storage.index.path).toMatch(/index\.json$/)
   })
 
+  it('includes an unpersisted latest user message in both context modes', async () => {
+    const persisted: AgentContextMessage = {
+      id: 'old-user',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      role: 'user',
+      content: 'Previous request',
+    }
+    const latest: AgentContextMessage = {
+      id: 'latest-user',
+      createdAt: '2026-01-01T00:00:01.000Z',
+      role: 'user',
+      content: 'Current request',
+    }
+    await writeConversationMessages('project', 'conversation', [persisted])
+
+    expect((await readConversationMessages('project', 'conversation', [latest])).map((message) => message.id))
+      .toEqual(['old-user', 'latest-user'])
+    expect(await readConversationWorkingSet(
+      'project',
+      'conversation',
+      defaultContextManagementConfig,
+      latest.content ?? '',
+      [],
+      [],
+      [],
+      latest.id,
+      latest,
+    )).toContainEqual(expect.objectContaining({
+      id: 'latest-user',
+      role: 'user',
+      contextLayer: 'hot',
+      contextRegion: 'newborn',
+    }))
+  })
+
+  it('externalizes images from the truth log and hydrates them when read', async () => {
+    const message: AgentContextMessage = {
+      id: 'image-message',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      role: 'user',
+      content: 'Screenshot',
+      images: [{ id: 'image-1', name: 'screen.png', mediaType: 'image/png', dataUrl: 'data:image/png;base64,aGVsbG8=' }],
+    }
+    await writeConversationMessages('project', 'conversation', [message])
+
+    const truth = await readFile(`${electronState.userData}/context-debug/project-conversation/messages.jsonl`, 'utf8')
+    expect(truth).not.toContain('data:image/png;base64')
+    expect(truth).toMatch(/"path":"images\/cHJvamVjdA\/Y29udmVyc2F0aW9u\/aW1hZ2UtMQ\.png"/)
+    expect(await readConversationMessage('project', 'conversation', 'image-message'))
+      .toEqual(expect.objectContaining({ images: message.images }))
+  })
   it('places an appended current user message in the live Hot working set', async () => {
     await writeConversationMessages('project', 'conversation', [
       { id: 'previous-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Previous request' },

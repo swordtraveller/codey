@@ -14,7 +14,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, Fragment, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode } from 'react'
+import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -24,15 +24,30 @@ import type {
   AgentLimitsConfig,
   AppLanguage,
   AssistantMessageBlock,
+  ChatMessage,
   ContextCompressionNotice,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationTurnRecord,
-  DevelopmentTimelineItem,
   ImageAttachment,
   ImageMediaType,
+  PerformanceTraceFile,
+  PerformanceTraceStatus,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
+import {
+  clearDevelopmentProgress,
+  getDevelopmentProgress,
+  replaceDevelopmentProgress,
+  resetDevelopmentProgress,
+  subscribeDevelopmentProgress,
+  updateDevelopmentProgress,
+} from './development-progress-store'
+import {
+  conversationHistoryBatchSize,
+  expandConversationWindowStart,
+  initialConversationWindowStart,
+} from '../../shared/conversation-window'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -42,6 +57,8 @@ import {
   type ModelConfig,
   type Project,
 } from '../../shared/types'
+
+const markdownPlugins = [remarkGfm]
 
 function readImage(file: File): Promise<ImageAttachment> {
   return new Promise((resolve, reject) => {
@@ -196,7 +213,7 @@ function AssistantContent({ content, createdAt }: { content: string; createdAt?:
       {looksLikeMarkdown(content) ? (
         <MarkdownErrorBoundary fallback={fallback}>
           <div className="markdown-content">
-            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+            <Markdown remarkPlugins={markdownPlugins}>{content}</Markdown>
           </div>
         </MarkdownErrorBoundary>
       ) : (
@@ -335,6 +352,429 @@ function FunctionCallMessage({
     </details>
   )
 }
+
+const MemoCompressionMessage = memo(CompressionMessage)
+const MemoAssistantContent = memo(AssistantContent)
+const MemoFunctionCallMessage = memo(FunctionCallMessage)
+
+const ConversationMessage = memo(function ConversationMessage({
+  message,
+  projectId,
+  conversationId,
+  conversationTurn,
+}: {
+  message: ChatMessage
+  projectId: string
+  conversationId: string
+  conversationTurn?: ConversationTurn
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const messageTurn = message.turn ?? (
+    conversationTurn && conversationTurn.userMessageId === message.id
+      ? conversationTurn
+      : undefined
+  )
+
+  return (
+    <>
+      <div className={`message ${message.role}`}>
+        {message.compression ? (
+          <MemoCompressionMessage compression={message.compression} />
+        ) : message.role === 'assistant' && message.blocks?.length ? (
+          message.blocks.map((block, index) =>
+            block.type === 'content' ? (
+              <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
+            ) : (
+              <MemoFunctionCallMessage
+                block={block}
+                projectId={projectId}
+                conversationId={conversationId}
+                key={block.id}
+              />
+            ),
+          )
+        ) : message.role === 'assistant' ? (
+          <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
+        ) : (
+          <div className="user-message-content">
+            <div className="message-card-header">
+              {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              <Button
+                aria-label={t('copyMessage')}
+                appearance="subtle"
+                size="small"
+                title={t('copyMessage')}
+                onClick={() => copyText(message.content)}
+              >
+                {t('copy')}
+              </Button>
+            </div>
+            {message.images?.length ? (
+              <div className="message-images">
+                {message.images.map((image) => (
+                  <img alt={image.name} key={image.id} src={image.dataUrl} />
+                ))}
+              </div>
+            ) : null}
+            {message.content && <p>{message.content}</p>}
+          </div>
+        )}
+      </div>
+      {messageTurn && <ConversationStopwatch turn={messageTurn} />}
+    </>
+  )
+})
+
+type VirtualWindow = { start: number; end: number }
+
+const conversationEstimatedRowHeight = 180
+const conversationVirtualOverscan = 5
+
+function updateVirtualWindow(
+  current: VirtualWindow,
+  offsets: number[],
+  scrollTop: number,
+  viewportHeight: number,
+): VirtualWindow {
+  const total = offsets.length - 1
+  if (total <= 0) return { start: 0, end: 0 }
+  const lowerBound = (value: number): number => {
+    let low = 0
+    let high = total
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (offsets[middle + 1] <= value) low = middle + 1
+      else high = middle
+    }
+    return Math.min(low, total - 1)
+  }
+  const start = Math.max(0, lowerBound(Math.max(0, scrollTop)) - conversationVirtualOverscan)
+  const end = Math.min(total, lowerBound(Math.max(0, scrollTop + viewportHeight)) + conversationVirtualOverscan + 1)
+  return current.start === start && current.end === end ? current : { start, end }
+}
+
+const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
+  messages,
+  projectId,
+  conversationId,
+  conversationTurn,
+  scrollContainerRef,
+  shouldStickToBottom,
+}: {
+  messages: ChatMessage[]
+  projectId: string
+  conversationId: string
+  conversationTurn?: ConversationTurn
+  scrollContainerRef: RefObject<HTMLDivElement | null>
+  shouldStickToBottom: boolean
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const latestInitialStart = initialConversationWindowStart(messages)
+  const [startIndex, setStartIndex] = useState(latestInitialStart)
+  const loadingOlderRef = useRef(false)
+  const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const historyExpandedRef = useRef(false)
+  const heightCacheRef = useRef(new Map<string, number>())
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const observedRowsRef = useRef(new Map<string, HTMLDivElement>())
+  const rowRefCallbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
+  const [heightVersion, setHeightVersion] = useState(0)
+  const initialVisibleMessageCount = messages.length - latestInitialStart
+  const [virtualWindow, setVirtualWindow] = useState<VirtualWindow>(() => ({
+    start: latestInitialStart + Math.max(0, initialVisibleMessageCount - 12),
+    end: messages.length,
+  }))
+  const scrollFrameRef = useRef<number | null>(null)
+  const visibleStartIndex = historyExpandedRef.current
+    ? Math.min(startIndex, latestInitialStart)
+    : latestInitialStart
+  const hasOlderMessages = visibleStartIndex > 0
+  const historyFoldHeight = hasOlderMessages ? 36 : 0
+  const visibleMessages = useMemo(() => messages.slice(visibleStartIndex), [messages, visibleStartIndex])
+  const layout = useMemo(() => {
+    const offsets = [0]
+    for (const message of visibleMessages) {
+      offsets.push(offsets.at(-1)! + (heightCacheRef.current.get(message.id) ?? conversationEstimatedRowHeight))
+    }
+    return { offsets, totalHeight: offsets.at(-1) ?? 0 }
+  }, [visibleMessages, heightVersion])
+
+  const updateWindow = useCallback(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    const next = updateVirtualWindow(
+      { start: 0, end: 0 },
+      layout.offsets,
+      Math.max(0, container.scrollTop - historyFoldHeight),
+      container.clientHeight,
+    )
+    setVirtualWindow({
+      start: visibleStartIndex + next.start,
+      end: visibleStartIndex + next.end,
+    })
+  }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
+
+  const scheduleWindowUpdate = useCallback(() => {
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      updateWindow()
+    })
+  }, [updateWindow])
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+  }, [])
+
+  useEffect(() => {
+    const observer = new ResizeObserver((entries) => {
+      let changed = false
+      for (const entry of entries) {
+        const id = entry.target.getAttribute('data-message-id')
+        if (!id) continue
+        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
+        if (height > 0 && heightCacheRef.current.get(id) !== height) {
+          heightCacheRef.current.set(id, height)
+          changed = true
+        }
+      }
+      if (changed) setHeightVersion((version) => version + 1)
+    })
+    resizeObserverRef.current = observer
+    return () => {
+      observer.disconnect()
+      observedRowsRef.current.clear()
+      rowRefCallbacksRef.current.clear()
+      resizeObserverRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    const onScroll = (): void => {
+      scheduleWindowUpdate()
+    }
+    container.addEventListener('scroll', onScroll, { passive: true })
+    return () => container.removeEventListener('scroll', onScroll)
+  }, [scheduleWindowUpdate, scrollContainerRef])
+
+  // Stream progress is rendered outside this component, so this effect only runs for
+  // history changes and never performs layout work for individual stream deltas.
+  useEffect(() => {
+    if (!shouldStickToBottom) return
+    const container = scrollContainerRef.current
+    if (!container) return
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollTo({ top: Number.MAX_SAFE_INTEGER })
+      scheduleWindowUpdate()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages.length, scheduleWindowUpdate, scrollContainerRef, shouldStickToBottom])
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current
+    const container = scrollContainerRef.current
+    if (!anchor || !container) return
+    container.scrollTop = anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight)
+    pendingAnchorRef.current = null
+    loadingOlderRef.current = false
+    scheduleWindowUpdate()
+  }, [scheduleWindowUpdate, scrollContainerRef, visibleStartIndex])
+
+  const previousMessageCountRef = useRef(messages.length)
+  useLayoutEffect(() => {
+    if (previousMessageCountRef.current === messages.length) return
+    previousMessageCountRef.current = messages.length
+    if (!shouldStickToBottom) return
+    const nextStart = historyExpandedRef.current
+      ? visibleStartIndex
+      : initialConversationWindowStart(messages)
+    const nextLength = messages.length - nextStart
+    setVirtualWindow({
+      start: nextStart + Math.max(0, nextLength - 12),
+      end: messages.length,
+    })
+  }, [messages.length, shouldStickToBottom, visibleStartIndex])
+
+  const loadOlderMessages = useCallback(() => {
+    const container = scrollContainerRef.current
+    if (!container || !hasOlderMessages || loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    historyExpandedRef.current = true
+    pendingAnchorRef.current = {
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+    }
+    setStartIndex((current) => expandConversationWindowStart(
+      messages,
+      Math.min(current, initialConversationWindowStart(messages)),
+      conversationHistoryBatchSize,
+    ))
+  }, [hasOlderMessages, messages, scrollContainerRef])
+
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container || !hasOlderMessages) return
+    const onWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0 && container.scrollTop <= 1) loadOlderMessages()
+    }
+    container.addEventListener('wheel', onWheel, { passive: true })
+    return () => container.removeEventListener('wheel', onWheel)
+  }, [hasOlderMessages, loadOlderMessages, scrollContainerRef])
+
+  useEffect(() => {
+    scheduleWindowUpdate()
+  }, [layout.offsets, scheduleWindowUpdate])
+
+  const getRowRef = useCallback((id: string) => {
+    const existing = rowRefCallbacksRef.current.get(id)
+    if (existing) return existing
+    const callback = (node: HTMLDivElement | null): void => {
+      const previous = observedRowsRef.current.get(id)
+      if (previous && previous !== node) {
+        resizeObserverRef.current?.unobserve(previous)
+        observedRowsRef.current.delete(id)
+      }
+      if (!node) {
+        rowRefCallbacksRef.current.delete(id)
+        return
+      }
+      observedRowsRef.current.set(id, node)
+      resizeObserverRef.current?.observe(node)
+    }
+    rowRefCallbacksRef.current.set(id, callback)
+    return callback
+  }, [])
+  const renderedStart = Math.min(
+    Math.max(0, virtualWindow.start - visibleStartIndex),
+    visibleMessages.length,
+  )
+  const renderedEnd = Math.min(
+    Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
+    visibleMessages.length,
+  )
+  const topHeight = layout.offsets[renderedStart] ?? 0
+  const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
+
+  return (
+    <>
+      {hasOlderMessages && (
+        <div className="conversation-history-fold">
+          <Button appearance="subtle" size="small" onClick={loadOlderMessages}>
+            {t('loadOlderConversationRounds', {
+              count: Math.min(
+                conversationHistoryBatchSize,
+                messages.slice(0, visibleStartIndex).filter((message) => message.role === 'user').length,
+              ),
+            })}
+          </Button>
+        </div>
+      )}
+      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: topHeight }} />
+      {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
+        <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
+          <ConversationMessage
+            message={message}
+            projectId={projectId}
+            conversationId={conversationId}
+            conversationTurn={conversationTurn}
+          />
+        </div>
+      ))}
+      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: bottomHeight }} />
+    </>
+  )
+})
+
+
+function LiveAssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
+  const { t } = useTranslation()
+  const timestamp = formatMessageTime(createdAt)
+
+  return (
+    <div className="message-card">
+      <div className="message-card-header">
+        {timestamp && <time>{timestamp}</time>}
+        <Button
+          aria-label={t('copyMessage')}
+          appearance="subtle"
+          size="small"
+          title={t('copyMessage')}
+          onClick={() => copyText(content)}
+        >
+          {t('copy')}
+        </Button>
+      </div>
+      <p className="live-response-text">{content}</p>
+    </div>
+  )
+}
+
+function LiveFunctionCallMessage({
+  block,
+}: {
+  block: Extract<AssistantMessageBlock, { type: 'function_call' }>
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <details className="function-call">
+      <summary>{block.name}</summary>
+      <div className="tool-output-section">
+        <span>{t('toolParameters')}</span>
+        <pre>{block.parameters}</pre>
+      </div>
+    </details>
+  )
+}
+
+function LiveDevelopmentResponse({
+  conversationKey,
+  projectId,
+  conversationId,
+  createdAt,
+}: {
+  conversationKey: string
+  projectId: string
+  conversationId: string
+  createdAt?: string
+}): React.JSX.Element | null {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
+    [conversationKey],
+  )
+  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
+  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+
+  if (progress.timeline.length === 0 && progress.streamingBlocks.length === 0) return null
+
+  return (
+    <div className="message assistant live-response">
+      {progress.timeline.map((item, index) =>
+        item.type === 'compression' ? (
+          <MemoCompressionMessage compression={item.compression} key={`live-compression-${index}`} />
+        ) : item.block.type === 'content' ? (
+          <MemoAssistantContent content={item.block.content} createdAt={createdAt} key={`live-block-${index}`} />
+        ) : (
+          <MemoFunctionCallMessage
+            block={item.block}
+            projectId={projectId}
+            conversationId={conversationId}
+            key={item.block.id || `live-block-${index}`}
+          />
+        ),
+      )}
+      {progress.streamingBlocks.map((block, index) =>
+        block.type === 'content' ? (
+          <LiveAssistantContent content={block.content} createdAt={createdAt} key={`stream-block-${index}`} />
+        ) : (
+          <LiveFunctionCallMessage block={block} key={block.id || `stream-block-${index}`} />
+        ),
+      )}
+    </div>
+  )
+}
+
 type ContextStrategyMode = 'default' | 'layered' | 'custom'
 
 function contextStrategyMode(value: ContextManagementConfig, customStrategyAvailable: boolean): ContextStrategyMode {
@@ -497,14 +937,286 @@ function ContextSettingsFields({
     </div>
   )
 }
+type ComposerProps = {
+  canSend: boolean
+  configured: boolean
+  conversationWorking: boolean
+  hasActiveConversation: boolean
+  hasProjectFolders: boolean
+  interactionLocked: boolean
+  networkAccessEnabled: boolean
+  stopping: boolean
+  onError: (message: string) => void
+  onNetworkAccessChange: (enabled: boolean) => void
+  onStop: () => void
+  onSubmit: (content: string, images: ImageAttachment[]) => boolean
+}
+
+const Composer = memo(function Composer({
+  canSend,
+  configured,
+  conversationWorking,
+  hasActiveConversation,
+  hasProjectFolders,
+  interactionLocked,
+  networkAccessEnabled,
+  stopping,
+  onError,
+  onNetworkAccessChange,
+  onStop,
+  onSubmit,
+}: ComposerProps): React.JSX.Element {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const attachmentMenuRef = useRef<HTMLDivElement>(null)
+  const draftImagesRef = useRef<ImageAttachment[]>([])
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!attachmentMenuOpen) return
+    function closeAttachmentMenu(event: MouseEvent): void {
+      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
+    }
+    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setAttachmentMenuOpen(false)
+    }
+    document.addEventListener('mousedown', closeAttachmentMenu)
+    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeAttachmentMenu)
+      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
+    }
+  }, [attachmentMenuOpen])
+
+  function replaceDraftImages(images: ImageAttachment[]): void {
+    draftImagesRef.current = images
+    setDraftImages(images)
+  }
+
+  function appendImageAttachments(attachments: ImageAttachment[]): void {
+    const current = draftImagesRef.current
+    if (current.length + attachments.length > maximumImageAttachments) {
+      onError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    replaceDraftImages([...current, ...attachments])
+    onError('')
+  }
+
+  async function addImageFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return
+    if (draftImagesRef.current.length + files.length > maximumImageAttachments) {
+      onError(t('tooManyImages', { count: maximumImageAttachments }))
+      return
+    }
+    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
+      onError(t('unsupportedImage'))
+      return
+    }
+    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
+      onError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map(readImage))
+      if (mountedRef.current) appendImageAttachments(attachments)
+    } catch {
+      if (mountedRef.current) onError(t('imageReadFailed'))
+    }
+  }
+
+  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addImageFiles(files)
+  }
+
+  async function captureScreen(hideWindow: boolean): Promise<void> {
+    if (!canSend || interactionLocked) return
+    try {
+      const attachment = await window.codey.screenshot(hideWindow)
+      if (attachment && mountedRef.current) appendImageAttachments([attachment])
+    } catch {
+      if (mountedRef.current) onError(t('screenshotFailed'))
+    }
+  }
+
+  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const image = [...event.clipboardData.items]
+      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
+      ?.getAsFile()
+    if (!image) return
+
+    event.preventDefault()
+    await addImageFiles([image])
+  }
+
+  function submitMessage(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault()
+    const content = draft.trim()
+    const images = draftImages
+    if ((!content && images.length === 0) || !canSend || interactionLocked) return
+    if (!onSubmit(content, images)) return
+    setDraft('')
+    replaceDraftImages([])
+    setAttachmentMenuOpen(false)
+  }
+
+  return (
+    <form className="composer" onSubmit={submitMessage}>
+      <input
+        accept={supportedImageMediaTypes.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectImages(event)}
+        ref={imageInputRef}
+        type="file"
+      />
+      {draftImages.length > 0 && (
+        <div className="draft-images">
+          {draftImages.map((image) => (
+            <div className="draft-image" key={image.id}>
+              <img alt={image.name} src={image.dataUrl} />
+              <Button
+                aria-label={t('removeImage')}
+                appearance="subtle"
+                onClick={() => replaceDraftImages(draftImagesRef.current.filter((item) => item.id !== image.id))}
+                shape="circular"
+                size="small"
+                title={t('removeImage')}
+                type="button"
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="composer-side-controls">
+        <div className="attachment-menu" ref={attachmentMenuRef}>
+          <Button
+            appearance="secondary"
+            aria-expanded={attachmentMenuOpen}
+            aria-haspopup="menu"
+            disabled={!canSend || interactionLocked}
+            onClick={() => setAttachmentMenuOpen((open) => !open)}
+            title={t('addAttachment')}
+            type="button"
+          >
+            +
+          </Button>
+          {attachmentMenuOpen && (
+            <div className="attachment-menu-popover" role="menu">
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  void captureScreen(false)
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('captureScreenshot')}
+              </Button>
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  void captureScreen(true)
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('captureScreenshotHideWindow')}
+              </Button>
+              <Button
+                appearance="subtle"
+                className="attachment-menu-item"
+                onClick={() => {
+                  setAttachmentMenuOpen(false)
+                  imageInputRef.current?.click()
+                }}
+                role="menuitem"
+                type="button"
+              >
+                {t('uploadImage')}
+              </Button>
+            </div>
+          )}
+        </div>
+        <Switch
+          checked={networkAccessEnabled}
+          className="network-access-switch"
+          disabled={interactionLocked}
+          label={t('networkAccess')}
+          onChange={(_, data) => onNetworkAccessChange(data.checked)}
+          title={t('networkAccessWarning')}
+        />
+      </div>
+      <Textarea
+        aria-label={t('developmentRequest')}
+        className="message-input"
+        disabled={!canSend || interactionLocked}
+        size="large"
+        value={draft}
+        onChange={(_, data) => setDraft(data.value)}
+        onPaste={(event) => void handlePaste(event)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            event.currentTarget.form?.requestSubmit()
+          }
+        }}
+        placeholder={
+          !configured
+            ? t('configureModel')
+            : !hasProjectFolders
+              ? t('addFolderFirst')
+              : t('describeTask')
+        }
+      />
+      {conversationWorking ? (
+        <Button
+          appearance="primary"
+          disabled={stopping || !hasActiveConversation}
+          onClick={onStop}
+          size="large"
+          type="button"
+        >
+          {t('stop')}
+        </Button>
+      ) : (
+        <Button
+          appearance="primary"
+          disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
+          size="large"
+          type="submit"
+        >
+          {t('send')}
+        </Button>
+      )}
+    </form>
+  )
+})
+
 export function App(): React.JSX.Element {
   const { t } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
-  const [draft, setDraft] = useState('')
-  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -532,17 +1244,17 @@ export function App(): React.JSX.Element {
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
+  const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
+  const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
+  const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
+  const [performanceError, setPerformanceError] = useState('')
   const [projectError, setProjectError] = useState('')
-  const [liveResponses, setLiveResponses] = useState<Record<string, {
-    projectId: string
-    conversationId: string
-    timeline: DevelopmentTimelineItem[]
-  }>>({})
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
-  const attachmentMenuRef = useRef<HTMLDivElement>(null)
+  const conversationEndRef = useRef<HTMLDivElement>(null)
   const activeConversationKeyRef = useRef('')
+  const activeTraceIdsRef = useRef<Record<string, string>>({})
+  const lastProgressTraceAtRef = useRef<Record<string, number>>({})
 
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const activeConversation = activeProject?.conversations.find(
@@ -567,6 +1279,7 @@ export function App(): React.JSX.Element {
       ? t('contextStrategyLayeredShort')
       : t('contextStrategyDefault')
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
+  const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
@@ -582,9 +1295,6 @@ export function App(): React.JSX.Element {
   const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
   const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
-  const liveTimeline = activeConversationKey
-    ? liveResponses[activeConversationKey]?.timeline ?? []
-    : []
   activeConversationKeyRef.current = activeConversationKey
 
   useEffect(() => {
@@ -611,28 +1321,43 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    setDraftImages([])
-  }, [activeProjectId, activeConversationId])
+    void window.codey.getPerformanceTraceStatus().then(setPerformanceStatus).catch(() => undefined)
+  }, [])
 
-  useEffect(() => {
-    if (!attachmentMenuOpen) return
-    function closeAttachmentMenu(event: MouseEvent): void {
-      if (!attachmentMenuRef.current?.contains(event.target as Node)) setAttachmentMenuOpen(false)
-    }
-    function closeAttachmentMenuOnEscape(event: KeyboardEvent): void {
-      if (event.key === 'Escape') setAttachmentMenuOpen(false)
-    }
-    document.addEventListener('mousedown', closeAttachmentMenu)
-    document.addEventListener('keydown', closeAttachmentMenuOnEscape)
-    return () => {
-      document.removeEventListener('mousedown', closeAttachmentMenu)
-      document.removeEventListener('keydown', closeAttachmentMenuOnEscape)
-    }
-  }, [attachmentMenuOpen])
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
     const key = `${progress.projectId}:${progress.conversationId}`
-    setLiveResponses((current) => ({ ...current, [key]: progress }))
+    const now = performance.now()
+    if (now - (lastProgressTraceAtRef.current[key] ?? 0) >= 1_000) {
+      lastProgressTraceAtRef.current[key] = now
+      window.codey.recordPerformanceTrace({
+        traceId: activeTraceIdsRef.current[key] ?? 'renderer-session', scope: 'renderer', phase: 'progress-received',
+        projectId: progress.projectId, conversationId: progress.conversationId,
+      })
+    }
+    updateDevelopmentProgress(progress)
   }), [])
+
+  useEffect(() => {
+    let cancelled = false
+    const projectId = activeProjectId || null
+    const conversationId = activeConversationId || null
+    const key = projectId && conversationId ? `${projectId}:${conversationId}` : ''
+    void window.codey
+      .subscribeDevelopmentProgress(projectId, conversationId)
+      .then((state) => {
+        if (!cancelled && key && activeConversationKeyRef.current === key) {
+          replaceDevelopmentProgress(key, state)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [activeConversationId, activeProjectId])
+
+  useEffect(() => () => {
+    void window.codey.subscribeDevelopmentProgress(null, null)
+  }, [])
 
   useEffect(() => window.codey.onConversationStateChange((change) => {
     setConversationStates((current) => ({
@@ -642,6 +1367,7 @@ export function App(): React.JSX.Element {
   }), [])
 
   useEffect(() => window.codey.onProjectUpdated((project) => {
+    window.codey.recordPerformanceTrace({ traceId: 'renderer-session', scope: 'renderer', phase: 'project-update-received', projectId: project.id })
     setProjects((current) => current.map((item) => item.id === project.id ? project : item))
   }), [])
 
@@ -666,22 +1392,25 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', openDebugger)
   }, [activeConversationId, activeProjectId, config.developerMode, t])
 
-  function updateScrollButton(): void {
-    const element = conversationRef.current
-    if (element) {
-      setShowScrollToBottom(element.scrollHeight - element.scrollTop - element.clientHeight > 24)
-    }
-  }
-
   function scrollToBottom(): void {
     setShowScrollToBottom(false)
-    conversationRef.current?.scrollTo({
-      top: conversationRef.current.scrollHeight,
-      behavior: 'smooth',
-    })
+    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }
 
-  useEffect(updateScrollButton, [activeConversation?.messages, liveTimeline, interactionLocked])
+  useEffect(() => {
+    const root = conversationRef.current
+    const end = conversationEndRef.current
+    if (!root || !end) {
+      setShowScrollToBottom(false)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setShowScrollToBottom(!entry.isIntersecting),
+      { root, threshold: 0.9 },
+    )
+    observer.observe(end)
+    return () => observer.disconnect()
+  }, [activeConversationId, activeConversation?.messages.length])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -693,7 +1422,6 @@ export function App(): React.JSX.Element {
     setActiveProjectId(project.id)
     setActiveConversationId(project.conversations[0]?.id ?? '')
     setOpenProjectMenuId(null)
-    setDraft('')
     setError('')
   }
 
@@ -709,6 +1437,62 @@ export function App(): React.JSX.Element {
     setConfigDraft(createSettingsDraft())
     setSettingsError('')
     setSettingsOpen(true)
+  }
+
+  async function openPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    setPerformanceDialogOpen(true)
+    try {
+      const [status, files] = await Promise.all([
+        window.codey.getPerformanceTraceStatus(),
+        window.codey.listPerformanceTraceFiles(),
+      ])
+      setPerformanceStatus(status)
+      setPerformanceFiles(files)
+    } catch {
+      setPerformanceError(t('unableLoadPerformanceTrace'))
+    }
+  }
+
+  async function togglePerformanceTracing(enabled: boolean): Promise<void> {
+    setPerformanceError('')
+    try {
+      setPerformanceStatus(await window.codey.setPerformanceTracingEnabled(enabled))
+      setPerformanceFiles(await window.codey.listPerformanceTraceFiles())
+    } catch {
+      setPerformanceError(t('unableUpdatePerformanceTrace'))
+    }
+  }
+
+  async function openPerformanceTraceFile(fileName: string): Promise<void> {
+    setPerformanceError('')
+    try {
+      await window.codey.openPerformanceTraceFile(fileName)
+    } catch {
+      setPerformanceError(t('unableOpenPerformanceTrace'))
+    }
+  }
+
+  async function exportPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    try {
+      const path = await window.codey.exportPerformanceTraces()
+      if (path) {
+        setPerformanceError(t('performanceTraceExported'))
+        setPerformanceStatus(await window.codey.getPerformanceTraceStatus())
+      }
+    } catch {
+      setPerformanceError(t('unableExportPerformanceTrace'))
+    }
+  }
+
+  async function revealPerformanceTracing(): Promise<void> {
+    setPerformanceError('')
+    try {
+      await window.codey.revealPerformanceTraces()
+    } catch {
+      setPerformanceError(t('unableRevealPerformanceTrace'))
+    }
   }
 
   async function openBridgeDialog(): Promise<void> {
@@ -1030,92 +1814,23 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.createConversation(activeProject.id)
       replaceProject(updated)
       setActiveConversationId(updated.conversations.at(-1)?.id ?? '')
-      setDraft('')
       setError('')
     } catch {
       setError(t('unableCreateConversation'))
     }
   }
 
-  function appendImageAttachments(attachments: ImageAttachment[]): boolean {
-    if (draftImages.length + attachments.length > maximumImageAttachments) {
-      setError(t('tooManyImages', { count: maximumImageAttachments }))
-      return false
-    }
-    setDraftImages((current) => [...current, ...attachments].slice(0, maximumImageAttachments))
-    setError('')
-    return true
-  }
-
-  async function addImageFiles(files: File[]): Promise<void> {
-    const conversationKey = activeConversationKeyRef.current
-    if (files.length === 0) return
-    if (draftImages.length + files.length > maximumImageAttachments) {
-      setError(t('tooManyImages', { count: maximumImageAttachments }))
-      return
-    }
-    if (files.some((file) => !supportedImageMediaTypes.includes(file.type as ImageMediaType))) {
-      setError(t('unsupportedImage'))
-      return
-    }
-    if (files.some((file) => file.size > maximumImageAttachmentBytes)) {
-      setError(t('imageTooLarge', { size: maximumImageAttachmentBytes / 1024 / 1024 }))
-      return
-    }
-
-    try {
-      const attachments = await Promise.all(files.map(readImage))
-      if (conversationKey !== activeConversationKeyRef.current) return
-      appendImageAttachments(attachments)
-    } catch {
-      setError(t('imageReadFailed'))
-    }
-  }
-
-  async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const files = [...(event.target.files ?? [])]
-    event.target.value = ''
-    await addImageFiles(files)
-  }
-
-  async function captureScreen(hideWindow: boolean): Promise<void> {
-    if (!canSend || interactionLocked) return
-    try {
-      const attachment = await window.codey.screenshot(hideWindow)
-      if (attachment) appendImageAttachments([attachment])
-    } catch {
-      setError(t('screenshotFailed'))
-    }
-  }
-
-  async function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
-    const image = [...event.clipboardData.items]
-      .find((item) => item.kind === 'file' && supportedImageMediaTypes.includes(item.type as ImageMediaType))
-      ?.getAsFile()
-    if (!image) return
-
-    event.preventDefault()
-    await addImageFiles([image])
-  }
-  async function sendMessage(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault()
-
-    const content = draft.trim()
-    const images = draftImages
+  async function sendMessage(content: string, images: ImageAttachment[]): Promise<void> {
     if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
-      return
-    }
-
-    if (outputMarginError) {
-      setError(outputMarginError)
       return
     }
 
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
-    setDraft('')
-    setDraftImages([])
+    const traceId = crypto.randomUUID()
+    activeTraceIdsRef.current[conversationKey] = traceId
+    const sendStartedAt = performance.now()
     setError('')
     const userMessageId = crypto.randomUUID()
     const optimisticProject: Project = {
@@ -1133,14 +1848,11 @@ export function App(): React.JSX.Element {
       ),
     }
     replaceProject(optimisticProject)
-    setLiveResponses((current) => ({
-      ...current,
-      [conversationKey]: {
-        projectId,
-        conversationId,
-        timeline: [],
-      },
-    }))
+    window.codey.recordPerformanceTrace({
+      traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
+      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length },
+    })
+    resetDevelopmentProgress(conversationKey)
     setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
     setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
     setConversationTurns((current) => ({
@@ -1155,7 +1867,8 @@ export function App(): React.JSX.Element {
     }))
 
     try {
-      const result = await window.codey.develop(projectId, conversationId, content, images)
+      window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
+      const result = await window.codey.develop(projectId, conversationId, content, images, traceId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
@@ -1206,12 +1919,8 @@ export function App(): React.JSX.Element {
       setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
     } finally {
-      setLiveResponses((current) => {
-        if (!current[conversationKey]) return current
-        const next = { ...current }
-        delete next[conversationKey]
-        return next
-      })
+      delete activeTraceIdsRef.current[conversationKey]
+      clearDevelopmentProgress(conversationKey)
       setStoppingConversations((current) => {
         if (!current[conversationKey]) return current
         const next = { ...current }
@@ -1352,7 +2061,6 @@ export function App(): React.JSX.Element {
                     key={conversation.id}
                     onClick={() => {
                       setActiveConversationId(conversation.id)
-                      setDraft('')
                       setError('')
                     }}
                   >
@@ -1366,6 +2074,21 @@ export function App(): React.JSX.Element {
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
+          <div className="performance-nav-row">
+            <Button appearance="subtle" disabled={!config.developerMode} onClick={() => void openPerformanceTracing()}>
+              {t('performanceTracing')}
+            </Button>
+            <Button
+              appearance="subtle"
+              className="performance-toggle-button"
+              aria-label={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              title={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              disabled={!config.developerMode || !performanceStatus}
+              onClick={() => void togglePerformanceTracing(!performanceStatus?.enabled)}
+            >
+              <span aria-hidden="true" className={performanceStatus?.enabled ? 'performance-toggle-icon stop' : 'performance-toggle-icon play'} />
+            </Button>
+          </div>
           <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
             Handover
           </Button>
@@ -1413,6 +2136,7 @@ export function App(): React.JSX.Element {
               )}
               {activeConversation && (
                 <div className="topbar-row">
+                  <span className="conversation-round-count">{t('conversationRoundCount', { count: conversationRoundCount })}</span>
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
@@ -1476,7 +2200,6 @@ export function App(): React.JSX.Element {
               ref={conversationRef}
               className="conversation"
               aria-label={t('conversation')}
-              onScroll={updateScrollButton}
             >
             {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
@@ -1496,87 +2219,22 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
-                {activeConversation.messages.map((message) => {
-                  const messageTurn = message.turn ?? (
-                    conversationTurn && conversationTurn.userMessageId === message.id
-                      ? conversationTurn
-                      : undefined
-                  )
-
-                  return (
-                    <Fragment key={message.id}>
-                      <div className={`message ${message.role}`}>
-                        {message.compression ? (
-                          <CompressionMessage compression={message.compression} />
-                        ) : message.role === 'assistant' && message.blocks?.length ? (
-                          message.blocks.map((block, index) =>
-                            block.type === 'content' ? (
-                              <AssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
-                            ) : (
-                              <FunctionCallMessage
-                                block={block}
-                                projectId={activeProject?.id}
-                                conversationId={activeConversation.id}
-                                key={block.id}
-                              />
-                            ),
-                          )
-                        ) : message.role === 'assistant' ? (
-                          <AssistantContent content={message.content} createdAt={message.createdAt} />
-                        ) : (
-                          <div className="user-message-content">
-                            <div className="message-card-header">
-                              {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
-                              <Button
-                                aria-label={t('copyMessage')}
-                                appearance="subtle"
-                                size="small"
-                                title={t('copyMessage')}
-                                onClick={() => copyText(message.content)}
-                              >
-                                {t('copy')}
-                              </Button>
-                            </div>
-                            {message.images?.length ? (
-                              <div className="message-images">
-                                {message.images.map((image) => (
-                                  <img alt={image.name} key={image.id} src={image.dataUrl} />
-                                ))}
-                              </div>
-                            ) : null}
-                            {message.content && <p>{message.content}</p>}
-                          </div>
-                        )}
-                      </div>
-                      {messageTurn && <ConversationStopwatch turn={messageTurn} />}
-                    </Fragment>
-                  )
-                })}
-                {liveTimeline.length > 0 && (
-                  <div className="message assistant live-response">
-                    {liveTimeline.map((item, index) =>
-                      item.type === 'compression' ? (
-                        <CompressionMessage
-                          compression={item.compression}
-                          key={`live-compression-${index}`}
-                        />
-                      ) : item.block.type === 'content' ? (
-                        <AssistantContent
-                          content={item.block.content}
-                          createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
-                          key={`live-block-${index}`}
-                        />
-                      ) : (
-                        <FunctionCallMessage
-                          block={item.block}
-                          projectId={activeProject?.id}
-                          conversationId={activeConversation.id}
-                          key={item.block.id || `live-block-${index}`}
-                        />
-                      ),
-                    )}
-                  </div>
-                )}
+                <VirtualizedConversationHistory
+                  key={activeConversationKey}
+                  messages={activeConversation.messages}
+                  projectId={activeProjectId}
+                  conversationId={activeConversation.id}
+                  conversationTurn={conversationTurn}
+                  scrollContainerRef={conversationRef}
+                  shouldStickToBottom={!showScrollToBottom}
+                />
+                <LiveDevelopmentResponse
+                  conversationKey={activeConversationKey}
+                  projectId={activeProjectId}
+                  conversationId={activeConversation.id}
+                  createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
+                />
+                <div aria-hidden="true" className="conversation-end" ref={conversationEndRef} />
               </div>
             )}
             </div>
@@ -1595,141 +2253,29 @@ export function App(): React.JSX.Element {
           </div>
 
           {error && <p className="composer-error" role="alert">{error}</p>}
-          <form className="composer" onSubmit={sendMessage}>
-            <input
-              accept={supportedImageMediaTypes.join(',')}
-              hidden
-              multiple
-              onChange={(event) => void selectImages(event)}
-              ref={imageInputRef}
-              type="file"
-            />
-            {draftImages.length > 0 && (
-              <div className="draft-images">
-                {draftImages.map((image) => (
-                  <div className="draft-image" key={image.id}>
-                    <img alt={image.name} src={image.dataUrl} />
-                    <Button
-                      aria-label={t('removeImage')}
-                      appearance="subtle"
-                      onClick={() => setDraftImages((current) => current.filter((item) => item.id !== image.id))}
-                      shape="circular"
-                      size="small"
-                      title={t('removeImage')}
-                      type="button"
-                    >
-                      ×
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="composer-side-controls">
-              <div className="attachment-menu" ref={attachmentMenuRef}>
-                <Button
-                  appearance="secondary"
-                  aria-expanded={attachmentMenuOpen}
-                  aria-haspopup="menu"
-                  disabled={!canSend || interactionLocked}
-                  onClick={() => setAttachmentMenuOpen((open) => !open)}
-                  title={t('addAttachment')}
-                  type="button"
-                >
-                  +
-                </Button>
-                {attachmentMenuOpen && (
-                  <div className="attachment-menu-popover" role="menu">
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        void captureScreen(false)
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('captureScreenshot')}
-                    </Button>
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        void captureScreen(true)
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('captureScreenshotHideWindow')}
-                    </Button>
-                    <Button
-                      appearance="subtle"
-                      className="attachment-menu-item"
-                      onClick={() => {
-                        setAttachmentMenuOpen(false)
-                        imageInputRef.current?.click()
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      {t('uploadImage')}
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <Switch
-                checked={config.networkAccessEnabled}
-                className="network-access-switch"
-                disabled={interactionLocked}
-                label={t('networkAccess')}
-                onChange={(_, data) => void setNetworkAccess(data.checked)}
-                title={t('networkAccessWarning')}
-              />
-            </div>
-            <Textarea
-              aria-label={t('developmentRequest')}
-              className="message-input"
-              disabled={!canSend || interactionLocked}
-              size="large"
-              value={draft}
-              onChange={(_, data) => setDraft(data.value)}
-              onPaste={(event) => void handlePaste(event)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault()
-                  event.currentTarget.form?.requestSubmit()
-                }
-              }}
-              placeholder={
-                !configured
-                  ? t('configureModel')
-                  : !activeProject?.folders.length
-                    ? t('addFolderFirst')
-                    : t('describeTask')
+          <Composer
+            key={activeConversationKey || 'no-conversation'}
+            canSend={canSend}
+            configured={configured}
+            conversationWorking={conversationWorking}
+            hasActiveConversation={Boolean(activeConversation)}
+            hasProjectFolders={Boolean(activeProject?.folders.length)}
+            interactionLocked={interactionLocked}
+            networkAccessEnabled={config.networkAccessEnabled}
+            stopping={stopping}
+            onError={setError}
+            onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
+            onStop={() => void stopMessage()}
+            onSubmit={(content, images) => {
+              if (outputMarginError) {
+                setError(outputMarginError)
+                return false
               }
-            />
-            {conversationWorking ? (
-              <Button
-                appearance="primary"
-                disabled={stopping || !activeProject || !activeConversation}
-                onClick={() => void stopMessage()}
-                size="large"
-                type="button"
-              >
-                {t('stop')}
-              </Button>
-            ) : (
-              <Button
-                appearance="primary"
-                disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
-                size="large"
-                type="submit"
-              >
-                {t('send')}
-              </Button>
-            )}
-          </form>
+              if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
+              void sendMessage(content, images)
+              return true
+            }}
+          />
         </section>
       </main>
 
@@ -1766,6 +2312,40 @@ export function App(): React.JSX.Element {
               >
                 {creatingProject ? t('creating') : t('create')}
               </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={performanceDialogOpen} onOpenChange={(_, data) => setPerformanceDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('performanceTracing')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <p className="settings-description">{t('performanceTracingDescription')}</p>
+              {!config.developerMode && <p className="settings-warning">{t('performanceTracingRequiresDeveloperMode')}</p>}
+              {performanceStatus && (
+                <>
+                  <p className="status">{performanceStatus.enabled ? t('performanceTracingEnabled') : t('performanceTracingDisabled')}</p>
+                  <p className="status">{t('performanceTracePath')}: {performanceStatus.path}</p>
+                  <p className="status">{t('performanceTraceSize')}: {performanceStatus.sizeBytes.toLocaleString()} B</p>
+                </>
+              )}
+              <div className="performance-trace-files">
+                <strong>{t('performanceTraceFiles')}</strong>
+                {performanceFiles.length === 0 ? <p className="trace-empty">{t('noPerformanceTraceFiles')}</p> : performanceFiles.map((file) => (
+                  <Button key={file.name} appearance="subtle" className="performance-trace-file" onClick={() => void openPerformanceTraceFile(file.name)}>
+                    <span>{file.name}</span>
+                    <small>{file.sizeBytes.toLocaleString()} B · {new Date(file.modifiedAt).toLocaleString()}</small>
+                  </Button>
+                ))}
+              </div>
+              {performanceError && <p className="dialog-error">{performanceError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceTraces')}</Button>
+              <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceTraces')}</Button>
+              <Button appearance="secondary" onClick={() => setPerformanceDialogOpen(false)}>{t('close')}</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>

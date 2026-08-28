@@ -8,9 +8,13 @@ import type {
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
+  DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
   Project,
+  PerformanceTraceEvent,
+  PerformanceTraceFile,
+  PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
   TokenLimitSimulation,
@@ -25,6 +29,14 @@ declare global {
     readonly runtime?: RuntimeInfo
     readonly codey: {
       getConfig(): Promise<AppConfig>
+      getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
+      readPerformanceTraceFile(fileName: string): Promise<string>
+      openPerformanceTraceFile(fileName: string): Promise<void>
+      setPerformanceTracingEnabled(enabled: boolean): Promise<PerformanceTraceStatus>
+      exportPerformanceTraces(): Promise<string | null>
+      revealPerformanceTraces(): Promise<void>
+      recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
@@ -62,8 +74,13 @@ declare global {
         conversationId: string,
         content: string,
         images?: ImageAttachment[],
+        traceId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
+      subscribeDevelopmentProgress(
+        projectId: string | null,
+        conversationId: string | null,
+      ): Promise<DevelopmentProgressState>
       screenshot(hideWindow: boolean): Promise<ImageAttachment | null>
       onScreenshotSource(listener: (source: ScreenshotSource) => void): () => void
       completeScreenshotSelection(captureId: string, selection: ScreenshotSelection): void

@@ -27,6 +27,7 @@ type StoredAppConfig = {
   keepAwakeEnabled?: boolean
   keepAwakeOnlyWhileWorking?: boolean
   networkAccessEnabled?: boolean
+  performanceTracingEnabled?: boolean
 }
 
 type LegacyStoredConfig = StoredModelConfig & {
@@ -123,6 +124,7 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement,
         language,
         developerMode,
+        performanceTracingEnabled: developerMode && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
@@ -131,6 +133,7 @@ export async function readConfig(): Promise<AppConfig> {
         stored.keepAwakeEnabled === undefined ||
         stored.keepAwakeOnlyWhileWorking === undefined ||
         stored.networkAccessEnabled === undefined ||
+        stored.performanceTracingEnabled === undefined ||
         !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
       ) || stored.activeModelConfigId !== activeModelConfigId
@@ -147,6 +150,7 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement: normalizeContextManagementConfig(stored.contextManagement),
         language,
         developerMode: stored.developerMode === true,
+        performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
@@ -160,6 +164,7 @@ export async function readConfig(): Promise<AppConfig> {
       contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
       language,
       developerMode: stored.developerMode === true,
+      performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
       keepAwakeEnabled,
       keepAwakeOnlyWhileWorking,
       networkAccessEnabled,
@@ -201,6 +206,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     keepAwakeEnabled: config.keepAwakeEnabled === true,
     keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
     networkAccessEnabled: config.networkAccessEnabled === true,
+    performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
   }
   await writeConfig(normalized)
   return normalized

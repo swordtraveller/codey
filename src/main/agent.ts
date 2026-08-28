@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import type {
   AgentContextMessage,
   AgentLimitsConfig,
   AssistantMessageBlock,
   ContextManagementConfig,
   ContextMetrics,
+  DevelopmentProgressUpdate,
   DevelopmentTimelineItem,
   ModelConfig,
   Project,
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
-import { redactProviderMessages, toProviderMessages } from './model-messages'
+import { recordPerformanceTrace } from './performance-trace'
+import { toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -206,6 +209,37 @@ function responseSize(message: ResponseMessage | undefined): number {
   )
 }
 
+function modelRequestSummary(
+  config: ModelConfig,
+  messages: ContextMessage[],
+  tools: object[],
+): Record<string, unknown> {
+  const byRole = messages.reduce<Record<string, number>>((counts, message) => {
+    counts[message.role] = (counts[message.role] ?? 0) + 1
+    return counts
+  }, {})
+  return {
+    endpoint: config.baseUrl + '/chat/completions',
+    model: config.modelName,
+    messageCount: messages.length,
+    messageChars: messages.reduce((total, message) => total + (message.content?.length ?? 0), 0),
+    messagesByRole: byRole,
+    imageCount: messages.reduce((total, message) => total + (message.images?.length ?? 0), 0),
+    toolCallCount: messages.reduce((total, message) => total + (message.tool_calls?.length ?? 0), 0),
+    toolDefinitionCount: tools.length,
+    stream: true,
+  }
+}
+
+function modelResponseSummary(status: number, message: ResponseMessage, stream: boolean): Record<string, unknown> {
+  return {
+    status,
+    stream,
+    contentChars: message.content?.length ?? 0,
+    toolCallCount: message.tool_calls?.length ?? 0,
+  }
+}
+
 function isRetryableRequestError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false
@@ -226,12 +260,20 @@ async function requestCompletionAttempt(
   tools: object[],
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string },
 ): Promise<ChatResponse> {
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
   }
 
+  const providerBuildStartedAt = performance.now()
   const providerMessages = toProviderMessages(messages)
+  recordPerformanceTrace({
+    traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'provider-message-build',
+    projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+    durationMs: performance.now() - providerBuildStartedAt,
+    data: { messageCount: providerMessages.length },
+  })
   const requestBody = {
     model: config.modelName,
     messages: providerMessages,
@@ -239,19 +281,24 @@ async function requestCompletionAttempt(
     tool_choice: 'auto',
     stream: true,
   }
-  log.debug('model.request', {
-    url: config.baseUrl + '/chat/completions',
-    body: {
-      ...requestBody,
-      messages: redactProviderMessages(providerMessages, messages),
-    },
+  const serializeStartedAt = performance.now()
+  const requestBodyJson = JSON.stringify(requestBody)
+  recordPerformanceTrace({
+    traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-body-serialize',
+    projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+    durationMs: performance.now() - serializeStartedAt,
+    data: { bodyBytes: Buffer.byteLength(requestBodyJson, 'utf8'), messageCount: providerMessages.length, toolCount: tools.length },
   })
+  log.debug('model.request', modelRequestSummary(config, messages, tools))
 
   let content = ''
   const toolCalls: ToolCall[] = []
   let buffer = ''
   let publishTimer: ReturnType<typeof setTimeout> | undefined
   let lastPublished = 0
+  let chunkCount = 0
+  let updateCount = 0
+  const requestStartedAt = performance.now()
   const currentMessage = (): ResponseMessage => ({
     content: content || null,
     tool_calls: toolCalls.length ? toolCalls.map((toolCall) => ({
@@ -262,13 +309,14 @@ async function requestCompletionAttempt(
   const publish = (): void => {
     publishTimer = undefined
     lastPublished = Date.now()
+    updateCount += 1
     onUpdate?.(currentMessage())
   }
   const schedulePublish = (): void => {
     if (!onUpdate || publishTimer) {
       return
     }
-    const delay = Math.max(0, 50 - (Date.now() - lastPublished))
+    const delay = Math.max(0, 100 - (Date.now() - lastPublished))
     if (delay === 0) {
       publish()
     } else {
@@ -277,14 +325,20 @@ async function requestCompletionAttempt(
   }
 
   try {
+    recordPerformanceTrace({ traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'fetch-start', projectId: runtime?.projectId, conversationId: runtime?.conversationId })
     const response = await fetch(config.baseUrl + '/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + config.apiKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(requestBody),
+      body: requestBodyJson,
       signal,
+    })
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'response-headers',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { status: response.status },
     })
 
     if (!response.ok) {
@@ -304,11 +358,18 @@ async function requestCompletionAttempt(
     if (!response.headers.get('content-type')?.includes('text/event-stream')) {
       const body = await response.text()
       const data = JSON.parse(body) as ChatResponse
-      log.debug('model.response', { status: response.status, body: data })
       const message = data.choices?.[0]?.message
+      log.debug('model.response', message
+        ? modelResponseSummary(response.status, message, false)
+        : { status: response.status, stream: false, contentChars: 0, toolCallCount: 0 })
       if (message) {
         onUpdate?.(message)
       }
+      recordPerformanceTrace({
+        traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
+        projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+        durationMs: performance.now() - requestStartedAt, data: { status: response.status, stream: false, updateCount },
+      })
       return data
     }
 
@@ -358,6 +419,7 @@ async function requestCompletionAttempt(
       if (result.done) {
         break
       }
+      chunkCount += 1
       buffer += decoder.decode(result.value, { stream: true })
       const events = buffer.split(/\r?\n\r?\n/)
       buffer = events.pop() ?? ''
@@ -374,8 +436,19 @@ async function requestCompletionAttempt(
     }
     publish()
 
-    const data: ChatResponse = { choices: [{ message: currentMessage() }] }
-    log.debug('model.response', { status: response.status, body: data })
+    const message = currentMessage()
+    const data: ChatResponse = { choices: [{ message }] }
+    log.debug('model.response', modelResponseSummary(response.status, message, true))
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'stream-update',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { chunkCount, updateCount, contentChars: content.length },
+    })
+    recordPerformanceTrace({
+      traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
+      projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+      durationMs: performance.now() - requestStartedAt, data: { status: response.status, stream: true, chunkCount, updateCount },
+    })
     return data
   } catch (error) {
     if (publishTimer) {
@@ -391,6 +464,7 @@ async function requestCompletion(
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
   signal?: AbortSignal,
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string },
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
@@ -416,7 +490,7 @@ async function requestCompletion(
     }
 
     try {
-      return await requestCompletionAttempt(config, messages, tools, controller.signal, update)
+      return await requestCompletionAttempt(config, messages, tools, controller.signal, update, runtime)
     } catch (error) {
       const details = errorDetails(error)
       const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -514,9 +588,9 @@ export async function develop(
   contextConfig: ContextManagementConfig,
   agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  onProgress?: (update: DevelopmentProgressUpdate) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
+  runtime?: { conversationId: string; projectId?: string; traceId?: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
@@ -556,9 +630,16 @@ export async function develop(
     for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const contextManageStartedAt = performance.now()
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
+      })
+      recordPerformanceTrace({
+        traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'context-manage',
+        projectId: runtime?.projectId, conversationId: runtime?.conversationId,
+        durationMs: performance.now() - contextManageStartedAt,
+        data: { requestIndex, inputMessages: activeHistory.length + 1, outputMessages: managed.messages.length, outputTokens: managed.metrics.compressedTokens },
       })
       if ((!runtime?.allowCustomStrategy || !contextConfig.customStrategyEnabled || !contextConfig.customStrategyScript?.trim()) &&
         runtime?.latestUserMessageId && !managed.messages.some((message) =>
@@ -607,7 +688,7 @@ export async function develop(
         throw new Error('The prepared model input exceeds the configured input budget. Reduce Hot content or increase the model context window.')
       }
       if (methods.length > 0) {
-        timeline.push({
+        const compressionItem: DevelopmentTimelineItem = {
           type: 'compression',
           compression: {
             originalTokens: managed.metrics.originalTokens,
@@ -615,23 +696,22 @@ export async function develop(
             compressionRatio: managed.metrics.compressionRatio,
             method: methods.join(', '),
           },
-        })
-        onProgress?.([...timeline])
+        }
+        timeline.push(compressionItem)
+        onProgress?.({ type: 'append', items: [compressionItem] })
       }
       let response: ChatResponse
       try {
         response = await requestCompletion(config, requestMessages, tools, (message) => {
-          onProgress?.([
-            ...timeline,
-            ...toMessageBlocks(message).map((block) => ({ type: 'block' as const, block })),
-          ])
-        }, runtime?.signal)
+          onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
+        }, runtime?.signal, runtime)
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
         if (partialBlocks.length > 0) {
-          timeline.push(...partialBlocks.map((block) => ({ type: 'block' as const, block })))
-          onProgress?.([...timeline])
+          const items = partialBlocks.map((block) => ({ type: 'block' as const, block }))
+          timeline.push(...items)
+          onProgress?.({ type: 'commit-stream', items })
         }
         if (runtime?.signal?.aborted) throw error
         const message = partialBlocks.length > 0
@@ -655,8 +735,9 @@ export async function develop(
           throw new Error('The model returned an empty response')
         }
         const block = { type: 'content' as const, content: reply }
-        timeline.push({ type: 'block', block })
-        onProgress?.([...timeline])
+        const item = { type: 'block' as const, block }
+        timeline.push(item)
+        onProgress?.({ type: 'commit-stream', items: [item] })
         history.push({ role: 'assistant', content: reply, id: randomUUID(), createdAt: new Date().toISOString() })
         return {
           writtenFiles,
@@ -668,8 +749,9 @@ export async function develop(
       }
 
       const responseBlocks = toMessageBlocks(message)
-      timeline.push(...responseBlocks.map((block) => ({ type: 'block' as const, block })))
-      onProgress?.([...timeline])
+      const responseItems = responseBlocks.map((block) => ({ type: 'block' as const, block }))
+      timeline.push(...responseItems)
+      onProgress?.({ type: 'commit-stream', items: responseItems })
       history.push({
         role: 'assistant',
         content: message.content ?? null,
@@ -702,8 +784,13 @@ export async function develop(
                 contextSource: 'live',
               })
               updateToolCallResult(timeline, pending.id, stoppedContent, true)
+              onProgress?.({
+                type: 'update-tool-result',
+                toolCallId: pending.id,
+                result: stoppedContent,
+                resultError: true,
+              })
             }
-            onProgress?.([...timeline])
             throw error
           }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
@@ -719,7 +806,12 @@ export async function develop(
           contextSource: 'live',
         })
         updateToolCallResult(timeline, toolCall.id, content, isError)
-        onProgress?.([...timeline])
+        onProgress?.({
+          type: 'update-tool-result',
+          toolCallId: toolCall.id,
+          result: content,
+          resultError: isError,
+        })
         if (runtime?.signal?.aborted) {
           for (const pending of toolCalls.slice(index + 1)) {
             const stoppedContent = 'Stopped by user before completion'
@@ -733,8 +825,13 @@ export async function develop(
               contextSource: 'live',
             })
             updateToolCallResult(timeline, pending.id, stoppedContent, true)
+            onProgress?.({
+              type: 'update-tool-result',
+              toolCallId: pending.id,
+              result: stoppedContent,
+              resultError: true,
+            })
           }
-          onProgress?.([...timeline])
           throw abortError()
         }
       }

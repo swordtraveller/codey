@@ -71,6 +71,7 @@ export type AppConfig = {
   keepAwakeEnabled: boolean
   keepAwakeOnlyWhileWorking: boolean
   networkAccessEnabled: boolean
+  performanceTracingEnabled: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -82,9 +83,35 @@ export const defaultAppConfig: AppConfig = {
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
+  performanceTracingEnabled: false,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
+export type PerformanceTraceScope = 'renderer' | 'main' | 'agent'
+
+export type PerformanceTraceValue = number | boolean | string | null
+
+export type PerformanceTraceEvent = {
+  traceId: string
+  scope: PerformanceTraceScope
+  phase: string
+  projectId?: string
+  conversationId?: string
+  durationMs?: number
+  data?: Record<string, PerformanceTraceValue>
+}
+
+export type PerformanceTraceStatus = {
+  enabled: boolean
+  path: string
+  sizeBytes: number
+}
+
+export type PerformanceTraceFile = {
+  name: string
+  sizeBytes: number
+  modifiedAt: string
+}
 
 export type ContextMetrics = {
   originalTokens: number
@@ -219,10 +246,33 @@ export type Project = {
   conversations: Conversation[]
 }
 
+export type DevelopmentStreamDelta = {
+  content?: string
+  toolCalls?: Array<{
+    index: number
+    id?: string
+    name?: string
+    parameters?: string
+  }>
+}
+
+export type DevelopmentProgressUpdate =
+  | { type: 'reset' }
+  | { type: 'append'; items: DevelopmentTimelineItem[] }
+  | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
+  | { type: 'append-stream'; delta: DevelopmentStreamDelta }
+  | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
+  | { type: 'update-tool-result'; toolCallId: string; result: string; resultError: boolean }
+
 export type DevelopmentProgress = {
   projectId: string
   conversationId: string
+  update: DevelopmentProgressUpdate
+}
+
+export type DevelopmentProgressState = {
   timeline: DevelopmentTimelineItem[]
+  streamingBlocks: AssistantMessageBlock[]
 }
 
 export type DevelopmentResult = {

@@ -1,9 +1,9 @@
 import type { ImageAttachment } from '../shared/image-attachments'
 import type { ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
 import type { ToolCall } from './tools'
-import { countContextTokens, normalizeToolCallSequence } from './context-utils'
+import { countContextMessageTokens, countContextTokens, createContextTokenCounter, normalizeToolCallSequence } from './context-utils'
 import { applyCustomRhaiStrategy } from './rhai-strategy'
-export { countContextTokens, normalizeToolCallSequence } from './context-utils'
+export { countContextMessageTokens, countContextTokens, normalizeToolCallSequence } from './context-utils'
 
 export type ContextMessage = {
   id?: string
@@ -237,7 +237,7 @@ function buildSummaryArtifact(message: ContextMessage, content: string, method: 
     sourcePointers: sourceMessageIds.map((id) => `messages.jsonl#id=${id}`),
     timeRange: { from: message.createdAt ?? createdAt, to: message.createdAt ?? createdAt },
     compressionMethod: method,
-    originalTokens: countContextTokens(message),
+    originalTokens: countContextMessageTokens(message),
     compressedTokens: countContextTokens(body),
     generation: 1,
     createdAt,
@@ -257,8 +257,8 @@ function metrics(originalTokens: number, compressedTokens: number, modelConfig: 
 
 function manageSingleLayer(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig): ContextResult {
   const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
-  const count = (items: ContextMessage[]) => countContextTokens({ messages: items, tools })
-  const originalTokens = count(messages)
+  const counter = createContextTokenCounter(tools)
+  const originalTokens = counter.request(messages)
   let managed = messages
   let filtered = false
   let rewritten = false
@@ -268,46 +268,60 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
     const system = messages.slice(0, 1)
     let older = messages.slice(1, recentStart)
     const recent = messages.slice(recentStart)
+    const systemTokens = counter.messages(system)
+    const recentTokens = counter.messages(recent)
+    let olderTokens = counter.messages(older)
+    let managedMessageTokens = systemTokens + olderTokens + recentTokens
+    const managedTokens = () => counter.requestBaseTokens + managedMessageTokens
+
     if (contextConfig.filterEnabled) {
-      const before = count(older)
+      const before = olderTokens
       older = older.map((message) => transformMessage(message, filterNaturalLanguage))
       managed = [...system, ...older, ...recent]
-      filtered = count(older) < before
+      olderTokens = counter.messages(older)
+      managedMessageTokens = systemTokens + olderTokens + recentTokens
+      filtered = olderTokens < before
     }
-    if (count(managed) >= triggerThreshold && contextConfig.rewriteEnabled) {
-      const before = count(managed)
+    if (managedTokens() >= triggerThreshold && contextConfig.rewriteEnabled) {
+      const before = olderTokens
       older = older.map((message) => transformMessage(message, rewriteNaturalLanguage))
       managed = [...system, ...older, ...recent]
-      rewritten = count(managed) < before
+      olderTokens = counter.messages(older)
+      managedMessageTokens = systemTokens + olderTokens + recentTokens
+      rewritten = olderTokens < before
     }
     if (contextConfig.truncateEnabled) {
       const rounds = splitRounds(older)
-      while (count(managed) >= triggerThreshold && rounds.length > 0) {
-        rounds.shift()
+      while (managedTokens() >= triggerThreshold && rounds.length > 0) {
+        const removed = rounds.shift() ?? []
+        olderTokens -= counter.messages(removed)
+        managedMessageTokens = systemTokens + olderTokens + recentTokens
         managed = [...system, ...rounds.flat(), ...recent]
         truncated = true
       }
     }
   }
   const sendable = normalizeToolCallSequence(managed)
-  const compressedTokens = count(sendable)
+  const compressedTokens = counter.request(sendable)
   return {
     messages: sendable,
     warmMessages: [],
     summaryArtifacts: [],
     metrics: metrics(originalTokens, compressedTokens, modelConfig, contextConfig, { layered: false, recalled: false, filtered, rewritten, truncated }),
-    toolDefinitionTokens: countContextTokens(tools),
+    toolDefinitionTokens: counter.toolDefinitionTokens,
   }
 }
 
 function manageLayered(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig, runtime: ContextManagementRuntime): ContextResult {
   const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
-  const toolDefinitionTokens = countContextTokens(tools)
+  const counter = createContextTokenCounter(tools)
+  const toolDefinitionTokens = counter.toolDefinitionTokens
   const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, triggerThreshold - toolDefinitionTokens))
   const highWatermark = Math.max(1, Math.floor(hotBudget * 0.9))
   const lowWatermark = Math.max(1, Math.floor(hotBudget * 0.8))
-  const requestCount = (items: ContextMessage[]) => countContextTokens({ messages: items, tools })
-  const layerCount = (items: ContextMessage[]) => countContextTokens(items)
+  const requestCount = (items: ContextMessage[]) => counter.request(items)
+  const layerCount = (items: ContextMessage[]) => counter.layer(items)
+  const messageCount = (items: ContextMessage[]) => counter.messages(items)
   const originalTokens = requestCount(messages)
   const now = new Date().toISOString()
   const system = messages.filter((message) => message.role === 'system').map((message) => ({
@@ -344,12 +358,15 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const historicalHot = historical.map((message) => toHot(message))
   const currentHot = current.map((message) => toHot(message))
   let hot = [...historicalHot, ...currentHot]
-  const hotTokens = () => layerCount([...system, ...hot])
-  const fitsHardLimit = () => hotTokens() < hotBudget && requestCount([...system, ...hot]) < triggerThreshold
+  let hotMessageTokens = messageCount(system) + messageCount(hot)
+  const hotTokens = () => counter.layerBaseTokens + hotMessageTokens
+  const hotRequestTokens = () => counter.requestBaseTokens + hotMessageTokens
+  const fitsHardLimit = () => hotTokens() < hotBudget && hotRequestTokens() < triggerThreshold
   const replacementSet = replaceableIds([...historicalHot, ...recalled, ...currentHot])
   const demote = (items: ContextMessage[]): void => {
     const selected = new Set(items)
     hot = hot.filter((message) => !selected.has(message))
+    hotMessageTokens -= messageCount(items)
     warmCandidates.push(...items)
   }
   const historicalCandidates = splitRounds(historicalHot)
@@ -362,7 +379,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
       score: Math.max(...round.map((message) => contextImportanceScore(message, Boolean(message.id && replacementSet.has(message.id))))),
       lastAccessedAt: Math.max(...round.map((message) => timestamp(message.lastAccessedAt))),
       enteredHotAt: Math.max(...round.map((message) => timestamp(message.enteredHotAt ?? message.createdAt))),
-      tokens: layerCount(round),
+      tokens: messageCount(round),
     }))
     .sort((left, right) => left.score - right.score || left.lastAccessedAt - right.lastAccessedAt || left.enteredHotAt - right.enteredHotAt || right.tokens - left.tokens)
 
@@ -377,8 +394,10 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     const promoted = toHot(message, !message.enteredHotAt)
     const insertAt = Math.max(0, hot.length - currentHot.filter((item) => hot.includes(item)).length)
     hot.splice(insertAt, 0, promoted)
+    hotMessageTokens += counter.message(promoted)
     if (hotTokens() > highWatermark || !fitsHardLimit()) {
       hot.splice(hot.indexOf(promoted), 1)
+      hotMessageTokens -= counter.message(promoted)
       if (message.contextSource === 'warm-recall') warmCandidates.push({ ...message, contextLayer: 'warm', contextSource: 'hot-demotion' })
     }
   }
@@ -386,12 +405,14 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const latestUser = runtime.latestUserMessageId
     ? hot.find((message) => message.id === runtime.latestUserMessageId && message.role === 'user')
     : currentHot.find((message) => message.role === 'user')
-  const latestOnly = latestUser ? [...system, latestUser] : system
+  const latestOnlyMessageTokens = messageCount(system) + (latestUser ? counter.message(latestUser) : 0)
+  const latestOnlyLayerTokens = counter.layerBaseTokens + latestOnlyMessageTokens
+  const latestOnlyRequestTokens = counter.requestBaseTokens + latestOnlyMessageTokens
   let overflow: ContextResult['overflow']
-  if (latestUser && (layerCount(latestOnly) >= hotBudget || requestCount(latestOnly) >= triggerThreshold)) {
+  if (latestUser && (latestOnlyLayerTokens >= hotBudget || latestOnlyRequestTokens >= triggerThreshold)) {
     overflow = {
       reason: 'latest_user_too_large',
-      requiredReleaseTokens: Math.max(1, layerCount(latestOnly) - hotBudget + 1, requestCount(latestOnly) - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, latestOnlyLayerTokens - hotBudget + 1, latestOnlyRequestTokens - triggerThreshold + 1),
     }
   }
 
@@ -410,7 +431,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     const pinnedBlockers = hot.some((message) => message.pinnedToHot === true)
     overflow = {
       reason: pinnedBlockers ? 'pinned_hot_overflow' : current.length > 1 ? 'current_round_too_large' : 'hot_overflow',
-      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, requestCount([...system, ...hot]) - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, hotRequestTokens() - triggerThreshold + 1),
     }
   }
 
@@ -433,7 +454,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
       representation: original.representation ?? 'original',
       truthRefs: refsFor(original),
     }
-    const tokenCount = countContextTokens(prepared)
+    const tokenCount = counter.message(prepared)
     if (warmTokens + tokenCount <= contextConfig.warmTokenBudget) {
       warmMessages.unshift(prepared)
       warmTokens += tokenCount
@@ -462,7 +483,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     summaryArtifacts.unshift(buildSummaryArtifact(original, transformed.content !== original.content ? transformed.content ?? fallback : fallback, methods.join('/') || 'locator'))
   }
 
-  const compressedTokens = requestCount(managed)
+  const compressedTokens = counter.request(managed)
   return {
     messages: managed,
     warmMessages,
@@ -495,8 +516,9 @@ export function manageContext(
 ): ContextResult {
   const customMessages = applyCustomRhaiStrategy(messages, tools, modelConfig, contextConfig, runtime)
   if (customMessages) {
-    const originalTokens = countContextTokens({ messages, tools })
-    const compressedTokens = countContextTokens({ messages: customMessages, tools })
+    const counter = createContextTokenCounter(tools)
+    const originalTokens = counter.request(messages)
+    const compressedTokens = counter.request(customMessages)
     return {
       messages: customMessages.map((message) => ({
         ...message,
@@ -513,7 +535,7 @@ export function manageContext(
         rewritten: false,
         truncated: false,
       }),
-      toolDefinitionTokens: countContextTokens(tools),
+      toolDefinitionTokens: counter.toolDefinitionTokens,
     }
   }
   return contextConfig.layeredEnabled ? manageLayered(messages, tools, modelConfig, contextConfig, runtime) : manageSingleLayer(messages, tools, modelConfig, contextConfig)

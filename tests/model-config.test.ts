@@ -40,6 +40,7 @@ const config: AppConfig = {
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
+  performanceTracingEnabled: false,
 }
 const project: Project = {
   id: 'project',
