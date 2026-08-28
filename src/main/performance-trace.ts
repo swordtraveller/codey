@@ -1,7 +1,7 @@
 import { app } from 'electron'
-import { appendFile, copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { PerformanceTraceEvent, PerformanceTraceStatus } from '../shared/types'
+import type { PerformanceTraceEvent, PerformanceTraceFile, PerformanceTraceStatus } from '../shared/types'
 
 const maxFileBytes = 10 * 1024 * 1024
 const maxRotatedFiles = 3
@@ -11,6 +11,15 @@ let writeQueue: Promise<void> = Promise.resolve()
 
 function tracePath(): string {
   return join(app.getPath('userData'), 'performance-traces.jsonl')
+}
+
+function traceFileNames(): string[] {
+  return ['performance-traces.jsonl', ...Array.from({ length: maxRotatedFiles }, (_, index) => 'performance-traces.jsonl.' + (index + 1))]
+}
+
+function resolveTraceFile(name: string): string {
+  if (!traceFileNames().includes(name)) throw new Error('Invalid performance trace file')
+  return join(app.getPath('userData'), name)
 }
 
 function enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -84,6 +93,25 @@ export function getPerformanceTracePath(): string {
 export async function getPerformanceTraceStatus(): Promise<PerformanceTraceStatus> {
   const path = tracePath()
   return { enabled, path, sizeBytes: await fileSize(path) }
+}
+
+export async function listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]> {
+  await flushPerformanceTraces()
+  const files = await Promise.all(traceFileNames().map(async (name) => {
+    try {
+      const info = await stat(resolveTraceFile(name))
+      return { name, sizeBytes: info.size, modifiedAt: info.mtime.toISOString() }
+    } catch {
+      return null
+    }
+  }))
+  return files.filter((file): file is PerformanceTraceFile => file !== null)
+    .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
+}
+
+export async function readPerformanceTraceFile(name: string): Promise<string> {
+  await flushPerformanceTraces()
+  return readFile(resolveTraceFile(name), 'utf8')
 }
 
 export function recordPerformanceTrace(event: PerformanceTraceEvent): void {

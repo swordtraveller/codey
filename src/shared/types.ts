@@ -107,6 +107,11 @@ export type PerformanceTraceStatus = {
   sizeBytes: number
 }
 
+export type PerformanceTraceFile = {
+  name: string
+  sizeBytes: number
+  modifiedAt: string
+}
 
 export type ContextMetrics = {
   originalTokens: number

@@ -31,6 +31,7 @@ import type {
   ConversationTurnRecord,
   ImageAttachment,
   ImageMediaType,
+  PerformanceTraceFile,
   PerformanceTraceStatus,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
@@ -1245,6 +1246,7 @@ export function App(): React.JSX.Element {
   const [settingsError, setSettingsError] = useState('')
   const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
+  const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
   const [performanceError, setPerformanceError] = useState('')
   const [projectError, setProjectError] = useState('')
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -1316,6 +1318,10 @@ export function App(): React.JSX.Element {
         }
       })
       .catch(() => setError(t('unableLoadProjects')))
+  }, [])
+
+  useEffect(() => {
+    void window.codey.getPerformanceTraceStatus().then(setPerformanceStatus).catch(() => undefined)
   }, [])
 
   useEffect(() => window.codey.onDevelopmentProgress((progress) => {
@@ -1437,7 +1443,12 @@ export function App(): React.JSX.Element {
     setPerformanceError('')
     setPerformanceDialogOpen(true)
     try {
-      setPerformanceStatus(await window.codey.getPerformanceTraceStatus())
+      const [status, files] = await Promise.all([
+        window.codey.getPerformanceTraceStatus(),
+        window.codey.listPerformanceTraceFiles(),
+      ])
+      setPerformanceStatus(status)
+      setPerformanceFiles(files)
     } catch {
       setPerformanceError(t('unableLoadPerformanceTrace'))
     }
@@ -1447,8 +1458,18 @@ export function App(): React.JSX.Element {
     setPerformanceError('')
     try {
       setPerformanceStatus(await window.codey.setPerformanceTracingEnabled(enabled))
+      setPerformanceFiles(await window.codey.listPerformanceTraceFiles())
     } catch {
       setPerformanceError(t('unableUpdatePerformanceTrace'))
+    }
+  }
+
+  async function openPerformanceTraceFile(fileName: string): Promise<void> {
+    setPerformanceError('')
+    try {
+      await window.codey.openPerformanceTraceFile(fileName)
+    } catch {
+      setPerformanceError(t('unableOpenPerformanceTrace'))
     }
   }
 
@@ -2053,9 +2074,21 @@ export function App(): React.JSX.Element {
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
-          <Button appearance="subtle" disabled={!config.developerMode} onClick={() => void openPerformanceTracing()}>
-            {t('performanceTracing')}
-          </Button>
+          <div className="performance-nav-row">
+            <Button appearance="subtle" disabled={!config.developerMode} onClick={() => void openPerformanceTracing()}>
+              {t('performanceTracing')}
+            </Button>
+            <Button
+              appearance="subtle"
+              className="performance-toggle-button"
+              aria-label={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              title={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              disabled={!config.developerMode || !performanceStatus}
+              onClick={() => void togglePerformanceTracing(!performanceStatus?.enabled)}
+            >
+              <span aria-hidden="true" className={performanceStatus?.enabled ? 'performance-toggle-icon stop' : 'performance-toggle-icon play'} />
+            </Button>
+          </div>
           <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
             Handover
           </Button>
@@ -2298,14 +2331,20 @@ export function App(): React.JSX.Element {
                   <p className="status">{t('performanceTraceSize')}: {performanceStatus.sizeBytes.toLocaleString()} B</p>
                 </>
               )}
+              <div className="performance-trace-files">
+                <strong>{t('performanceTraceFiles')}</strong>
+                {performanceFiles.length === 0 ? <p className="trace-empty">{t('noPerformanceTraceFiles')}</p> : performanceFiles.map((file) => (
+                  <Button key={file.name} appearance="subtle" className="performance-trace-file" onClick={() => void openPerformanceTraceFile(file.name)}>
+                    <span>{file.name}</span>
+                    <small>{file.sizeBytes.toLocaleString()} B · {new Date(file.modifiedAt).toLocaleString()}</small>
+                  </Button>
+                ))}
+              </div>
               {performanceError && <p className="dialog-error">{performanceError}</p>}
             </DialogContent>
             <DialogActions>
               <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceTraces')}</Button>
               <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceTraces')}</Button>
-              <Button appearance="primary" onClick={() => void togglePerformanceTracing(!performanceStatus?.enabled)} disabled={!config.developerMode || !performanceStatus}>
-                {performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
-              </Button>
               <Button appearance="secondary" onClick={() => setPerformanceDialogOpen(false)}>{t('close')}</Button>
             </DialogActions>
           </DialogBody>

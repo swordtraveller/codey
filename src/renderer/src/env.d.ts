@@ -13,6 +13,7 @@ import type {
   ImageAttachment,
   Project,
   PerformanceTraceEvent,
+  PerformanceTraceFile,
   PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
@@ -29,6 +30,9 @@ declare global {
     readonly codey: {
       getConfig(): Promise<AppConfig>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
+      readPerformanceTraceFile(fileName: string): Promise<string>
+      openPerformanceTraceFile(fileName: string): Promise<void>
       setPerformanceTracingEnabled(enabled: boolean): Promise<PerformanceTraceStatus>
       exportPerformanceTraces(): Promise<string | null>
       revealPerformanceTraces(): Promise<void>

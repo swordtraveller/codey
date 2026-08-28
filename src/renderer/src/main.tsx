@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './i18n'
 import { App } from './App'
 import { ContextDebugApp } from './ContextDebugApp'
+import { PerformanceTraceApp } from './PerformanceTraceApp'
 import { ScreenshotOverlay } from './ScreenshotOverlay'
 import './styles.css'
 
@@ -17,6 +18,8 @@ const content = params.get('view') === 'context-debug'
     />
   : params.get('view') === 'screenshot-overlay'
     ? <ScreenshotOverlay />
-    : <App />
+    : params.get('view') === 'performance-trace'
+      ? <PerformanceTraceApp fileName={params.get('file') ?? ''} />
+      : <App />
 
 createRoot(root).render(<StrictMode>{content}</StrictMode>)

@@ -65,6 +65,8 @@ import {
   flushPerformanceTraces,
   getPerformanceTracePath,
   getPerformanceTraceStatus,
+  listPerformanceTraceFiles,
+  readPerformanceTraceFile,
   recordPerformanceTrace,
   setPerformanceTracingEnabled,
 } from './performance-trace'
@@ -93,6 +95,7 @@ const conversationControllers = new Map<string, AbortController>()
 const developmentProgressStates = new Map<string, DevelopmentProgressState>()
 const developmentProgressSubscriptions = new Map<number, string>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
+let performanceTraceWindow: BrowserWindow | null = null
 type PendingScreenshot = {
   window: BrowserWindow
   image: NativeImage
@@ -638,9 +641,44 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
   loadRenderer(window, { view: 'context-debug', projectId, conversationId })
 }
 
+function openPerformanceTraceWindow(fileName: string): void {
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) {
+    if (performanceTraceWindow.isMinimized()) performanceTraceWindow.restore()
+    performanceTraceWindow.focus()
+    loadRenderer(performanceTraceWindow, { view: 'performance-trace', file: fileName })
+    return
+  }
+  const window = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 860,
+    minHeight: 560,
+    title: 'Codey Performance Trace',
+    autoHideMenuBar: true,
+    backgroundColor: '#f5f5f5',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, '../preload/index.js'),
+    },
+  })
+  performanceTraceWindow = window
+  window.on('closed', () => {
+    if (performanceTraceWindow === window) performanceTraceWindow = null
+  })
+  loadRenderer(window, { view: 'performance-trace', file: fileName })
+}
+
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
+  ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
+  ipcMain.handle('performance:open-file', async (_event, fileName: string) => {
+    await readPerformanceTraceFile(fileName)
+    openPerformanceTraceWindow(fileName)
+  })
   ipcMain.handle('performance:set-enabled', async (_event, enabled: boolean) => {
     const config = await readConfig()
     if (!config.developerMode && enabled) throw new Error('Developer mode is disabled')
@@ -849,6 +887,8 @@ app.on('will-quit', (event) => {
   event.preventDefault()
   closeAllPendingScreenshots()
   closeAllPreviewWindows()
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) performanceTraceWindow.close()
+  performanceTraceWindow = null
   void stopAllFrontendServers().then(() => flushPerformanceTraces()).finally(() => app.quit())
 })
 

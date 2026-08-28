@@ -9,6 +9,7 @@ import type {
   ImageAttachment,
   Project,
   PerformanceTraceEvent,
+  PerformanceTraceFile,
   PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
@@ -25,6 +26,9 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     getConfig: () => ipcRenderer.invoke('config:get'),
     getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
+    listPerformanceTraceFiles: (): Promise<PerformanceTraceFile[]> => ipcRenderer.invoke('performance:list-files'),
+    readPerformanceTraceFile: (fileName: string): Promise<string> => ipcRenderer.invoke('performance:read-file', fileName),
+    openPerformanceTraceFile: (fileName: string): Promise<void> => ipcRenderer.invoke('performance:open-file', fileName),
     setPerformanceTracingEnabled: (enabled: boolean): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:set-enabled', enabled),
     exportPerformanceTraces: (): Promise<string | null> => ipcRenderer.invoke('performance:export'),
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
