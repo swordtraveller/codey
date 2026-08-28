@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ContextManagementConfig, ModelConfig } from '../shared/types'
-import { countContextTokens, normalizeToolCallSequence } from './context-utils'
+import { createContextTokenCounter, normalizeToolCallSequence } from './context-utils'
 import type { ContextMessage } from './context'
 
 export type RhaiStrategyRuntime = {
@@ -140,6 +140,6 @@ export function applyCustomRhaiStrategy(
     .filter((message) => selectedIds.has(message.id))
     .map((message) => idByDslId.get(message.id)!)
   const normalized = normalizeToolCallSequence(selectedContextMessages)
-  if (countContextTokens({ messages: normalized, tools }) > triggerThreshold) return undefined
+  if (createContextTokenCounter(tools).request(normalized) > triggerThreshold) return undefined
   return normalized
 }

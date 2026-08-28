@@ -10,7 +10,7 @@ import type {
   ContextManagementConfig,
   ContextSummaryArtifact,
 } from '../shared/types'
-import { countContextTokens, SUMMARY_LABEL } from './context'
+import { countContextMessageTokens, SUMMARY_LABEL } from './context'
 import { hydrateImageAttachments, persistImageAttachments, type StoredImageReference } from './image-store'
 
 type MessageOverride = Pick<AgentContextMessage, 'manualContextLayer' | 'pinnedToHot' | 'contextRegion'> & {
@@ -172,7 +172,7 @@ function truthIndexItem(message: AgentContextMessage, offset: number, length: nu
     id,
     kind: 'truth',
     role: message.role,
-    tokenCount: countContextTokens(message),
+    tokenCount: countContextMessageTokens(message),
     createdAt: message.createdAt ?? new Date(0).toISOString(),
     preview: preview(message.content),
     logicalPointer: `messages.jsonl#${offset}:${length}`,
@@ -539,7 +539,7 @@ export async function readConversationWorkingSet(
 
   if (rememberedHot.length === 0 && rememberedWarm.length === 0) {
     const targetTokens = Math.max(1, Math.floor(config.hotTokenBudget * 0.8))
-    let selectedTokens = [...hotById.values()].reduce((sum, message) => sum + countContextTokens(message), 0)
+    let selectedTokens = [...hotById.values()].reduce((sum, message) => sum + countContextMessageTokens(message), 0)
     const rounds = splitRounds(index.filter((item) => item.manualContextLayer !== 'warm'))
     for (let roundIndex = rounds.length - 1; roundIndex >= 0; roundIndex -= 1) {
       const round = rounds[roundIndex]
@@ -566,7 +566,7 @@ export async function readConversationWorkingSet(
   const recalled: AgentContextMessage[] = []
   const recalledTruthRefs = new Set<string>()
   for (const { message } of warmMatches) {
-    const tokenCount = countContextTokens(message)
+    const tokenCount = countContextMessageTokens(message)
     if (recalledTokens + tokenCount > config.coldRecallTokenBudget) continue
     recalled.push(asHot({
       ...message,
