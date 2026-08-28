@@ -64,6 +64,41 @@ describe('conversation context store', () => {
     expect(storage.index.path).toMatch(/index\.json$/)
   })
 
+  it('includes an unpersisted latest user message in both context modes', async () => {
+    const persisted: AgentContextMessage = {
+      id: 'old-user',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      role: 'user',
+      content: 'Previous request',
+    }
+    const latest: AgentContextMessage = {
+      id: 'latest-user',
+      createdAt: '2026-01-01T00:00:01.000Z',
+      role: 'user',
+      content: 'Current request',
+    }
+    await writeConversationMessages('project', 'conversation', [persisted])
+
+    expect((await readConversationMessages('project', 'conversation', [latest])).map((message) => message.id))
+      .toEqual(['old-user', 'latest-user'])
+    expect(await readConversationWorkingSet(
+      'project',
+      'conversation',
+      defaultContextManagementConfig,
+      latest.content ?? '',
+      [],
+      [],
+      [],
+      latest.id,
+      latest,
+    )).toContainEqual(expect.objectContaining({
+      id: 'latest-user',
+      role: 'user',
+      contextLayer: 'hot',
+      contextRegion: 'newborn',
+    }))
+  })
+
   it('externalizes images from the truth log and hydrates them when read', async () => {
     const message: AgentContextMessage = {
       id: 'image-message',

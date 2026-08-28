@@ -466,8 +466,9 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
 }): React.JSX.Element {
-  const [startIndex, setStartIndex] = useState(() => initialConversationWindowStart(messages.length))
-  const historyStartRef = useRef<HTMLDivElement>(null)
+  const { t } = useTranslation()
+  const latestInitialStart = initialConversationWindowStart(messages)
+  const [startIndex, setStartIndex] = useState(latestInitialStart)
   const loadingOlderRef = useRef(false)
   const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const historyExpandedRef = useRef(false)
@@ -476,17 +477,17 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const observedRowsRef = useRef(new Map<string, HTMLDivElement>())
   const rowRefCallbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
   const [heightVersion, setHeightVersion] = useState(0)
-  const initialVisibleMessageCount = messages.length - initialConversationWindowStart(messages.length)
+  const initialVisibleMessageCount = messages.length - latestInitialStart
   const [virtualWindow, setVirtualWindow] = useState<VirtualWindow>(() => ({
-    start: Math.max(0, initialVisibleMessageCount - 12),
-    end: initialVisibleMessageCount,
+    start: latestInitialStart + Math.max(0, initialVisibleMessageCount - 12),
+    end: messages.length,
   }))
   const scrollFrameRef = useRef<number | null>(null)
-  const latestInitialStart = initialConversationWindowStart(messages.length)
   const visibleStartIndex = historyExpandedRef.current
     ? Math.min(startIndex, latestInitialStart)
     : latestInitialStart
   const hasOlderMessages = visibleStartIndex > 0
+  const historyFoldHeight = hasOlderMessages ? 36 : 0
   const visibleMessages = useMemo(() => messages.slice(visibleStartIndex), [messages, visibleStartIndex])
   const layout = useMemo(() => {
     const offsets = [0]
@@ -502,14 +503,14 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     const next = updateVirtualWindow(
       { start: 0, end: 0 },
       layout.offsets,
-      container.scrollTop,
+      Math.max(0, container.scrollTop - historyFoldHeight),
       container.clientHeight,
     )
     setVirtualWindow({
       start: visibleStartIndex + next.start,
       end: visibleStartIndex + next.end,
     })
-  }, [layout.offsets, scrollContainerRef, visibleStartIndex])
+  }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
 
   const scheduleWindowUpdate = useCallback(() => {
     if (scrollFrameRef.current !== null) return
@@ -586,7 +587,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     if (!shouldStickToBottom) return
     const nextStart = historyExpandedRef.current
       ? visibleStartIndex
-      : initialConversationWindowStart(messages.length)
+      : initialConversationWindowStart(messages)
     const nextLength = messages.length - nextStart
     setVirtualWindow({
       start: nextStart + Math.max(0, nextLength - 12),
@@ -594,32 +595,31 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     })
   }, [messages.length, shouldStickToBottom, visibleStartIndex])
 
+  const loadOlderMessages = useCallback(() => {
+    const container = scrollContainerRef.current
+    if (!container || !hasOlderMessages || loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    historyExpandedRef.current = true
+    pendingAnchorRef.current = {
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+    }
+    setStartIndex((current) => expandConversationWindowStart(
+      messages,
+      Math.min(current, initialConversationWindowStart(messages)),
+      conversationHistoryBatchSize,
+    ))
+  }, [hasOlderMessages, messages, scrollContainerRef])
+
   useEffect(() => {
     const container = scrollContainerRef.current
-    const historyStart = historyStartRef.current
-    if (!container || !historyStart || !hasOlderMessages) return
-
-    const observer = new IntersectionObserver(([entry]) => {
-      if (!entry.isIntersecting || loadingOlderRef.current) return
-      loadingOlderRef.current = true
-      historyExpandedRef.current = true
-      pendingAnchorRef.current = {
-        scrollHeight: container.scrollHeight,
-        scrollTop: container.scrollTop,
-      }
-      setStartIndex((current) => expandConversationWindowStart(
-        Math.min(current, initialConversationWindowStart(messages.length)),
-        conversationHistoryBatchSize,
-      ))
-    }, {
-      root: container,
-      rootMargin: '240px 0px 0px',
-      threshold: 0,
-    })
-
-    observer.observe(historyStart)
-    return () => observer.disconnect()
-  }, [hasOlderMessages, messages.length, scrollContainerRef, visibleStartIndex])
+    if (!container || !hasOlderMessages) return
+    const onWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0 && container.scrollTop <= 1) loadOlderMessages()
+    }
+    container.addEventListener('wheel', onWheel, { passive: true })
+    return () => container.removeEventListener('wheel', onWheel)
+  }, [hasOlderMessages, loadOlderMessages, scrollContainerRef])
 
   useEffect(() => {
     scheduleWindowUpdate()
@@ -657,7 +657,18 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
 
   return (
     <>
-      {hasOlderMessages && <div aria-hidden="true" className="conversation-history-start" ref={historyStartRef} />}
+      {hasOlderMessages && (
+        <div className="conversation-history-fold">
+          <Button appearance="subtle" size="small" onClick={loadOlderMessages}>
+            {t('loadOlderConversationRounds', {
+              count: Math.min(
+                conversationHistoryBatchSize,
+                messages.slice(0, visibleStartIndex).filter((message) => message.role === 'user').length,
+              ),
+            })}
+          </Button>
+        </div>
+      )}
       <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: topHeight }} />
       {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
         <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>

@@ -435,9 +435,14 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-.conversation-history-start,
 .conversation-end {
   height: 1px;
+}
+
+.conversation-history-fold {
+  display: flex;
+  justify-content: center;
+  height: 36px;
 }
 
 .conversation-virtual-spacer {

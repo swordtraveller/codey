@@ -398,10 +398,19 @@ export async function readConversationSummary(projectId: string, conversationId:
   return readAt<ContextSummaryArtifact>(paths(projectId, conversationId).summaries, item)
 }
 
-export async function readConversationMessages(projectId: string, conversationId: string): Promise<AgentContextMessage[]> {
+export async function readConversationMessages(
+  projectId: string,
+  conversationId: string,
+  additionalMessages: AgentContextMessage[] = [],
+): Promise<AgentContextMessage[]> {
   const items = await readConversationIndex(projectId, conversationId)
   const messages: AgentContextMessage[] = []
   for (const item of items) messages.push(await readConversationMessage(projectId, conversationId, item.id))
+  const known = new Set(messages.map((message) => message.id))
+  for (const message of additionalMessages) {
+    if (!message.id || known.has(message.id)) continue
+    messages.push(message)
+  }
   return messages
 }
 
@@ -462,6 +471,7 @@ export async function readConversationWorkingSet(
   promotedHot: AgentContextMessage[] = [],
   rememberedHot: AgentContextMessage[] = [],
   latestUserMessageId?: string,
+  latestUserMessage?: AgentContextMessage,
 ): Promise<AgentContextMessage[]> {
   const index = await readConversationIndex(projectId, conversationId)
   const indexById = new Map(index.map((item) => [item.id, item]))
@@ -472,6 +482,7 @@ export async function readConversationWorkingSet(
     if (!indexById.has(id)) return undefined
     return readConversationMessage(projectId, conversationId, id)
   }
+
   const asHot = (message: AgentContextMessage, fresh = false): AgentContextMessage => ({
     ...message,
     contextLayer: 'hot',
@@ -519,8 +530,10 @@ export async function readConversationWorkingSet(
   }
 
   if (latestUserMessageId && !hotById.has(latestUserMessageId)) {
-    const message = await load(latestUserMessageId)
-    if (message) hotById.set(latestUserMessageId, asHot(message))
+    const message = latestUserMessage?.id === latestUserMessageId
+      ? latestUserMessage
+      : await load(latestUserMessageId)
+    if (message) hotById.set(latestUserMessageId, asHot(message, true))
     warmById.delete(latestUserMessageId)
   }
 

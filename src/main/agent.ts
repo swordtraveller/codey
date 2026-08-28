@@ -12,7 +12,7 @@ import type {
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
-import { redactProviderMessages, toProviderMessages } from './model-messages'
+import { toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
@@ -207,6 +207,37 @@ function responseSize(message: ResponseMessage | undefined): number {
   )
 }
 
+function modelRequestSummary(
+  config: ModelConfig,
+  messages: ContextMessage[],
+  tools: object[],
+): Record<string, unknown> {
+  const byRole = messages.reduce<Record<string, number>>((counts, message) => {
+    counts[message.role] = (counts[message.role] ?? 0) + 1
+    return counts
+  }, {})
+  return {
+    endpoint: config.baseUrl + '/chat/completions',
+    model: config.modelName,
+    messageCount: messages.length,
+    messageChars: messages.reduce((total, message) => total + (message.content?.length ?? 0), 0),
+    messagesByRole: byRole,
+    imageCount: messages.reduce((total, message) => total + (message.images?.length ?? 0), 0),
+    toolCallCount: messages.reduce((total, message) => total + (message.tool_calls?.length ?? 0), 0),
+    toolDefinitionCount: tools.length,
+    stream: true,
+  }
+}
+
+function modelResponseSummary(status: number, message: ResponseMessage, stream: boolean): Record<string, unknown> {
+  return {
+    status,
+    stream,
+    contentChars: message.content?.length ?? 0,
+    toolCallCount: message.tool_calls?.length ?? 0,
+  }
+}
+
 function isRetryableRequestError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false
@@ -240,13 +271,7 @@ async function requestCompletionAttempt(
     tool_choice: 'auto',
     stream: true,
   }
-  log.debug('model.request', {
-    url: config.baseUrl + '/chat/completions',
-    body: {
-      ...requestBody,
-      messages: redactProviderMessages(providerMessages, messages),
-    },
-  })
+  log.debug('model.request', modelRequestSummary(config, messages, tools))
 
   let content = ''
   const toolCalls: ToolCall[] = []
@@ -305,8 +330,10 @@ async function requestCompletionAttempt(
     if (!response.headers.get('content-type')?.includes('text/event-stream')) {
       const body = await response.text()
       const data = JSON.parse(body) as ChatResponse
-      log.debug('model.response', { status: response.status, body: data })
       const message = data.choices?.[0]?.message
+      log.debug('model.response', message
+        ? modelResponseSummary(response.status, message, false)
+        : { status: response.status, stream: false, contentChars: 0, toolCallCount: 0 })
       if (message) {
         onUpdate?.(message)
       }
@@ -375,8 +402,9 @@ async function requestCompletionAttempt(
     }
     publish()
 
-    const data: ChatResponse = { choices: [{ message: currentMessage() }] }
-    log.debug('model.response', { status: response.status, body: data })
+    const message = currentMessage()
+    const data: ChatResponse = { choices: [{ message }] }
+    log.debug('model.response', modelResponseSummary(response.status, message, true))
     return data
   } catch (error) {
     if (publishTimer) {

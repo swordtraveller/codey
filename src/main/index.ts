@@ -61,11 +61,14 @@ import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from '.
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
   addMessage,
+  addMessageImmediately,
   addProjectFolder,
   createConversation,
   createProject,
   getProject,
+  getProjectLive,
   getProjects,
+  getProjectsLive,
   saveConversationContext,
   setConversationAgentLimits,
   setConversationContextConfig,
@@ -250,14 +253,14 @@ async function developProject(
   onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
-  onProjectUpdated?: (project: Project) => Promise<void> | void,
+  onProjectUpdated?: (project: Project) => void,
 ): Promise<DevelopmentResult> {
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
   if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
   if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
-  let project = await getProject(projectId)
+  let project = await getProjectLive(projectId)
   if (project.folders.length === 0) {
     return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
@@ -286,7 +289,7 @@ async function developProject(
     content: normalizedContent,
     images,
   }
-  project = await addMessage(
+  project = await addMessageImmediately(
     projectId,
     conversationId,
     'user',
@@ -299,10 +302,10 @@ async function developProject(
     images,
     userMessageId,
   )
-  // 用户消息已经写入对应会话分片；先发布这个快照，再做上下文索引准备和远端请求。
-  await onProjectUpdated?.(project)
-  await prepareContextDebugStorage(projectId, conversationId)
-  await appendConversationMessages(projectId, conversationId, [currentUserMessage])
+  // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
+  onProjectUpdated?.(project)
+  // The latest message is supplied directly to context reads below, so no
+  // context-store write needs to delay the first model request.
 
   const roundId = randomUUID()
   const requestHistory = contextConfig.layeredEnabled
@@ -315,11 +318,14 @@ async function developProject(
         getPromotedHotMessages(projectId, conversationId),
         conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
         userMessageId,
+        currentUserMessage,
       )
-    : await readConversationMessages(projectId, conversationId)
+    : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
   if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
     return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
   }
+  const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
+    .catch((error) => log.warn('context.latest-user.persist.failed', error))
   const result = await develop(
     project,
     modelConfig,
@@ -346,6 +352,7 @@ async function developProject(
     result.context,
   )
   try {
+    await latestContextWrite
     await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
@@ -384,14 +391,12 @@ async function processBridgeMessage(message: import('../shared/bridge').Handover
   if (getConversationState(message.projectId, message.conversationId) !== 'idle') return false
   const key = conversationKey(message.projectId, message.conversationId)
   const controller = new AbortController()
-  const publishProject = async (project: Project): Promise<void> => {
+  const publishProject = (project: Project): void => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', project)
-    try {
-      await bridgeHandover.sync(await getProjects())
-    } catch (error) {
-      // 同步失败不能导致消息事件重复消费，否则会重复写入用户消息。
-      log.warn('bridge.sync.failed', error)
-    }
+    // 使用内存快照同步 Bridge，不等待本轮消息的磁盘持久化；同步失败也不能阻塞模型请求。
+    void getProjectsLive()
+      .then((projects) => bridgeHandover.sync(projects))
+      .catch((error) => log.warn('bridge.sync.failed', error))
   }
   conversationControllers.set(key, controller)
   setConversationState(message.projectId, message.conversationId, 'running')
@@ -710,7 +715,7 @@ app.whenReady().then(() => {
     try {
       const result = await developProject(projectId, conversationId, content, images, (update) => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
-      }, controller.signal, startedAt, async (project) => {
+      }, controller.signal, startedAt, (project) => {
         if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
       })
       if (!result.error && !result.stopped) {

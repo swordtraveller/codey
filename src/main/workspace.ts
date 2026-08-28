@@ -18,6 +18,7 @@ import {
   type ProjectFolder,
 } from '../shared/types'
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
+import { log } from './logger'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 import {
   hydrateImageAttachments,
@@ -309,8 +310,25 @@ export async function getProjects(): Promise<Project[]> {
   return loadProjects()
 }
 
+/**
+ * Returns the in-memory workspace without waiting for queued disk writes.
+ * Callers must use this only when they explicitly accept a live snapshot.
+ */
+export async function getProjectsLive(): Promise<Project[]> {
+  return loadProjects()
+}
+
 export async function getProject(projectId: string): Promise<Project> {
   await awaitPendingWrites()
+  return findProject(projectId)
+}
+
+/**
+ * Returns a project from the live in-memory workspace.
+ * This is intentionally separate from getProject(), whose contract includes
+ * waiting for durable writes to settle.
+ */
+export async function getProjectLive(projectId: string): Promise<Project> {
   return findProject(projectId)
 }
 
@@ -409,6 +427,62 @@ export function setConversationAgentLimits(projectId: string, conversationId: st
     await persistConversation(projectId, conversation)
     return project
   })
+}
+
+/**
+ * Appends a message to the live workspace immediately and schedules its durable
+ * write on the same conversation queue. The returned project is safe to publish
+ * before image/file persistence completes.
+ */
+export async function addMessageImmediately(
+  projectId: string,
+  conversationId: string,
+  role: ChatMessage['role'],
+  content: string,
+  blocks?: AssistantMessageBlock[],
+  compression?: ContextCompressionNotice,
+  modelConfig?: ModelConfigSnapshot,
+  contextConfig?: ContextManagementConfig,
+  turn?: ConversationTurnRecord,
+  images?: ImageAttachment[],
+  messageId?: string,
+  createdAt?: string,
+): Promise<Project> {
+  const project = await findProject(projectId)
+  const conversation = findConversation(project, conversationId)
+  const message = {
+    id: messageId ?? randomUUID(),
+    createdAt: createdAt ?? new Date().toISOString(),
+    role,
+    content,
+    images,
+    blocks,
+    compression,
+    modelConfig,
+    contextConfig,
+    turn,
+  }
+  conversation.messages.push(message)
+  if (role === 'user' && conversation.messages.length === 1) {
+    const title = content || images?.[0]?.name || 'Image request'
+    conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
+  }
+
+  void serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    // Yield once so the caller can publish the in-memory snapshot first.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await persistImageAttachments(projectId, conversationId, message.images)
+    await persistConversation(projectId, conversation)
+  }).catch((error) => {
+    log.error('workspace.message.persist.failed', {
+      projectId,
+      conversationId,
+      messageId: message.id,
+      error,
+    })
+  })
+
+  return project
 }
 
 export function addMessage(
