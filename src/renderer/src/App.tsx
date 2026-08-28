@@ -2199,7 +2199,6 @@ export function App(): React.JSX.Element {
             >
             {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
-                <span className="welcome-mark">C</span>
                 <h1>{emptyTitle}</h1>
                 <p>{emptyDescription}</p>
                 {!activeProject && (

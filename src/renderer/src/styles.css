@@ -36,14 +36,6 @@ body {
   background: #fff;
 }
 
-.welcome-mark {
-  display: inline-grid;
-  place-items: center;
-  color: #fff;
-  background: #0f6cbd;
-  font-weight: 600;
-}
-
 .sidebar-section {
   min-height: 0;
 }
@@ -320,14 +312,6 @@ body {
   text-align: center;
 }
 
-.welcome-mark {
-  width: 48px;
-  height: 48px;
-  margin-bottom: 20px;
-  border-radius: 12px;
-  font-size: 20px;
-}
-
 h1 {
   margin: 0;
   font-size: 28px;
@@ -478,7 +462,6 @@ h1 {
   background: #f5f5f5;
   font-weight: 600;
 }
-
 
 .turn-stopwatch {
   min-height: 18px;
@@ -1371,7 +1354,6 @@ h1 {
 .bridge-channel-heading { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
 .bridge-channel-heading > div { display: grid; gap: 3px; min-width: 0; }
 .bridge-channel-heading small { color: var(--colorNeutralForeground3); overflow-wrap: anywhere; }
-
 
 .performance-nav-row {
   display: flex;
