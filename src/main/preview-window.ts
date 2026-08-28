@@ -1,4 +1,5 @@
 import { BrowserWindow } from 'electron'
+import { getAppIconPath } from './app-icon'
 import { isAllowedPreviewUrl } from './frontend-runtime'
 
 const previewWindows = new Map<string, BrowserWindow>()
@@ -28,6 +29,7 @@ export function openPreviewWindow(serverId: string, previewUrl: string): void {
     minWidth: 640,
     minHeight: 420,
     title: 'Codey Preview',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,

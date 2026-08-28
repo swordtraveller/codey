@@ -57,7 +57,8 @@
     "appId": "com.codey.desktop",
     "productName": "Codey",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "out/**/*",
@@ -67,7 +68,14 @@
       "native/rhai-runner.exe"
     ],
     "win": {
-      "target": "nsis"
-    }
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ]
   }
 }

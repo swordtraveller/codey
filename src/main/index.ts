@@ -27,6 +27,7 @@ import {
   createDevelopmentProgressState,
 } from '../shared/development-progress'
 import { buildAgentContext, develop } from './agent'
+import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
 import {
@@ -485,6 +486,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: 'Codey',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     backgroundColor: '#f7f7f5',
     webPreferences: {
@@ -626,6 +628,7 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
     minWidth: 960,
     minHeight: 600,
     title: 'Codey Context Debugger',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     backgroundColor: '#f5f5f5',
     parent: undefined,
@@ -654,6 +657,7 @@ function openPerformanceTraceWindow(fileName: string): void {
     minWidth: 860,
     minHeight: 560,
     title: 'Codey Performance Trace',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     backgroundColor: '#f5f5f5',
     webPreferences: {
@@ -669,6 +673,8 @@ function openPerformanceTraceWindow(fileName: string): void {
   })
   loadRenderer(window, { view: 'performance-trace', file: fileName })
 }
+
+app.setAppUserModelId('com.codey.desktop')
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())

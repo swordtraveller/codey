@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Lowercase y</title>
+  <desc id="desc">A compact white line lowercase y on a muted violet background.</desc>
+  <rect width="128" height="128" rx="26" fill="#8172A6"/>
+  <path d="M43 43 57 72c3 7 11 7 14 0l12-29M77 58 69 86c-3 9-8 13-17 13" fill="none" stroke="#FFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

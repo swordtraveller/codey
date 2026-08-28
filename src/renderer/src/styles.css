@@ -36,28 +36,12 @@ body {
   background: #fff;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 17px;
-  font-weight: 600;
-}
-
-.brand-mark,
 .welcome-mark {
   display: inline-grid;
   place-items: center;
   color: #fff;
   background: #0f6cbd;
   font-weight: 600;
-}
-
-.brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  font-size: 14px;
 }
 
 .sidebar-section {

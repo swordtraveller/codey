@@ -1976,10 +1976,6 @@ export function App(): React.JSX.Element {
     <FluentProvider className="app" theme={webLightTheme}>
       <main className="shell">
         <aside className="sidebar">
-          <div className="brand" aria-label="Codey">
-            <span className="brand-mark">C</span>
-            Codey
-          </div>
 
           <Button appearance="primary" onClick={openProjectDialog}>
             {t('newProject')}
