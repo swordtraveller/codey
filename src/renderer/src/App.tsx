@@ -2035,14 +2035,14 @@ export function App(): React.JSX.Element {
             {t('newProject')}
           </Button>
 
-          <section className="sidebar-section">
+          <section className="sidebar-section projects-section">
             <p className="section-label">{t('projects')}</p>
             <nav className="nav-list" aria-label={t('projects')}>
               {visibleProjects.map((project) => (
                 <div className="project-nav-item" key={project.id}>
                   <div className="project-nav-row">
-                    <Button appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
-                      {project.name}
+                    <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
+                      <span className="nav-item-title">{project.name}</span>
                     </Button>
                     <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
@@ -2076,8 +2076,8 @@ export function App(): React.JSX.Element {
                 {visibleConversations.map((conversation) => (
                   <div className="conversation-nav-item" key={conversation.id}>
                     <div className="conversation-nav-row">
-                      <Button appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => { setActiveConversationId(conversation.id); setOpenConversationMenuId(null); setError('') }}>
-                        {conversation.title}
+                      <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => { setActiveConversationId(conversation.id); setOpenConversationMenuId(null); setError('') }}>
+                        <span className="nav-item-title">{conversation.title}</span>
                       </Button>
                       <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
                     </div>

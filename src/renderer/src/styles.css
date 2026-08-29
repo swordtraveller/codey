@@ -66,23 +66,38 @@ body {
 
 .nav-list {
   display: grid;
+  align-content: start;
   gap: 4px;
   max-height: 180px;
   overflow-y: auto;
 }
 
+.projects-section .nav-list,
 .conversations-section .nav-list {
+  min-height: 0;
+}
+
+.conversations-section .nav-list {
+  flex: 1;
   max-height: none;
   margin-top: 8px;
 }
 
-.nav-list button {
+.nav-list .nav-item-button {
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
   justify-content: flex-start;
   overflow: hidden;
+  text-align: left;
+  white-space: nowrap;
 }
 
-.nav-list button span {
+.nav-list .nav-item-title {
+  display: block;
+  min-width: 0;
   overflow: hidden;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -197,18 +212,23 @@ body {
   white-space: nowrap;
 }
 
-.project-nav-item {
+.project-nav-item,
+.conversation-nav-item {
   display: grid;
+  min-width: 0;
   gap: 4px;
 }
 
-.project-nav-row {
+.project-nav-row,
+.conversation-nav-row {
   display: flex;
   gap: 4px;
   min-width: 0;
+  height: 32px;
 }
 
-.project-nav-row > :first-child {
+.project-nav-row > .nav-item-button,
+.conversation-nav-row > .nav-item-button {
   flex: 1;
   min-width: 0;
 }
@@ -1522,24 +1542,7 @@ h1 {
   }
 }
 
-.conversation-nav-item {
-  display: grid;
-  gap: 4px;
-}
-
-.conversation-nav-row {
-  display: flex;
-  gap: 4px;
-  min-width: 0;
-}
-
-.conversation-nav-row > :first-child {
-  flex: 1;
-  min-width: 0;
-}
-
-.conversation-menu-panel {
-  margin: 0 8px 4px;
+.conversation-menu-panel {  margin: 0 8px 4px;
   border: 1px solid #e0e0e0;
   border-radius: 6px;
   padding: 8px;
