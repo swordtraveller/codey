@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
+  ContextAction,
   ContextAuditEvent,
   ContextDebugMessage,
   ContextDebugOverview,
@@ -75,7 +76,38 @@ function addAudit(projectId: string, conversationId: string, event: Omit<Context
   audits.set(storageKey, list.slice(-300))
 }
 
-export function buildContextDebugSnapshot(result: ContextResult, config: import('../shared/types').ContextManagementConfig, requestId = randomUUID(), roundId = requestId): ContextDebugSnapshot {
+function addAutomaticActionAudit(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  type: ContextAuditEvent['type'],
+  action: ContextAction,
+  description: string,
+): void {
+  const storageKey = key(projectId, conversationId)
+  const messageIds = [...new Set(action.messageIds)].sort()
+  const list = audits.get(storageKey) ?? []
+  const alreadyRecorded = list.some((event) =>
+    event.roundId === snapshot.roundId
+      && event.type === type
+      && event.messageIds.length === messageIds.length
+      && [...event.messageIds].sort().every((id, index) => id === messageIds[index])
+  )
+  if (alreadyRecorded) return
+  addAudit(projectId, conversationId, {
+    roundId: snapshot.roundId,
+    roundCount: snapshot.roundCount,
+    requestId: snapshot.requestId,
+    type,
+    messageIds: action.messageIds,
+    truthRefs: action.truthRefs,
+    tokenDelta: action.tokenDelta,
+    description,
+    simulated: false,
+  })
+}
+
+export function buildContextDebugSnapshot(result: ContextResult, config: import('../shared/types').ContextManagementConfig, requestId = randomUUID(), roundId = requestId, roundCount = 0): ContextDebugSnapshot {
   const system = result.messages.filter((message) => message.role === 'system')
   const hot = result.messages.filter((message) => message.role !== 'system')
   const hotItems = [...system.map((message) => toItem(message, 'system')), ...hot.map((message) => toItem(message, sourceOf(message)))]
@@ -84,6 +116,7 @@ export function buildContextDebugSnapshot(result: ContextResult, config: import(
   return {
     requestId,
     roundId,
+    roundCount,
     createdAt: new Date().toISOString(),
     modelMaxContext: result.metrics.modelMaxContext,
     triggerThreshold: result.metrics.triggerThreshold,
@@ -103,19 +136,43 @@ export function buildContextDebugSnapshot(result: ContextResult, config: import(
   }
 }
 
-export function rememberSnapshot(projectId: string, conversationId: string, snapshot: ContextDebugSnapshot, messages: ContextMessage[], summaries: ContextSummaryArtifact[] = []): void {
+export function rememberSnapshot(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  messages: ContextMessage[],
+  summaries: ContextSummaryArtifact[] = [],
+  actions: ContextAction[] = [],
+): void {
   const storageKey = key(projectId, conversationId)
-  const previous = snapshots.get(storageKey)
-  if (previous) {
-    const previousHot = new Set(previous.hot.map((item) => item.id))
-    const currentHot = new Set(snapshot.hot.map((item) => item.id))
-    const demoted = previous.hot.filter((item) => !currentHot.has(item.id) && item.source !== 'system').map((item) => item.id)
-    if (demoted.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'hot_to_warm', messageIds: demoted, description: `${demoted.length} message(s) moved from Hot to Warm`, simulated: false })
+  const auditAction = (action: ContextAction): void => {
+    const type = action.type === 'demote' ? 'hot_to_warm'
+      : action.type === 'summarize' ? 'warm_to_cold'
+        : action.type === 'promote' ? 'warm_to_hot' : 'cold_recall'
+    const description = action.type === 'demote'
+      ? `${action.messageIds.length} message(s) moved from Hot to Warm`
+      : action.type === 'summarize'
+        ? `${action.messageIds.length} Warm message(s) summarized for Cold storage`
+        : action.type === 'promote'
+          ? `${action.messageIds.length} message(s) promoted from Warm to Hot`
+          : `${action.messageIds.length} context record(s) recalled into Warm`
+    addAutomaticActionAudit(projectId, conversationId, snapshot, type, action, description)
   }
-  const recalled = snapshot.hot.filter((item) => item.source === 'cold-truth-recall' || item.source === 'cold-summary-recall').map((item) => item.id)
-  if (recalled.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'cold_recall', messageIds: recalled, description: `${recalled.length} Cold record(s) promoted into Hot Newborn`, simulated: false })
-  if (summaries.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'warm_to_cold', messageIds: summaries.flatMap((summary) => summary.sourceMessageIds), tokenDelta: summaries.reduce((sum, summary) => sum + summary.originalTokens - summary.compressedTokens, 0), description: `${summaries.length} Warm message(s) summarized for Cold storage`, simulated: false })
-  if (snapshot.hotTokens > 0 && snapshot.pinnedHotTokens / snapshot.hotTokens >= 0.8) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'pinned_ratio_warning', messageIds: snapshot.hot.filter((item) => item.pinnedToHot).map((item) => item.id), description: 'Pinned Hot messages occupy at least 80% of Hot tokens', simulated: false })
+
+  const previous = snapshots.get(storageKey)
+  if (actions.length > 0) {
+    actions.forEach(auditAction)
+  } else {
+    if (previous) {
+      const currentHot = new Set(snapshot.hot.map((item) => item.id))
+      const demoted = previous.hot.filter((item) => !currentHot.has(item.id) && item.source !== 'system').map((item) => item.id)
+      if (demoted.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'hot_to_warm', messageIds: demoted, description: `${demoted.length} message(s) moved from Hot to Warm`, simulated: false })
+    }
+    const recalled = snapshot.hot.filter((item) => item.source === 'cold-truth-recall' || item.source === 'cold-summary-recall').map((item) => item.id)
+    if (recalled.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'cold_recall', messageIds: recalled, description: `${recalled.length} Cold record(s) promoted into Hot Newborn`, simulated: false })
+    if (summaries.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'warm_to_cold', messageIds: summaries.flatMap((summary) => summary.sourceMessageIds), tokenDelta: summaries.reduce((sum, summary) => sum + summary.originalTokens - summary.compressedTokens, 0), description: `${summaries.length} Warm message(s) summarized for Cold storage`, simulated: false })
+  }
+  if (snapshot.hotTokens > 0 && snapshot.pinnedHotTokens / snapshot.hotTokens >= 0.8) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'pinned_ratio_warning', messageIds: snapshot.hot.filter((item) => item.pinnedToHot).map((item) => item.id), description: 'Pinned Hot messages occupy at least 80% of Hot tokens', simulated: false })
   const promoted = promotedHotIds.get(storageKey)
   if (promoted) {
     const currentHot = new Set(snapshot.hot.map((item) => item.id))
@@ -141,10 +198,12 @@ export function rememberInitializedSnapshot(
   conversationId: string,
   snapshot: ContextDebugSnapshot,
   messages: ContextMessage[],
+  actions: ContextAction[] = [],
 ): void {
-  rememberSnapshot(projectId, conversationId, snapshot, messages)
+  rememberSnapshot(projectId, conversationId, snapshot, messages, [], actions)
   addAudit(projectId, conversationId, {
     roundId: snapshot.roundId,
+    roundCount: snapshot.roundCount,
     requestId: snapshot.requestId,
     type: 'hot_warm_initialization',
     messageIds: [...snapshot.hot, ...snapshot.warm].map((item) => item.id),
