@@ -1235,6 +1235,9 @@ export function App(): React.JSX.Element {
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
+  const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
@@ -1256,8 +1259,16 @@ export function App(): React.JSX.Element {
   const activeTraceIdsRef = useRef<Record<string, string>>({})
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
 
-  const activeProject = projects.find((project) => project.id === activeProjectId)
-  const activeConversation = activeProject?.conversations.find(
+  const visibleProjects = projects.filter((project) => !project.archived)
+  const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
+  const visibleConversations = activeProject?.conversations.filter((conversation) => !conversation.archived) ?? []
+  const archivedProjects = projects.filter((project) => project.archived)
+  const archivedConversations = projects
+    .filter((project) => !project.archived)
+    .flatMap((project) => project.conversations
+      .filter((conversation) => conversation.archived)
+      .map((conversation) => ({ project, conversation })))
+  const activeConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
@@ -1311,10 +1322,11 @@ export function App(): React.JSX.Element {
       .getProjects()
       .then((savedProjects) => {
         setProjects(savedProjects)
-        const firstProject = savedProjects[0]
+        const firstProject = savedProjects.find((project) => !project.archived)
+        const firstConversation = firstProject?.conversations.find((conversation) => !conversation.archived)
         if (firstProject) {
           setActiveProjectId(firstProject.id)
-          setActiveConversationId(firstProject.conversations[0]?.id ?? '')
+          setActiveConversationId(firstConversation?.id ?? '')
         }
       })
       .catch(() => setError(t('unableLoadProjects')))
@@ -1419,10 +1431,52 @@ export function App(): React.JSX.Element {
   }
 
   function selectProject(project: Project): void {
+    const firstConversation = project.conversations.find((conversation) => !conversation.archived)
     setActiveProjectId(project.id)
-    setActiveConversationId(project.conversations[0]?.id ?? '')
+    setActiveConversationId(firstConversation?.id ?? '')
     setOpenProjectMenuId(null)
+    setOpenConversationMenuId(null)
     setError('')
+  }
+
+  async function setProjectArchive(project: Project, archived: boolean): Promise<void> {
+    try {
+      const updated = await window.codey.setProjectArchived(project.id, archived)
+      replaceProject(updated)
+      setOpenProjectMenuId(null)
+      if (archived && activeProjectId === project.id) {
+        const nextProject = projects.find((item) => item.id !== project.id && !item.archived)
+        if (nextProject) selectProject(nextProject)
+        else {
+          setActiveProjectId('')
+          setActiveConversationId('')
+        }
+      } else if (!archived && !activeProjectId) {
+        selectProject(updated)
+      }
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : t('unableArchive'))
+    }
+  }
+
+  async function setConversationArchive(projectId: string, conversationId: string, archived: boolean): Promise<void> {
+    try {
+      const updated = await window.codey.setConversationArchived(projectId, conversationId, archived)
+      replaceProject(updated)
+      setOpenConversationMenuId(null)
+      if (archived && activeProjectId === projectId && activeConversationId === conversationId) {
+        const nextConversation = updated.conversations.find((conversation) => !conversation.archived)
+        setActiveConversationId(nextConversation?.id ?? '')
+      }
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : t('unableArchive'))
+    }
+  }
+
+  function openArchiveList(): void {
+    setSettingsOpen(false)
+    setArchiveError('')
+    setArchiveDialogOpen(true)
   }
 
   function createSettingsDraft(): typeof defaultAppConfig {
@@ -1501,7 +1555,7 @@ export function App(): React.JSX.Element {
     try {
       setBridgeChannels(await window.codey.getBridgeChannels())
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '无法读取 Bridge 状态')
+      setBridgeError(error instanceof Error ? error.message : t('unableLoadHandoverStatus'))
     }
   }
 
@@ -1512,7 +1566,7 @@ export function App(): React.JSX.Element {
       await window.codey.createBridgeChannel(bridgeUrl)
       setBridgeChannels(await window.codey.getBridgeChannels())
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '创建频道失败')
+      setBridgeError(error instanceof Error ? error.message : t('createHandoverChannelFailed'))
     } finally {
       setBridgeBusy(false)
     }
@@ -1524,7 +1578,7 @@ export function App(): React.JSX.Element {
     try {
       setBridgeChannels(await window.codey.approveBridgeRequest(channelId, request.id, request.devicePublicKey))
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '审批失败')
+      setBridgeError(error instanceof Error ? error.message : t('approveHandoverRequestFailed'))
     } finally {
       setBridgeBusy(false)
     }
@@ -1536,7 +1590,7 @@ export function App(): React.JSX.Element {
     try {
       setBridgeChannels(await window.codey.rejectBridgeRequest(channelId, requestId))
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '拒绝失败')
+      setBridgeError(error instanceof Error ? error.message : t('rejectHandoverRequestFailed'))
     } finally {
       setBridgeBusy(false)
     }
@@ -1546,9 +1600,9 @@ export function App(): React.JSX.Element {
     if (!channel.invitation) return
     try {
       await navigator.clipboard.writeText(channel.invitation)
-      setBridgeError('配对内容已复制')
+      setBridgeError(t('handoverInvitationCopied'))
     } catch {
-      setBridgeError('复制失败，请手动复制')
+      setBridgeError(t('handoverInvitationCopyFailed'))
     }
   }
 
@@ -1558,7 +1612,7 @@ export function App(): React.JSX.Element {
     try {
       setBridgeChannels(await window.codey.syncBridge(channelId))
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '同步失败')
+      setBridgeError(error instanceof Error ? error.message : t('syncHandoverFailed'))
     } finally {
       setBridgeBusy(false)
     }
@@ -1571,20 +1625,20 @@ export function App(): React.JSX.Element {
       const refreshed = await window.codey.refreshBridgeEnrollment(channelId)
       setBridgeChannels((channels) => channels.map((channel) => channel.channelId === refreshed.channelId ? refreshed : channel))
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '刷新配对内容失败')
+      setBridgeError(error instanceof Error ? error.message : t('refreshHandoverInvitationFailed'))
     } finally {
       setBridgeBusy(false)
     }
   }
 
   async function removeBridgeChannel(channel: BridgeChannelStatus): Promise<void> {
-    if (!window.confirm(`确定要从 Codey 移除频道 ${channel.channelId} 吗？这只会停止本机同步；Bridge 上的频道和已批准设备不会被删除。`)) return
+    if (!window.confirm(t('removeHandoverChannelConfirm', { channelId: channel.channelId }))) return
     setBridgeBusy(true)
     setBridgeError('')
     try {
       setBridgeChannels(await window.codey.removeBridgeChannel(channel.channelId))
     } catch (error) {
-      setBridgeError(error instanceof Error ? error.message : '移除频道失败')
+      setBridgeError(error instanceof Error ? error.message : t('removeHandoverChannelFailed'))
     } finally {
       setBridgeBusy(false)
     }
@@ -1981,27 +2035,16 @@ export function App(): React.JSX.Element {
             {t('newProject')}
           </Button>
 
-          <section className="sidebar-section">
+          <section className="sidebar-section projects-section">
             <p className="section-label">{t('projects')}</p>
             <nav className="nav-list" aria-label={t('projects')}>
-              {projects.map((project) => (
+              {visibleProjects.map((project) => (
                 <div className="project-nav-item" key={project.id}>
                   <div className="project-nav-row">
-                    <Button
-                      appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
-                      onClick={() => selectProject(project)}
-                    >
-                      {project.name}
+                    <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
+                      <span className="nav-item-title">{project.name}</span>
                     </Button>
-                    <Button
-                      appearance="subtle"
-                      size="small"
-                      aria-expanded={openProjectMenuId === project.id}
-                      aria-label={t('projectOptions')}
-                      onClick={() => setOpenProjectMenuId((current) =>
-                        current === project.id ? null : project.id
-                      )}
-                    >
+                    <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
                     </Button>
                   </div>
@@ -2009,26 +2052,13 @@ export function App(): React.JSX.Element {
                     <div className="project-menu-panel">
                       <label>
                         <span>{t('projectDefaultModel')}</span>
-                        <Select
-                          aria-label={t('projectDefaultModel')}
-                          disabled={interactionLocked || config.modelConfigs.length === 0}
-                          value={project.defaultModelConfigId ?? ''}
-                          onChange={(_, data) => {
-                            setOpenProjectMenuId(null)
-                            void changeProjectModelConfig(project.id, data.value)
-                          }}
-                        >
+                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.modelConfigs.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
                           <option value="">{t('applicationDefault')}</option>
-                          {config.modelConfigs.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.name || model.modelName || t('unnamedModel')}
-                            </option>
-                          ))}
+                          {config.modelConfigs.map((model) => <option key={model.id} value={model.id}>{model.name || model.modelName || t('unnamedModel')}</option>)}
                         </Select>
                       </label>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>
-                        {t('contextSettings')}
-                      </Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>{t('contextSettings')}</Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setProjectArchive(project, true)}>{t('archiveProject')}</Button>
                     </div>
                   )}
                 </div>
@@ -2040,28 +2070,23 @@ export function App(): React.JSX.Element {
             <section className="sidebar-section conversations-section">
               <div className="section-heading">
                 <p className="section-label">{t('conversations')}</p>
-                <Button
-                  appearance="subtle"
-                  size="small"
-                  onClick={() => void startNewConversation()}
-                >
-                  {t('new')}
-                </Button>
+                <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
               </div>
               <nav className="nav-list" aria-label={t('conversations')}>
-                {activeProject.conversations.map((conversation) => (
-                  <Button
-                    appearance={
-                      conversation.id === activeConversationId ? 'secondary' : 'subtle'
-                    }
-                    key={conversation.id}
-                    onClick={() => {
-                      setActiveConversationId(conversation.id)
-                      setError('')
-                    }}
-                  >
-                    {conversation.title}
-                  </Button>
+                {visibleConversations.map((conversation) => (
+                  <div className="conversation-nav-item" key={conversation.id}>
+                    <div className="conversation-nav-row">
+                      <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => { setActiveConversationId(conversation.id); setOpenConversationMenuId(null); setError('') }}>
+                        <span className="nav-item-title">{conversation.title}</span>
+                      </Button>
+                      <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
+                    </div>
+                    {openConversationMenuId === conversation.id && (
+                      <div className="conversation-menu-panel">
+                        <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setConversationArchive(activeProject.id, conversation.id, true)}>{t('archiveConversation')}</Button>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </nav>
             </section>
@@ -2086,7 +2111,7 @@ export function App(): React.JSX.Element {
             </Button>
           </div>
           <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
-            Handover
+            {t('handover')}
           </Button>
         </aside>
 
@@ -2458,6 +2483,13 @@ export function App(): React.JSX.Element {
                 />
               </section>
               <section className="settings-group">
+                <h2>{t('archivedItems')}</h2>
+                <p className="settings-description">{t('archivedItemsDescription')}</p>
+                <Button appearance="secondary" onClick={openArchiveList}>
+                  {t('openArchivedItems')}
+                </Button>
+              </section>
+              <section className="settings-group">
                 <h2>{t('developerSettings')}</h2>
                 <Switch
                   checked={configDraft.developerMode}
@@ -2487,54 +2519,99 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog open={archiveDialogOpen} onOpenChange={(_, data) => setArchiveDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('archivedItems')}</DialogTitle>
+            <DialogContent className="dialog-fields archive-list">
+              <section>
+                <h2>{t('archivedProjects')}</h2>
+                {archivedProjects.length === 0 ? (
+                  <p className="settings-description">{t('noArchivedProjects')}</p>
+                ) : archivedProjects.map((project) => (
+                  <div className="archive-list-item" key={project.id}>
+                    <span>{project.name}</span>
+                    <Button size="small" onClick={() => void setProjectArchive(project, false)}>
+                      {t('unarchive')}
+                    </Button>
+                  </div>
+                ))}
+              </section>
+              <section>
+                <h2>{t('archivedConversations')}</h2>
+                {archivedConversations.length === 0 ? (
+                  <p className="settings-description">{t('noArchivedConversations')}</p>
+                ) : archivedConversations.map(({ project, conversation }) => (
+                  <div className="archive-list-item" key={`${project.id}:${conversation.id}`}>
+                    <span>
+                      <strong>{conversation.title}</strong>
+                      <small>{project.name}</small>
+                    </span>
+                    <Button size="small" onClick={() => void setConversationArchive(project.id, conversation.id, false)}>
+                      {t('unarchive')}
+                    </Button>
+                  </div>
+                ))}
+              </section>
+              {archiveError && <p className="dialog-error">{archiveError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setArchiveDialogOpen(false)}>
+                {t('close')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={bridgeDialogOpen} onOpenChange={(_, data) => setBridgeDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
-            <DialogTitle>Handover 频道</DialogTitle>
+            <DialogTitle>{t('handoverChannelTitle')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <Field label="Bridge 地址" hint="本机可用 HTTP；远程 Bridge 必须使用 HTTPS。">
+              <Field label={t('bridgeAddress')} hint={t('bridgeAddressHint')}>
                 <Input value={bridgeUrl} onChange={(_, data) => setBridgeUrl(data.value)} disabled={bridgeBusy} placeholder="http://127.0.0.1:8787" />
               </Field>
               <div className="bridge-actions">
                 <Button appearance="primary" disabled={bridgeBusy || !bridgeUrl.trim()} onClick={() => void createBridgeChannel()}>
-                  {bridgeBusy ? '创建中…' : '创建配对频道'}
+                  {bridgeBusy ? t('creatingHandoverChannel') : t('createHandoverChannel')}
                 </Button>
-                {bridgeChannels.length > 0 && <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow()}>同步全部频道</Button>}
+                {bridgeChannels.length > 0 && <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow()}>{t('syncAllHandoverChannels')}</Button>}
               </div>
-              <p className="status">每个频道有独立的配对密钥、已批准设备和同步数据。</p>
-              {bridgeChannels.length === 0 ? <p className="status">尚未创建频道</p> : bridgeChannels.map((channel) => (
+              <p className="status">{t('handoverChannelDescription')}</p>
+              {bridgeChannels.length === 0 ? <p className="status">{t('noHandoverChannels')}</p> : bridgeChannels.map((channel) => (
                 <section className="bridge-channel" key={channel.channelId}>
                   <div className="bridge-channel-heading">
                     <div>
-                      <strong>频道：<code>{channel.channelId}</code></strong>
-                      <small>{channel.bridgeUrl} · 配对有效期：{new Date(channel.enrollmentExpiresAt).toLocaleString()}</small>
+                      <strong>{t('handoverChannelLabel', { channelId: channel.channelId })}</strong>
+                      <small>{t('handoverChannelExpiry', { url: channel.bridgeUrl, time: new Date(channel.enrollmentExpiresAt).toLocaleString() })}</small>
                     </div>
-                    <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void removeBridgeChannel(channel)}>从 Codey 移除</Button>
+                    <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void removeBridgeChannel(channel)}>{t('removeHandoverChannel')}</Button>
                   </div>
-                  <Field label="配对内容" hint="仅交给要配对的 Handover 设备；过期后可刷新配对内容，无需创建新频道。">
+                  <Field label={t('handoverInvitation')} hint={t('handoverInvitationHint')}>
                     <Textarea className="bridge-invitation" readOnly value={channel.invitation} rows={4} />
                   </Field>
                   <div className="bridge-actions">
-                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void copyBridgeInvitation(channel)}>复制配对内容</Button>
-                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow(channel.channelId)}>立即同步</Button>
-                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void refreshBridgeEnrollment(channel.channelId)}>刷新配对内容</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void copyBridgeInvitation(channel)}>{t('copyHandoverInvitation')}</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void syncBridgeNow(channel.channelId)}>{t('syncHandoverNow')}</Button>
+                    <Button appearance="secondary" disabled={bridgeBusy} onClick={() => void refreshBridgeEnrollment(channel.channelId)}>{t('refreshHandoverInvitation')}</Button>
                   </div>
-                  <h3>待审批设备</h3>
-                  <p className="status">请与 Handover 上显示的设备指纹核对后再允许。</p>
-                  {channel.pendingRequests.length === 0 ? <p className="status">暂无请求</p> : channel.pendingRequests.map((request) => (
+                  <h3>{t('pendingHandoverDevices')}</h3>
+                  <p className="status">{t('verifyHandoverFingerprint')}</p>
+                  {channel.pendingRequests.length === 0 ? <p className="status">{t('noHandoverRequests')}</p> : channel.pendingRequests.map((request) => (
                     <div className="bridge-request" key={request.id}>
-                      <span>{request.deviceName}<small>设备指纹：<code>{request.fingerprint}</code></small></span>
-                      <Button size="small" appearance="primary" disabled={bridgeBusy} onClick={() => void approveBridgeRequest(channel.channelId, request)}>允许</Button>
-                      <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void rejectBridgeRequest(channel.channelId, request.id)}>拒绝</Button>
+                      <span>{request.deviceName}<small>{t('deviceFingerprintLabel')}<code>{request.fingerprint}</code></small></span>
+                      <Button size="small" appearance="primary" disabled={bridgeBusy} onClick={() => void approveBridgeRequest(channel.channelId, request)}>{t('approve')}</Button>
+                      <Button size="small" appearance="secondary" disabled={bridgeBusy} onClick={() => void rejectBridgeRequest(channel.channelId, request.id)}>{t('reject')}</Button>
                     </div>
                   ))}
-                  <p className="status">已批准设备：{channel.approvedDevices.length}</p>
+                  <p className="status">{t('approvedHandoverDevices', { count: channel.approvedDevices.length })}</p>
                 </section>
               ))}
               {bridgeError && <p className="dialog-error">{bridgeError}</p>}
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => setBridgeDialogOpen(false)}>关闭</Button>
+              <Button appearance="secondary" onClick={() => setBridgeDialogOpen(false)}>{t('close')}</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>

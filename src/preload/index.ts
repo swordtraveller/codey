@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld(
       projectId: string,
       contextConfig: ContextManagementConfig | null,
     ) => ipcRenderer.invoke('projects:set-context-config', projectId, contextConfig),
+    setProjectArchived: (projectId: string, archived: boolean) =>
+      ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
       ipcRenderer.invoke('conversations:create', projectId),
     setConversationModelConfig: (
@@ -83,6 +85,8 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
+    setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
+      ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>
       ipcRenderer.invoke('development:send', projectId, conversationId, content, images, traceId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),

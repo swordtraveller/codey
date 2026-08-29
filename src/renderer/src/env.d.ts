@@ -53,6 +53,7 @@ declare global {
         projectId: string,
         contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
+      setProjectArchived(projectId: string, archived: boolean): Promise<Project>
       createConversation(projectId: string): Promise<Project>
       setConversationModelConfig(
         projectId: string,
@@ -69,6 +70,7 @@ declare global {
         conversationId: string,
         agentLimits: AgentLimitsConfig,
       ): Promise<Project>
+      setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       develop(
         projectId: string,
         conversationId: string,

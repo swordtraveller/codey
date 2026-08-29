@@ -212,6 +212,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   })))
   return {
     ...value,
+    archived: value.archived === true,
     modelConfigId: value.modelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
@@ -231,6 +232,7 @@ async function normalizeProjectMetadata(
   return {
     id: value.id,
     name: value.name,
+    archived: value.archived === true,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     folders,
@@ -427,6 +429,7 @@ function createConversationRecord(index: number): Conversation {
   return {
     id: randomUUID(),
     title: `Conversation ${index}`,
+    archived: false,
     modelConfigId: null,
     contextConfigOverride: null,
     agentLimits: { ...defaultAgentLimitsConfig },
@@ -481,6 +484,7 @@ export function createProject(name: string, defaultModelConfigId: string | null 
     const project: Project = {
       id: randomUUID(),
       name: normalizedName,
+      archived: false,
       defaultModelConfigId,
       contextConfigOverride: null,
       folders: [],
@@ -528,6 +532,15 @@ export function setProjectContextConfig(projectId: string, contextConfig: Contex
   })
 }
 
+export function setProjectArchived(projectId: string, archived: boolean): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const project = await findProject(projectId)
+    project.archived = archived
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
 export function createConversation(projectId: string): Promise<Project> {
   return serializeWrite(projectWriteScope(projectId), async () => {
     const project = await findProject(projectId)
@@ -554,6 +567,16 @@ export function setConversationContextConfig(projectId: string, conversationId: 
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     conversation.contextConfigOverride = validateOverride(contextConfig)
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.archived = archived
     await persistConversation(projectId, conversation)
     return project
   })
