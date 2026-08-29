@@ -26,6 +26,8 @@ type StoredAppConfig = {
   developerMode?: boolean
   keepAwakeEnabled?: boolean
   keepAwakeOnlyWhileWorking?: boolean
+  networkAccessEnabled?: boolean
+  performanceTracingEnabled?: boolean
 }
 
 type LegacyStoredConfig = StoredModelConfig & {
@@ -106,6 +108,7 @@ export async function readConfig(): Promise<AppConfig> {
     const language = isAppLanguage(stored.language) ? stored.language : defaultAppConfig.language
     const keepAwakeEnabled = stored.keepAwakeEnabled === true
     const keepAwakeOnlyWhileWorking = stored.keepAwakeOnlyWhileWorking !== false
+    const networkAccessEnabled = stored.networkAccessEnabled === true
 
     if (Array.isArray(stored.modelConfigs)) {
       const modelConfigs = stored.modelConfigs.map(readModelConfig)
@@ -121,12 +124,16 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement,
         language,
         developerMode,
+        performanceTracingEnabled: developerMode && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
+        networkAccessEnabled,
       }
       const needsMigration = stored.developerMode === undefined ||
         stored.keepAwakeEnabled === undefined ||
         stored.keepAwakeOnlyWhileWorking === undefined ||
+        stored.networkAccessEnabled === undefined ||
+        stored.performanceTracingEnabled === undefined ||
         !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
       ) || stored.activeModelConfigId !== activeModelConfigId
@@ -143,8 +150,10 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement: normalizeContextManagementConfig(stored.contextManagement),
         language,
         developerMode: stored.developerMode === true,
+        performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
+        networkAccessEnabled,
       }
     }
 
@@ -155,8 +164,10 @@ export async function readConfig(): Promise<AppConfig> {
       contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
       language,
       developerMode: stored.developerMode === true,
+      performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
       keepAwakeEnabled,
       keepAwakeOnlyWhileWorking,
+      networkAccessEnabled,
     }
     await writeConfig(migrated)
     return migrated
@@ -194,6 +205,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     developerMode: config.developerMode === true,
     keepAwakeEnabled: config.keepAwakeEnabled === true,
     keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
+    networkAccessEnabled: config.networkAccessEnabled === true,
+    performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
   }
   await writeConfig(normalized)
   return normalized

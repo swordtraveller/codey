@@ -25,6 +25,8 @@ export function normalizeContextManagementConfig(
     hotTokenBudget: Math.floor(merged.hotTokenBudget),
     warmTokenBudget: Math.floor(merged.warmTokenBudget),
     coldRecallTokenBudget: Math.floor(merged.coldRecallTokenBudget),
+    customStrategyEnabled: Boolean(merged.customStrategyEnabled),
+    customStrategyScript: typeof merged.customStrategyScript === 'string' ? merged.customStrategyScript : '',
   }
 }
 

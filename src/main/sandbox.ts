@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { access, mkdir, realpath, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path'
 
-type ProcessResult = {
+export type SandboxProcessResult = {
   exitCode: number | null
   stdout: string
   stderr: string
@@ -303,12 +303,43 @@ export async function safeResolveWritablePath(
   return target
 }
 
-function killChild(child: ChildProcess): void {
-  if (!child.killed) {
-    child.kill()
+export function terminateSandboxProcess(child: ChildProcess): Promise<void> {
+  if (child.killed) return Promise.resolve()
+  if (process.platform === 'win32' && child.pid) {
+    return new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      })
+      let finished = false
+      const finish = (): void => {
+        if (finished) return
+        finished = true
+        if (!child.killed) {
+          try {
+            child.kill()
+          } catch {
+            // The process may already have exited after taskkill completed.
+          }
+        }
+        resolve()
+      }
+      killer.once('error', finish)
+      killer.once('close', finish)
+      setTimeout(finish, 2_000)
+    })
   }
+  if (child.pid && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+      return Promise.resolve()
+    } catch {
+      // Fall back to terminating the direct child.
+    }
+  }
+  child.kill()
+  return Promise.resolve()
 }
-
 function abortError(): Error {
   const error = new Error('Operation stopped')
   error.name = 'AbortError'
@@ -319,7 +350,7 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError()
 }
 
-function runProcess(
+export function runSandboxProcess(
   command: string,
   args: string[],
   cwd: string,
@@ -327,7 +358,7 @@ function runProcess(
   env?: NodeJS.ProcessEnv,
   input?: string,
   signal?: AbortSignal,
-): Promise<ProcessResult> {
+): Promise<SandboxProcessResult> {
   return new Promise((resolveProcess, rejectProcess) => {
     if (signal?.aborted) {
       rejectProcess(abortError())
@@ -338,6 +369,7 @@ function runProcess(
       cwd,
       env,
       shell: false,
+      detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     })
@@ -349,7 +381,7 @@ function runProcess(
     const onAbort = (): void => {
       if (!settled) {
         aborted = true
-        killChild(child)
+        terminateSandboxProcess(child)
       }
     }
     const cleanup = (): void => {
@@ -359,7 +391,7 @@ function runProcess(
     const timer = setTimeout(() => {
       if (!settled) {
         timedOut = true
-        killChild(child)
+        terminateSandboxProcess(child)
       }
     }, timeoutMs)
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -426,7 +458,7 @@ async function createVenv(projectRoot: string, signal?: AbortSignal): Promise<vo
   let failure = ''
   for (const candidate of candidates) {
     try {
-      const result = await runProcess(
+      const result = await runSandboxProcess(
         candidate.command,
         [...candidate.args, '-m', 'venv', venvPath(projectRoot)],
         projectRoot,
@@ -515,12 +547,12 @@ async function runSandboxMode(
   cwd: string,
   input?: string,
   signal?: AbortSignal,
-): Promise<ProcessResult> {
+): Promise<SandboxProcessResult> {
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
   await ensurePythonEnvironment(root, signal)
   throwIfAborted(signal)
   await mkdir(temporaryDirectory, { recursive: true })
-  return runProcess(
+  return runSandboxProcess(
     pythonPath(root),
     [...runnerArguments(mode, roots, root), ...modeArgs],
     cwd,
@@ -540,7 +572,7 @@ async function runSandboxMode(
   )
 }
 
-function executionResult(result: ProcessResult, timeoutMs: number): PythonExecutionResult {
+function executionResult(result: SandboxProcessResult, timeoutMs: number): PythonExecutionResult {
   const stderr = result.timedOut
     ? truncateOutput(`${result.stderr}${result.stderr ? '\n' : ''}Execution timed out after ${timeoutMs / 1000} seconds`)
     : result.stderr
@@ -617,7 +649,7 @@ export async function installPythonPackages(
   await ensurePythonEnvironment(root, signal)
   throwIfAborted(signal)
   await mkdir(temporaryDirectory, { recursive: true })
-  const result = await runProcess(
+  const result = await runSandboxProcess(
     pipPath(root),
     ['install', '--isolated', '--disable-pip-version-check', '--no-cache-dir', ...packages],
     root,

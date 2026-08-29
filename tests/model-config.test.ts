@@ -39,10 +39,13 @@ const config: AppConfig = {
   developerMode: false,
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
+  networkAccessEnabled: false,
+  performanceTracingEnabled: false,
 }
 const project: Project = {
   id: 'project',
   name: 'Project',
+  archived: false,
   defaultModelConfigId: 'project',
   contextConfigOverride: null,
   folders: [],
@@ -52,6 +55,7 @@ const project: Project = {
 const conversation: Conversation = {
   id: 'conversation',
   title: 'Conversation',
+  archived: false,
   modelConfigId: null,
   contextConfigOverride: null,
   agentLimits: defaultAgentLimitsConfig,

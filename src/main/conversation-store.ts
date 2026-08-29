@@ -10,13 +10,15 @@ import type {
   ContextManagementConfig,
   ContextSummaryArtifact,
 } from '../shared/types'
-import { countContextTokens, SUMMARY_LABEL } from './context'
+import { countContextMessageTokens, SUMMARY_LABEL } from './context'
+import { hydrateImageAttachments, persistImageAttachments, type StoredImageReference } from './image-store'
 
 type MessageOverride = Pick<AgentContextMessage, 'manualContextLayer' | 'pinnedToHot' | 'contextRegion'> & {
   manualProtected?: boolean
   protection?: 'none' | 'partial' | 'full'
 }
 type StoredOverrides = Record<string, MessageOverride>
+type PersistedContextMessage = Omit<AgentContextMessage, 'images'> & { images?: AgentContextMessage['images'] | StoredImageReference[] }
 type LegacyPin = { pinnedToHot?: boolean; protection?: 'none' | 'partial' | 'full'; manualProtected?: boolean }
 type IndexCacheEntry = { signature: string; items: ColdIndexItem[] }
 
@@ -153,13 +155,24 @@ function truthMessage(value: AgentContextMessage, id: string, createdAt: string)
   return { ...truth, id, createdAt }
 }
 
+async function storedContextMessage(
+  projectId: string,
+  conversationId: string,
+  message: AgentContextMessage,
+): Promise<PersistedContextMessage> {
+  return {
+    ...message,
+    images: await persistImageAttachments(projectId, conversationId, message.images),
+  }
+}
+
 function truthIndexItem(message: AgentContextMessage, offset: number, length: number): ColdIndexItem {
   const id = message.id ?? randomUUID()
   return {
     id,
     kind: 'truth',
     role: message.role,
-    tokenCount: countContextTokens(message),
+    tokenCount: countContextMessageTokens(message),
     createdAt: message.createdAt ?? new Date(0).toISOString(),
     preview: preview(message.content),
     logicalPointer: `messages.jsonl#${offset}:${length}`,
@@ -225,10 +238,11 @@ export async function writeConversationMessages(projectId: string, conversationI
     const id = value.id ?? randomUUID()
     // The truth log stores original messages only. Derived layer metadata stays in overrides/indexes.
     const truth = truthMessage(value, id, value.createdAt ?? new Date(0).toISOString())
+    const storedTruth = await storedContextMessage(projectId, conversationId, truth)
     const override = captureOverride(value, overrides[id])
     overrides[id] = override
     const normalized = applyOverride(truth, override)
-    const line = `${JSON.stringify(truth)}\n`
+    const line = `${JSON.stringify(storedTruth)}\n`
     const length = Buffer.byteLength(line, 'utf8')
     lines.push(line)
     index.push(truthIndexItem(normalized, offset, length))
@@ -263,10 +277,11 @@ export async function appendConversationMessages(projectId: string, conversation
   for (const value of additions) {
     const id = value.id ?? randomUUID()
     const truth = truthMessage(value, id, value.createdAt ?? new Date().toISOString())
+    const storedTruth = await storedContextMessage(projectId, conversationId, truth)
     const override = captureOverride(value, overrides[id])
     overrides[id] = override
     const normalized = applyOverride(truth, override)
-    const line = `${JSON.stringify(truth)}\n`
+    const line = `${JSON.stringify(storedTruth)}\n`
     const length = Buffer.byteLength(line, 'utf8')
     lines.push(line)
     index.push(truthIndexItem(normalized, offset, length))
@@ -373,7 +388,8 @@ export async function readConversationMessage(projectId: string, conversationId:
   const item = (await readConversationIndex(projectId, conversationId)).find((candidate) => candidate.id === messageId)
   if (!item) throw new Error('Cold truth message not found')
   const override = (await readOverrides(projectId, conversationId))[messageId]
-  return applyOverride(await readAt<AgentContextMessage>(paths(projectId, conversationId).messages, item), override)
+  const message = await readAt<PersistedContextMessage>(paths(projectId, conversationId).messages, item)
+  return applyOverride({ ...message, images: await hydrateImageAttachments(message.images) }, override)
 }
 
 export async function readConversationSummary(projectId: string, conversationId: string, summaryId: string): Promise<ContextSummaryArtifact> {
@@ -382,10 +398,19 @@ export async function readConversationSummary(projectId: string, conversationId:
   return readAt<ContextSummaryArtifact>(paths(projectId, conversationId).summaries, item)
 }
 
-export async function readConversationMessages(projectId: string, conversationId: string): Promise<AgentContextMessage[]> {
+export async function readConversationMessages(
+  projectId: string,
+  conversationId: string,
+  additionalMessages: AgentContextMessage[] = [],
+): Promise<AgentContextMessage[]> {
   const items = await readConversationIndex(projectId, conversationId)
   const messages: AgentContextMessage[] = []
   for (const item of items) messages.push(await readConversationMessage(projectId, conversationId, item.id))
+  const known = new Set(messages.map((message) => message.id))
+  for (const message of additionalMessages) {
+    if (!message.id || known.has(message.id)) continue
+    messages.push(message)
+  }
   return messages
 }
 
@@ -428,34 +453,110 @@ export async function readContextRecords(projectId: string, conversationId: stri
   for (const id of ids.slice(0, 20)) {
     if (truth.has(id)) {
       const message = await readConversationMessage(projectId, conversationId, id)
-      result.push({ ...message, representation: 'original', truthRefs: [id], contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-truth-recall', lastAccessedAt: new Date().toISOString() })
+      result.push({ ...message, representation: 'original', truthRefs: [id], contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-truth-recall', lastAccessedAt: new Date().toISOString(), enteredHotAt: new Date().toISOString(), reuseCount: (message.reuseCount ?? 0) + 1 })
     } else if (summaries.has(id)) {
       const summary = await readConversationSummary(projectId, conversationId, id)
-      result.push({ id: summary.id, createdAt: summary.createdAt, role: summary.role, content: summary.content, representation: 'summary', truthRefs: summary.sourceMessageIds, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-summary-recall', lastAccessedAt: new Date().toISOString() })
+      result.push({ id: summary.id, createdAt: summary.createdAt, role: summary.role, content: summary.content, representation: 'summary', truthRefs: summary.sourceMessageIds, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'cold-summary-recall', lastAccessedAt: new Date().toISOString(), enteredHotAt: new Date().toISOString(), reuseCount: 1 })
     }
   }
   return result
 }
 
-export async function readConversationWorkingSet(projectId: string, conversationId: string, config: ContextManagementConfig, query: string, rememberedWarm: AgentContextMessage[] = []): Promise<AgentContextMessage[]> {
+export async function readConversationWorkingSet(
+  projectId: string,
+  conversationId: string,
+  config: ContextManagementConfig,
+  query: string,
+  rememberedWarm: AgentContextMessage[] = [],
+  promotedHot: AgentContextMessage[] = [],
+  rememberedHot: AgentContextMessage[] = [],
+  latestUserMessageId?: string,
+  latestUserMessage?: AgentContextMessage,
+  currentRoundId?: string,
+): Promise<AgentContextMessage[]> {
   const index = await readConversationIndex(projectId, conversationId)
-  const rounds = splitRounds(index)
-  const recentStart = Math.max(0, rounds.length - config.recentKeepRounds)
-  const older = rounds.slice(0, recentStart).flat()
-  const recent = rounds.slice(recentStart).flat()
-  const resident = older.filter((item) => migratePin(item) || item.contextRegion === 'long-term')
-  const residentIds = new Set([...resident, ...recent].map((item) => item.id))
+  const indexById = new Map(index.map((item) => [item.id, item]))
+  const now = new Date().toISOString()
+  const hotById = new Map<string, AgentContextMessage>()
   const warmById = new Map<string, AgentContextMessage>()
-
-  for (const item of older.filter((candidate) => !residentIds.has(candidate.id) && candidate.manualContextLayer === 'warm')) {
-    const message = await readConversationMessage(projectId, conversationId, item.id)
-    warmById.set(item.id, { ...message, contextLayer: 'warm', contextRegion: item.contextRegion ?? 'newborn', contextSource: 'hot-demotion', representation: 'original', truthRefs: [item.id] })
-  }
-  for (const message of rememberedWarm) {
-    if (!message.id || residentIds.has(message.id) || message.representation === 'summary') continue
-    warmById.set(message.id, { ...message, contextLayer: 'warm', contextRegion: message.contextRegion ?? 'newborn', contextSource: 'hot-demotion', representation: 'original', truthRefs: message.truthRefs?.length ? message.truthRefs : [message.id] })
+  const load = async (id: string): Promise<AgentContextMessage | undefined> => {
+    if (!indexById.has(id)) return undefined
+    return readConversationMessage(projectId, conversationId, id)
   }
 
+  const asHot = (message: AgentContextMessage, fresh = false): AgentContextMessage => ({
+    ...message,
+    contextLayer: 'hot',
+    contextRegion: message.contextRegion ?? 'newborn',
+    contextSource: message.contextSource ?? 'live',
+    representation: message.representation ?? 'original',
+    truthRefs: message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : [],
+    enteredHotAt: fresh ? now : message.enteredHotAt ?? message.createdAt ?? now,
+    reuseCount: Math.max(0, message.reuseCount ?? 0),
+  })
+  const asWarm = (message: AgentContextMessage): AgentContextMessage => ({
+    ...message,
+    contextLayer: 'warm',
+    contextRegion: message.contextRegion ?? 'newborn',
+    contextSource: message.contextSource ?? 'hot-demotion',
+    representation: message.representation ?? 'original',
+    truthRefs: message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : [],
+  })
+
+  for (const message of rememberedHot) if (message.id && message.contextLayer !== 'warm') hotById.set(message.id, asHot(message))
+  for (const message of rememberedWarm) if (message.id && message.representation !== 'summary') warmById.set(message.id, asWarm(message))
+  for (const message of promotedHot) {
+    if (!message.id) continue
+    hotById.set(message.id, asHot({
+      ...message,
+      pinnedToHot: false,
+      manualContextLayer: undefined,
+      contextSource: message.contextSource ?? 'warm-recall',
+      lastAccessedAt: now,
+      reuseCount: (message.reuseCount ?? 0) + 1,
+    }, true))
+    warmById.delete(message.id)
+  }
+
+  for (const item of index.filter((candidate) => candidate.manualContextLayer === 'warm')) {
+    if (hotById.has(item.id) || warmById.has(item.id)) continue
+    const message = await load(item.id)
+    if (message) warmById.set(item.id, asWarm(message))
+  }
+  for (const item of index.filter((candidate) => migratePin(candidate) || candidate.contextRegion === 'long-term')) {
+    if (hotById.has(item.id)) continue
+    const message = await load(item.id)
+    if (message) hotById.set(item.id, asHot(message))
+    warmById.delete(item.id)
+  }
+
+  if (latestUserMessageId && !hotById.has(latestUserMessageId)) {
+    const message = latestUserMessage?.id === latestUserMessageId
+      ? latestUserMessage
+      : await load(latestUserMessageId)
+    if (message) hotById.set(latestUserMessageId, asHot(message, true))
+    warmById.delete(latestUserMessageId)
+  }
+
+  if (rememberedHot.length === 0 && rememberedWarm.length === 0) {
+    const targetTokens = Math.max(1, Math.floor(config.hotTokenBudget * 0.8))
+    let selectedTokens = [...hotById.values()].reduce((sum, message) => sum + countContextMessageTokens(message), 0)
+    const rounds = splitRounds(index.filter((item) => item.manualContextLayer !== 'warm'))
+    for (let roundIndex = rounds.length - 1; roundIndex >= 0; roundIndex -= 1) {
+      const round = rounds[roundIndex]
+      const missing = round.filter((item) => !hotById.has(item.id))
+      const roundTokens = missing.reduce((sum, item) => sum + item.tokenCount, 0)
+      if (missing.length === 0) continue
+      if (selectedTokens > 0 && selectedTokens + roundTokens > targetTokens) break
+      for (const item of missing) {
+        const message = await load(item.id)
+        if (message) hotById.set(item.id, asHot(message))
+      }
+      selectedTokens += roundTokens
+    }
+  }
+
+  const residentIds = new Set([...hotById.keys(), ...warmById.keys()])
   const terms = queryTerms(query)
   const warmMatches = [...warmById.values()].map((message) => ({
     message,
@@ -466,10 +567,15 @@ export async function readConversationWorkingSet(projectId: string, conversation
   const recalled: AgentContextMessage[] = []
   const recalledTruthRefs = new Set<string>()
   for (const { message } of warmMatches) {
-    const tokenCount = countContextTokens(message)
+    const tokenCount = countContextMessageTokens(message)
     if (recalledTokens + tokenCount > config.coldRecallTokenBudget) continue
-    recalled.push({ ...message, contextLayer: 'hot', contextRegion: 'newborn', contextSource: 'warm-recall', lastAccessedAt: new Date().toISOString() })
-    warmById.delete(message.id ?? '')
+    recalled.push(asWarm({
+      ...message,
+      contextSource: 'warm-recall',
+      recalledAtRoundId: currentRoundId,
+      lastAccessedAt: now,
+      reuseCount: (message.reuseCount ?? 0) + 1,
+    }))
     for (const truthRef of message.truthRefs ?? []) recalledTruthRefs.add(truthRef)
     recalledTokens += tokenCount
   }
@@ -479,19 +585,16 @@ export async function readConversationWorkingSet(projectId: string, conversation
     if (residentIds.has(match.id) || warmById.has(match.id) || match.truthRefs.some((id) => recalledTruthRefs.has(id)) || recalledTokens + match.tokenCount > config.coldRecallTokenBudget) continue
     const [message] = await readContextRecords(projectId, conversationId, [match.id])
     if (!message) continue
-    recalled.push(message)
+    recalled.push(asWarm({ ...message, recalledAtRoundId: currentRoundId }))
     for (const truthRef of message.truthRefs ?? []) recalledTruthRefs.add(truthRef)
     recalledTokens += match.tokenCount
   }
 
-  const result: AgentContextMessage[] = []
-  for (const item of [...resident, ...recent].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
-    const message = await readConversationMessage(projectId, conversationId, item.id)
-    result.push({ ...message, contextLayer: 'hot', contextRegion: item.contextRegion ?? 'newborn', contextSource: 'live', representation: 'original', truthRefs: [item.id] })
-  }
-  result.push(...[...warmById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')))
-  result.push(...recalled)
-  return result
+  return [
+    ...[...hotById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')),
+    ...[...warmById.values()].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? '')),
+    ...recalled,
+  ]
 }
 export async function updateConversationPin(projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean): Promise<void> {
   const items = await readConversationIndex(projectId, conversationId)

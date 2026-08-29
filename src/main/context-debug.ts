@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type {
   AgentContextMessage,
+  ContextAction,
   ContextAuditEvent,
   ContextDebugMessage,
   ContextDebugOverview,
@@ -13,7 +14,7 @@ import type {
   ConversationRuntimeState,
   TokenLimitSimulation,
 } from '../shared/types'
-import { countContextTokens, type ContextMessage, type ContextResult } from './context'
+import { contextImportanceScore, countContextTokens, type ContextMessage, type ContextResult } from './context'
 import {
   appendConversationMessages,
   appendConversationSummaries,
@@ -32,8 +33,14 @@ import { getProject, updateConversationAgentMessages } from './workspace'
 const snapshots = new Map<string, ContextDebugSnapshot>()
 const snapshotMessages = new Map<string, Map<string, ContextDebugMessage>>()
 const audits = new Map<string, ContextAuditEvent[]>()
+const promotedHotIds = new Map<string, Set<string>>()
 
 function key(projectId: string, conversationId: string): string { return `${projectId}:${conversationId}` }
+
+function timeValue(value?: string): number {
+  const parsed = Date.parse(value ?? '')
+  return Number.isFinite(parsed) ? parsed : 0
+}
 
 function sourceOf(message: ContextMessage): ContextSource {
   return message.contextSource ?? 'live'
@@ -55,6 +62,10 @@ function toItem(message: ContextMessage, source: ContextLayerItem['source']): Co
     region: message.contextRegion ?? (message.role === 'system' ? 'permanent' : 'newborn'),
     source,
     pendingDemotion: false,
+    enteredHotAt: message.enteredHotAt ?? message.createdAt ?? new Date(0).toISOString(),
+    lastAccessedAt: message.lastAccessedAt,
+    reuseCount: message.reuseCount ?? 0,
+    importanceScore: contextImportanceScore(message),
   }
 }
 
@@ -65,7 +76,38 @@ function addAudit(projectId: string, conversationId: string, event: Omit<Context
   audits.set(storageKey, list.slice(-300))
 }
 
-export function buildContextDebugSnapshot(result: ContextResult, config: import('../shared/types').ContextManagementConfig, requestId = randomUUID(), roundId = requestId): ContextDebugSnapshot {
+function addAutomaticActionAudit(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  type: ContextAuditEvent['type'],
+  action: ContextAction,
+  description: string,
+): void {
+  const storageKey = key(projectId, conversationId)
+  const messageIds = [...new Set(action.messageIds)].sort()
+  const list = audits.get(storageKey) ?? []
+  const alreadyRecorded = list.some((event) =>
+    event.roundId === snapshot.roundId
+      && event.type === type
+      && event.messageIds.length === messageIds.length
+      && [...event.messageIds].sort().every((id, index) => id === messageIds[index])
+  )
+  if (alreadyRecorded) return
+  addAudit(projectId, conversationId, {
+    roundId: snapshot.roundId,
+    roundCount: snapshot.roundCount,
+    requestId: snapshot.requestId,
+    type,
+    messageIds: action.messageIds,
+    truthRefs: action.truthRefs,
+    tokenDelta: action.tokenDelta,
+    description,
+    simulated: false,
+  })
+}
+
+export function buildContextDebugSnapshot(result: ContextResult, config: import('../shared/types').ContextManagementConfig, requestId = randomUUID(), roundId = requestId, roundCount = 0): ContextDebugSnapshot {
   const system = result.messages.filter((message) => message.role === 'system')
   const hot = result.messages.filter((message) => message.role !== 'system')
   const hotItems = [...system.map((message) => toItem(message, 'system')), ...hot.map((message) => toItem(message, sourceOf(message)))]
@@ -74,13 +116,16 @@ export function buildContextDebugSnapshot(result: ContextResult, config: import(
   return {
     requestId,
     roundId,
+    roundCount,
     createdAt: new Date().toISOString(),
     modelMaxContext: result.metrics.modelMaxContext,
     triggerThreshold: result.metrics.triggerThreshold,
     systemTokens: countContextTokens(system),
     toolDefinitionTokens: result.toolDefinitionTokens,
     hotTokens: countContextTokens(result.messages),
-    hotTokenBudget: config.hotTokenBudget,
+    hotTokenBudget: result.hotTokenBudget ?? config.hotTokenBudget,
+    hotHighWatermark: result.hotHighWatermark ?? Math.floor(config.hotTokenBudget * 0.9),
+    hotLowWatermark: result.hotLowWatermark ?? Math.floor(config.hotTokenBudget * 0.8),
     warmTokens: countContextTokens(result.warmMessages),
     warmTokenBudget: config.warmTokenBudget,
     pinnedHotTokens,
@@ -91,19 +136,50 @@ export function buildContextDebugSnapshot(result: ContextResult, config: import(
   }
 }
 
-export function rememberSnapshot(projectId: string, conversationId: string, snapshot: ContextDebugSnapshot, messages: ContextMessage[], summaries: ContextSummaryArtifact[] = []): void {
+export function rememberSnapshot(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  messages: ContextMessage[],
+  summaries: ContextSummaryArtifact[] = [],
+  actions: ContextAction[] = [],
+): void {
   const storageKey = key(projectId, conversationId)
-  const previous = snapshots.get(storageKey)
-  if (previous) {
-    const previousHot = new Set(previous.hot.map((item) => item.id))
-    const currentHot = new Set(snapshot.hot.map((item) => item.id))
-    const demoted = previous.hot.filter((item) => !currentHot.has(item.id) && item.source !== 'system').map((item) => item.id)
-    if (demoted.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'hot_to_warm', messageIds: demoted, description: `${demoted.length} message(s) moved from Hot to Warm`, simulated: false })
+  const auditAction = (action: ContextAction): void => {
+    const type = action.type === 'demote' ? 'hot_to_warm'
+      : action.type === 'summarize' ? 'warm_to_cold'
+        : action.type === 'promote' ? 'warm_to_hot' : 'cold_recall'
+    const description = action.type === 'demote'
+      ? `${action.messageIds.length} message(s) moved from Hot to Warm`
+      : action.type === 'summarize'
+        ? `${action.messageIds.length} Warm message(s) summarized for Cold storage`
+        : action.type === 'promote'
+          ? `${action.messageIds.length} message(s) promoted from Warm to Hot`
+          : `${action.messageIds.length} context record(s) recalled into Warm`
+    addAutomaticActionAudit(projectId, conversationId, snapshot, type, action, description)
   }
-  const recalled = snapshot.hot.filter((item) => item.source === 'cold-truth-recall' || item.source === 'cold-summary-recall').map((item) => item.id)
-  if (recalled.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'cold_recall', messageIds: recalled, description: `${recalled.length} Cold record(s) promoted into Hot Newborn`, simulated: false })
-  if (summaries.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'warm_to_cold', messageIds: summaries.flatMap((summary) => summary.sourceMessageIds), tokenDelta: summaries.reduce((sum, summary) => sum + summary.originalTokens - summary.compressedTokens, 0), description: `${summaries.length} Warm message(s) summarized for Cold storage`, simulated: false })
-  if (snapshot.hotTokens > 0 && snapshot.pinnedHotTokens / snapshot.hotTokens >= 0.8) addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'pinned_ratio_warning', messageIds: snapshot.hot.filter((item) => item.pinnedToHot).map((item) => item.id), description: 'Pinned Hot messages occupy at least 80% of Hot tokens', simulated: false })
+
+  const previous = snapshots.get(storageKey)
+  if (actions.length > 0) {
+    actions.forEach(auditAction)
+  } else {
+    if (previous) {
+      const currentHot = new Set(snapshot.hot.map((item) => item.id))
+      const demoted = previous.hot.filter((item) => !currentHot.has(item.id) && item.source !== 'system').map((item) => item.id)
+      if (demoted.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'hot_to_warm', messageIds: demoted, description: `${demoted.length} message(s) moved from Hot to Warm`, simulated: false })
+    }
+    const recalled = snapshot.hot.filter((item) => item.source === 'cold-truth-recall' || item.source === 'cold-summary-recall').map((item) => item.id)
+    if (recalled.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'cold_recall', messageIds: recalled, description: `${recalled.length} Cold record(s) promoted into Hot Newborn`, simulated: false })
+    if (summaries.length > 0) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'warm_to_cold', messageIds: summaries.flatMap((summary) => summary.sourceMessageIds), tokenDelta: summaries.reduce((sum, summary) => sum + summary.originalTokens - summary.compressedTokens, 0), description: `${summaries.length} Warm message(s) summarized for Cold storage`, simulated: false })
+  }
+  if (snapshot.hotTokens > 0 && snapshot.pinnedHotTokens / snapshot.hotTokens >= 0.8) addAudit(projectId, conversationId, { roundId: snapshot.roundId, roundCount: snapshot.roundCount, requestId: snapshot.requestId, type: 'pinned_ratio_warning', messageIds: snapshot.hot.filter((item) => item.pinnedToHot).map((item) => item.id), description: 'Pinned Hot messages occupy at least 80% of Hot tokens', simulated: false })
+  const promoted = promotedHotIds.get(storageKey)
+  if (promoted) {
+    const currentHot = new Set(snapshot.hot.map((item) => item.id))
+    const retained = new Set([...promoted].filter((id) => currentHot.has(id)))
+    if (retained.size > 0) promotedHotIds.set(storageKey, retained)
+    else promotedHotIds.delete(storageKey)
+  }
   snapshots.set(storageKey, snapshot)
   const currentMessages = new Map<string, ContextDebugMessage>()
   for (const message of messages) {
@@ -113,6 +189,28 @@ export function rememberSnapshot(projectId: string, conversationId: string, snap
   snapshotMessages.set(storageKey, currentMessages)
 }
 
+export function hasContextDebugSnapshot(projectId: string, conversationId: string): boolean {
+  return snapshots.has(key(projectId, conversationId))
+}
+
+export function rememberInitializedSnapshot(
+  projectId: string,
+  conversationId: string,
+  snapshot: ContextDebugSnapshot,
+  messages: ContextMessage[],
+  actions: ContextAction[] = [],
+): void {
+  rememberSnapshot(projectId, conversationId, snapshot, messages, [], actions)
+  addAudit(projectId, conversationId, {
+    roundId: snapshot.roundId,
+    roundCount: snapshot.roundCount,
+    requestId: snapshot.requestId,
+    type: 'hot_warm_initialization',
+    messageIds: [...snapshot.hot, ...snapshot.warm].map((item) => item.id),
+    description: 'Initialized Hot and Warm from persisted conversation history',
+    simulated: false,
+  })
+}
 export function getRememberedWarmMessages(projectId: string, conversationId: string): AgentContextMessage[] {
   const storageKey = key(projectId, conversationId)
   const snapshot = snapshots.get(storageKey)
@@ -121,6 +219,17 @@ export function getRememberedWarmMessages(projectId: string, conversationId: str
   return snapshot.warm.flatMap((item) => {
     const message = messages.get(item.id)
     return message && message.role !== 'system' ? [{ ...message, role: message.role, contextLayer: 'warm' as const }] : []
+  })
+}
+
+export function getPromotedHotMessages(projectId: string, conversationId: string): AgentContextMessage[] {
+  const storageKey = key(projectId, conversationId)
+  const promoted = promotedHotIds.get(storageKey)
+  const messages = snapshotMessages.get(storageKey)
+  if (!promoted || !messages) return []
+  return [...promoted].flatMap((id) => {
+    const message = messages.get(id)
+    return message && message.role !== 'system' ? [{ ...message, role: message.role }] : []
   })
 }
 export async function persistContextDebugMessages(projectId: string, conversationId: string, messages: AgentContextMessage[], summaries: import('../shared/types').ContextSummaryArtifact[] = []): Promise<void> {
@@ -166,6 +275,42 @@ export async function searchColdContext(projectId: string, conversationId: strin
   return { query, matches }
 }
 
+export function promoteContext(projectId: string, conversationId: string, messageId: string): void {
+  const storageKey = key(projectId, conversationId)
+  const snapshot = snapshots.get(storageKey)
+  const item = snapshot?.warm.find((candidate) => candidate.id === messageId)
+  if (!snapshot || !item) throw new Error('Warm context message not found')
+  if (snapshot.hotTokens + item.tokenCount > snapshot.hotTokenBudget) throw new Error('Cannot promote to Hot: content would exceed the Hot budget.')
+
+  const source: ContextSource = item.source === 'cold-summary-recall' ? 'cold-summary-recall' : 'warm-recall'
+  const enteredHotAt = new Date().toISOString()
+  const promotedItem = { ...item, pinnedToHot: false, region: 'newborn' as const, source, enteredHotAt, lastAccessedAt: enteredHotAt, reuseCount: item.reuseCount + 1 }
+  snapshot.warm = snapshot.warm.filter((candidate) => candidate.id !== messageId)
+  snapshot.hot.push(promotedItem)
+  snapshot.hotTokens = countContextTokens(snapshot.hot)
+  snapshot.warmTokens = countContextTokens(snapshot.warm)
+
+  const messages = snapshotMessages.get(storageKey)
+  const message = messages?.get(messageId)
+  if (messages && message) {
+    messages.set(messageId, {
+      ...message,
+      pinnedToHot: false,
+      manualContextLayer: undefined,
+      contextLayer: 'hot',
+      contextRegion: 'newborn',
+      contextSource: source,
+      lastAccessedAt: enteredHotAt,
+      enteredHotAt,
+      reuseCount: (message.reuseCount ?? 0) + 1,
+    })
+  }
+  const promoted = promotedHotIds.get(storageKey) ?? new Set<string>()
+  promoted.add(messageId)
+  promotedHotIds.set(storageKey, promoted)
+  addAudit(projectId, conversationId, { roundId: snapshot.roundId, requestId: snapshot.requestId, type: 'warm_to_hot', messageIds: [messageId], description: 'Promoted 1 message from Warm to Hot without pinning', simulated: false })
+}
+
 export async function setContextPin(projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean): Promise<void> {
   const snapshot = snapshots.get(key(projectId, conversationId))
   const item = snapshot && [...snapshot.hot, ...snapshot.warm].find((candidate) => candidate.id === messageId)
@@ -174,6 +319,7 @@ export async function setContextPin(projectId: string, conversationId: string, m
   if (pinnedToHot && snapshot && item && movingWarmToHot && snapshot.hotTokens + item.tokenCount > snapshot.hotTokenBudget) throw new Error('Cannot pin to Hot: resident content would exceed the Hot budget.')
   await updateConversationPin(projectId, conversationId, messageId, pinnedToHot)
   await updateConversationAgentMessages(projectId, conversationId, (messages) => messages.map((message) => message.id === messageId ? { ...message, pinnedToHot, manualContextLayer: pinnedToHot ? undefined : message.manualContextLayer } : message))
+  if (pinnedToHot) promotedHotIds.get(key(projectId, conversationId))?.delete(messageId)
   if (snapshot && item) {
     item.pinnedToHot = pinnedToHot
     if (pinnedToHot && movingWarmToHot) {
@@ -186,12 +332,49 @@ export async function setContextPin(projectId: string, conversationId: string, m
   }
   addAudit(projectId, conversationId, { type: 'pin_changed', messageIds: [messageId], description: `${pinnedToHot ? 'Pinned' : 'Unpinned'} message in Hot`, simulated: false })
 }
+export async function unpinLowestPriorityContext(projectId: string, conversationId: string): Promise<void> {
+  const storageKey = key(projectId, conversationId)
+  const snapshot = snapshots.get(storageKey)
+  if (!snapshot) throw new Error('No context snapshot is available')
+  if (snapshot.hotTokens < snapshot.hotHighWatermark) throw new Error('Hot context has not reached the high watermark')
+  const candidates = snapshot.hot
+    .filter((item) => item.source !== 'system' && item.pinnedToHot)
+    .sort((left, right) => left.importanceScore - right.importanceScore
+      || timeValue(left.lastAccessedAt) - timeValue(right.lastAccessedAt)
+      || timeValue(left.enteredHotAt) - timeValue(right.enteredHotAt)
+      || right.tokenCount - left.tokenCount
+      || left.id.localeCompare(right.id))
+  if (candidates.length === 0) throw new Error('No pinned Hot messages are available')
+
+  const requiredTokens = Math.max(1, snapshot.hotTokens - snapshot.hotLowWatermark)
+  const selected: ContextLayerItem[] = []
+  let releasedTokens = 0
+  for (const item of candidates) {
+    selected.push(item)
+    releasedTokens += item.tokenCount
+    if (releasedTokens >= requiredTokens) break
+  }
+  const ids = new Set(selected.map((item) => item.id))
+  for (const id of ids) await updateConversationPin(projectId, conversationId, id, false)
+  await updateConversationAgentMessages(projectId, conversationId, (messages) => messages.map((message) =>
+    message.id && ids.has(message.id) ? { ...message, pinnedToHot: false } : message))
+  for (const item of selected) item.pinnedToHot = false
+  snapshot.pinnedHotTokens = snapshot.hot.filter((item) => item.pinnedToHot).reduce((sum, item) => sum + item.tokenCount, 0)
+  addAudit(projectId, conversationId, {
+    type: 'pin_changed',
+    messageIds: [...ids],
+    description: `Unpinned ${ids.size} lowest-priority Hot message(s) by explicit user request`,
+    simulated: false,
+  })
+}
 export async function demoteContext(projectId: string, conversationId: string, messageId?: string): Promise<void> {
   const snapshot = snapshots.get(key(projectId, conversationId))
   if (!snapshot) throw new Error('No context snapshot is available')
   const selected = snapshot.hot.filter((item) => item.source !== 'system' && item.representation === 'original' && !item.pinnedToHot && (!messageId || item.id === messageId))
   if (selected.length === 0) throw new Error('No eligible Hot messages to demote')
   const ids = new Set(selected.map((item) => item.id))
+  const promoted = promotedHotIds.get(key(projectId, conversationId))
+  for (const id of ids) promoted?.delete(id)
   await updateConversationLayer(projectId, conversationId, ids, 'warm')
   await updateConversationAgentMessages(projectId, conversationId, (messages) => messages.map((message) => message.id && ids.has(message.id) ? { ...message, manualContextLayer: 'warm', pinnedToHot: false } : message))
   snapshot.hot = snapshot.hot.filter((item) => !ids.has(item.id))

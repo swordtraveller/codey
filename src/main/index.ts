@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
   AgentLimitsConfig,
@@ -10,10 +11,23 @@ import type {
   ConversationStateChange,
   ConversationTurnRecord,
   DevelopmentProgress,
+  DevelopmentProgressState,
+  DevelopmentProgressUpdate,
   DevelopmentResult,
-  DevelopmentTimelineItem,
+  ImageAttachment,
+  ScreenshotSelection,
+  ScreenshotSource,
+  Conversation,
+  Project,
 } from '../shared/types'
-import { develop } from './agent'
+import { validateImageAttachments } from '../shared/image-attachments'
+import {
+  applyDevelopmentProgressUpdate,
+  compactDevelopmentProgressUpdate,
+  createDevelopmentProgressState,
+} from '../shared/development-progress'
+import { buildAgentContext, develop } from './agent'
+import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
 import { resolveContextManagementConfig } from './context-config'
 import {
@@ -21,34 +35,59 @@ import {
   demoteContext,
   getContextDebugOverview,
   getContextDebugRevision,
+  getPromotedHotMessages,
   getRememberedWarmMessages,
+  hasContextDebugSnapshot,
   persistContextDebugMessages,
+  promoteContext,
   readColdContextMessage,
   readContextSnapshotMessage,
+  rememberInitializedSnapshot,
   rememberSnapshot,
   searchColdContext,
   setContextPin,
   simulateTokenLimit,
+  unpinLowestPriorityContext,
 } from './context-debug'
 import {
+  appendConversationMessages,
   ensureConversationMessages,
   readConversationMessages,
   readConversationWorkingSet,
 } from './conversation-store'
 import { log } from './logger'
+import { BridgeHandoverService } from './bridge'
+import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
+import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
+import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import {
+  exportPerformanceTraces,
+  flushPerformanceTraces,
+  getPerformanceTracePath,
+  getPerformanceTraceStatus,
+  listPerformanceTraceFiles,
+  readPerformanceTraceFile,
+  recordPerformanceTrace,
+  setPerformanceTracingEnabled,
+} from './performance-trace'
+import {
   addMessage,
+  addMessageImmediately,
   addProjectFolder,
   createConversation,
   createProject,
   getProject,
+  getProjectLive,
   getProjects,
+  getProjectsLive,
   saveConversationContext,
   setConversationAgentLimits,
+  setConversationArchived,
   setConversationContextConfig,
   setConversationModelConfig,
   setProjectContextConfig,
+  setProjectArchived,
   setProjectModelConfig,
   updateConversationAgentMessages,
   updateConversationTurn,
@@ -56,11 +95,25 @@ import {
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
+const developmentProgressStates = new Map<string, DevelopmentProgressState>()
+const developmentProgressSubscriptions = new Map<number, string>()
 const contextDebugWindows = new Map<string, BrowserWindow>()
+let performanceTraceWindow: BrowserWindow | null = null
+type PendingScreenshot = {
+  window: BrowserWindow
+  image: NativeImage
+  display: Display
+  restoreWindow: () => void
+  resolve: (selection: ScreenshotSelection | null) => void
+}
+const pendingScreenshots = new Map<string, PendingScreenshot>()
+onFrontendServerEnded(closePreviewWindow)
 let mainWindow: BrowserWindow | null = null
 let keepAwakeBlockerId: number | null = null
 let keepAwakeEnabled = false
 let keepAwakeOnlyWhileWorking = true
+const bridgeHandover = new BridgeHandoverService()
+let bridgePollInFlight = false
 
 function updateKeepAwake(config?: AppConfig): void {
   if (config) {
@@ -86,6 +139,42 @@ function conversationKey(projectId: string, conversationId: string): string {
 
 function getConversationState(projectId: string, conversationId: string): ConversationRuntimeState {
   return conversationStates.get(conversationKey(projectId, conversationId)) ?? 'idle'
+}
+
+function publishDevelopmentProgress(
+  sender: WebContents,
+  projectId: string,
+  conversationId: string,
+  update: DevelopmentProgressUpdate,
+): void {
+  const key = conversationKey(projectId, conversationId)
+  const current = developmentProgressStates.get(key) ?? createDevelopmentProgressState()
+  const transportUpdate = compactDevelopmentProgressUpdate(current, update)
+  const next = applyDevelopmentProgressUpdate(current, update)
+  developmentProgressStates.set(key, next)
+
+  if (
+    transportUpdate &&
+    developmentProgressSubscriptions.get(sender.id) === key &&
+    !sender.isDestroyed()
+  ) {
+    const progress: DevelopmentProgress = { projectId, conversationId, update: transportUpdate }
+    sender.send('development:progress', progress)
+  }
+}
+
+function subscribeDevelopmentProgress(
+  sender: WebContents,
+  projectId: string | null,
+  conversationId: string | null,
+): DevelopmentProgressState {
+  if (!projectId || !conversationId) {
+    developmentProgressSubscriptions.delete(sender.id)
+    return createDevelopmentProgressState()
+  }
+  const key = conversationKey(projectId, conversationId)
+  developmentProgressSubscriptions.set(sender.id, key)
+  return developmentProgressStates.get(key) ?? createDevelopmentProgressState()
 }
 
 function setConversationState(
@@ -119,6 +208,12 @@ function ensureAllIdle(): void {
     throw new Error('Context settings cannot be changed during a conversation round or debug operation')
   }
 }
+
+function ensureProjectIdle(projectId: string): void {
+  const busy = [...conversationStates.entries()].some(([key, state]) => key.startsWith(`${projectId}:`) && state !== 'idle')
+  if (busy) throw new Error('The project must be idle')
+}
+
 
 async function runDebugOperation<T>(
   projectId: string,
@@ -175,14 +270,20 @@ async function developProject(
   projectId: string,
   conversationId: string,
   content: string,
-  onProgress?: (timeline: DevelopmentTimelineItem[]) => void,
+  images: ImageAttachment[] = [],
+  onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
+  onProjectUpdated?: (project: Project) => void,
+  traceId: string = randomUUID(),
 ): Promise<DevelopmentResult> {
+  const totalStartedAt = performance.now()
   const normalizedContent = content.trim()
-  if (!normalizedContent) return { writtenFiles: [], error: 'Enter a development request' }
+  const imageError = validateImageAttachments(images)
+  if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
+  if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
-  let project = await getProject(projectId)
+  let project = await getProjectLive(projectId)
   if (project.folders.length === 0) {
     return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
@@ -197,13 +298,22 @@ async function developProject(
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
   if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
     return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
   }
 
-  await prepareContextDebugStorage(projectId, conversationId)
-  project = await addMessage(
+  const userMessageId = randomUUID()
+  const currentUserMessage = {
+    id: userMessageId,
+    createdAt: new Date().toISOString(),
+    role: 'user' as const,
+    content: normalizedContent,
+    images,
+  }
+  const memoryWriteStartedAt = performance.now()
+  project = await addMessageImmediately(
     projectId,
     conversationId,
     'user',
@@ -213,41 +323,72 @@ async function developProject(
     createModelConfigSnapshot(modelConfig),
     contextConfig,
     { startedAt, result: 'processing' },
+    images,
+    userMessageId,
   )
-  const updatedConversation = project.conversations.find((item) => item.id === conversationId)
-  if (!updatedConversation) return { project, writtenFiles: [], error: 'Conversation not found' }
-
-  const userMessageId = updatedConversation.messages.at(-1)?.id
-  if (!userMessageId) return { project, writtenFiles: [], error: 'Conversation message not found' }
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'user-message-memory-write', projectId, conversationId,
+    durationMs: performance.now() - memoryWriteStartedAt,
+    data: { contentChars: normalizedContent.length, imageCount: images.length },
+  })
+  // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
+  onProjectUpdated?.(project)
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'user-message-published', projectId, conversationId })
+  // The latest message is supplied directly to context reads below, so no
+  // context-store write needs to delay the first model request.
 
   const roundId = randomUUID()
-  const persistedHistory = contextConfig.layeredEnabled
+  const roundCount = conversation.agentMessages.filter((message) => message.role === 'user').length + 1
+  const contextReadStartedAt = performance.now()
+  const requestHistory = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
         conversationId,
         contextConfig,
         normalizedContent,
-        getRememberedWarmMessages(projectId, conversationId),
+        [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
+        getPromotedHotMessages(projectId, conversationId),
+        conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
+        userMessageId,
+        currentUserMessage,
+        roundId,
       )
-    : await readConversationMessages(projectId, conversationId)
-  const storedHistory = persistedHistory.length > 0
-    ? persistedHistory
-    : updatedConversation.agentMessages
+    : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'context-read', projectId, conversationId,
+    durationMs: performance.now() - contextReadStartedAt,
+    data: { messageCount: requestHistory.length, layered: contextConfig.layeredEnabled },
+  })
+  if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
+    return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
+  }
+  const contextPersistStartedAt = performance.now()
+  const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
+    .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
+    .catch((error) => log.warn('context.latest-user.persist.failed', error))
+  recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
   const result = await develop(
     project,
     modelConfig,
     contextConfig,
     agentLimits,
-    [
-      ...storedHistory,
-      { id: randomUUID(), createdAt: new Date().toISOString(), role: 'user', content: normalizedContent },
-    ],
+    requestHistory,
     onProgress,
     (managed) => {
-      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
-      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
+      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
+      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
     },
-    { conversationId, signal },
+    {
+      conversationId,
+      projectId,
+      traceId,
+      signal,
+      latestUserMessageId: userMessageId,
+      allowCustomStrategy,
+      roundId,
+      roundCount,
+    },
+    appConfig.networkAccessEnabled,
   )
   project = await saveConversationContext(
     projectId,
@@ -256,6 +397,7 @@ async function developProject(
     result.context,
   )
   try {
+    await latestContextWrite
     await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
   } catch (error) {
     log.warn('context.debug.persist.failed', error)
@@ -287,9 +429,58 @@ async function developProject(
     error: result.stopped ? undefined : result.error,
   }
   project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
+  recordPerformanceTrace({
+    traceId, scope: 'main', phase: 'develop-total', projectId, conversationId,
+    durationMs: performance.now() - totalStartedAt,
+    data: { result: turn.result, timelineItems: result.timeline.length },
+  })
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
+async function processBridgeMessage(message: import('../shared/bridge').HandoverUserMessage): Promise<boolean> {
+  if (getConversationState(message.projectId, message.conversationId) !== 'idle') return false
+  const key = conversationKey(message.projectId, message.conversationId)
+  const controller = new AbortController()
+  const publishProject = (project: Project): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', project)
+    // 使用内存快照同步 Bridge，不等待本轮消息的磁盘持久化；同步失败也不能阻塞模型请求。
+    void getProjectsLive()
+      .then((projects) => bridgeHandover.sync(projects))
+      .catch((error) => log.warn('bridge.sync.failed', error))
+  }
+  conversationControllers.set(key, controller)
+  setConversationState(message.projectId, message.conversationId, 'running')
+  try {
+    // developProject 在写入用户消息后立即调用 publishProject；模型完成后再发布含回复的完整快照。
+    const result = await developProject(
+      message.projectId,
+      message.conversationId,
+      message.content,
+      [],
+      undefined,
+      controller.signal,
+      Date.now(),
+      publishProject,
+    )
+    if (result.project) await publishProject(result.project)
+    if (result.error || result.stopped) {
+      log.warn('bridge.event.development.incomplete', { projectId: message.projectId, conversationId: message.conversationId, error: result.error, stopped: result.stopped })
+    }
+    // 事件只应被处理一次；否则同步失败或模型报错会导致重复消费并重复写入用户消息。
+    return true
+  } finally {
+    if (conversationControllers.get(key) === controller) conversationControllers.delete(key)
+    setConversationState(message.projectId, message.conversationId, 'idle')
+  }
+}
+
+async function pollBridge(): Promise<void> {
+  if (bridgePollInFlight) return
+  bridgePollInFlight = true
+  try { await bridgeHandover.processEvents(processBridgeMessage) }
+  catch (error) { log.warn('bridge.poll.failed', error) }
+  finally { bridgePollInFlight = false }
+}
 function loadRenderer(window: BrowserWindow, query?: Record<string, string>): void {
   if (process.env.ELECTRON_RENDERER_URL) {
     const url = new URL(process.env.ELECTRON_RENDERER_URL)
@@ -307,6 +498,7 @@ function createMainWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: 'Codey',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     backgroundColor: '#f7f7f5',
     webPreferences: {
@@ -317,19 +509,127 @@ function createMainWindow(): void {
     },
   })
   mainWindow = window
+  const webContentsId = window.webContents.id
   window.on('closed', () => {
-    mainWindow = null
+    developmentProgressSubscriptions.delete(webContentsId)
+    if (mainWindow === window) mainWindow = null
     for (const debugWindow of contextDebugWindows.values()) debugWindow.close()
     contextDebugWindows.clear()
+    closeAllPendingScreenshots()
+    closeAllPreviewWindows()
   })
   loadRenderer(window)
 }
 
+function sendScreenshotSource(pending: PendingScreenshot, captureId: string): void {
+  if (pending.window.isDestroyed()) return
+  const size = pending.image.getSize()
+  const source: ScreenshotSource = {
+    captureId,
+    dataUrl: `data:image/jpeg;base64,${pending.image.toJPEG(85).toString('base64')}`,
+    width: size.width,
+    height: size.height,
+    scaleX: size.width / pending.display.bounds.width,
+    scaleY: size.height / pending.display.bounds.height,
+  }
+  pending.window.webContents.send('screenshot:source', source)
+}
+
+function closePendingScreenshot(captureId: string, selection: ScreenshotSelection | null): void {
+  const pending = pendingScreenshots.get(captureId)
+  if (!pending) return
+  pendingScreenshots.delete(captureId)
+  pending.restoreWindow()
+  pending.resolve(selection)
+  if (!pending.window.isDestroyed()) pending.window.close()
+}
+
+function closeAllPendingScreenshots(): void {
+  for (const captureId of [...pendingScreenshots.keys()]) closePendingScreenshot(captureId, null)
+}
+
+async function selectScreenshotArea(
+  image: NativeImage,
+  display: Display,
+  restoreWindow: () => void,
+): Promise<ScreenshotSelection | null> {
+  const captureId = randomUUID()
+  const window = new BrowserWindow({
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    frame: false,
+    resizable: false,
+    movable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    autoHideMenuBar: true,
+    backgroundColor: '#111111',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, '../preload/index.js'),
+    },
+  })
+  window.setAlwaysOnTop(true, 'screen-saver')
+
+  return new Promise((resolve) => {
+    pendingScreenshots.set(captureId, { window, image, display, restoreWindow, resolve })
+    window.once('closed', () => closePendingScreenshot(captureId, null))
+    loadRenderer(window, { view: 'screenshot-overlay' })
+  })
+}
+
+async function initializeContextDebugContext(
+  projectId: string,
+  conversationId: string,
+  project: Project,
+  conversation: Conversation,
+  appConfig: AppConfig,
+): Promise<void> {
+  if (getConversationState(projectId, conversationId) !== 'idle') return
+  if (hasContextDebugSnapshot(projectId, conversationId)) return
+
+  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  if (!modelConfig) return
+  const contextConfig = structuredClone(
+    resolveContextManagementConfig(appConfig, project, conversation),
+  )
+  const history = contextConfig.layeredEnabled
+    ? await readConversationWorkingSet(
+        projectId,
+        conversationId,
+        contextConfig,
+        '',
+        [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
+        getPromotedHotMessages(projectId, conversationId),
+        conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
+      )
+    : await readConversationMessages(projectId, conversationId)
+  const initializationRoundId = randomUUID()
+  const initializationRoundCount = conversation.agentMessages.filter((message) => message.role === 'user').length
+  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, {
+    allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
+    roundId: initializationRoundId,
+    roundCount: initializationRoundCount,
+  })
+  const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
+  rememberInitializedSnapshot(
+    projectId,
+    conversationId,
+    snapshot,
+    [...managed.messages, ...managed.warmMessages],
+    managed.actions,
+  )
+}
 async function openContextDebugWindow(projectId: string, conversationId: string): Promise<void> {
   const config = await readConfig()
   if (!config.developerMode) throw new Error('Developer mode is disabled')
   const project = await getProject(projectId)
-  if (!project.conversations.some((item) => item.id === conversationId)) {
+  const conversation = project.conversations.find((item) => item.id === conversationId)
+  if (!conversation) {
     throw new Error('Conversation not found')
   }
   await prepareContextDebugStorage(projectId, conversationId)
@@ -340,12 +640,14 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
     existing.focus()
     return
   }
+  await initializeContextDebugContext(projectId, conversationId, project, conversation, config)
   const window = new BrowserWindow({
     width: 1320,
     height: 850,
     minWidth: 960,
     minHeight: 600,
     title: 'Codey Context Debugger',
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     backgroundColor: '#f5f5f5',
     parent: undefined,
@@ -361,15 +663,101 @@ async function openContextDebugWindow(projectId: string, conversationId: string)
   loadRenderer(window, { view: 'context-debug', projectId, conversationId })
 }
 
+function openPerformanceTraceWindow(fileName: string): void {
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) {
+    if (performanceTraceWindow.isMinimized()) performanceTraceWindow.restore()
+    performanceTraceWindow.focus()
+    loadRenderer(performanceTraceWindow, { view: 'performance-trace', file: fileName })
+    return
+  }
+  const window = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 860,
+    minHeight: 560,
+    title: 'Codey Performance Trace',
+    icon: getAppIconPath(),
+    autoHideMenuBar: true,
+    backgroundColor: '#f5f5f5',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, '../preload/index.js'),
+    },
+  })
+  performanceTraceWindow = window
+  window.on('closed', () => {
+    if (performanceTraceWindow === window) performanceTraceWindow = null
+  })
+  loadRenderer(window, { view: 'performance-trace', file: fileName })
+}
+
+app.setAppUserModelId('com.codey.desktop')
+
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
+  ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
+  ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
+  ipcMain.handle('performance:open-file', async (_event, fileName: string) => {
+    await readPerformanceTraceFile(fileName)
+    openPerformanceTraceWindow(fileName)
+  })
+  ipcMain.handle('performance:set-enabled', async (_event, enabled: boolean) => {
+    const config = await readConfig()
+    if (!config.developerMode && enabled) throw new Error('Developer mode is disabled')
+    const saved = await saveConfig({ ...config, performanceTracingEnabled: enabled })
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
+    return getPerformanceTraceStatus()
+  })
+  ipcMain.handle('performance:export', async () => {
+    const status = await getPerformanceTraceStatus()
+    if (status.sizeBytes === 0) return null
+    const result = await dialog.showSaveDialog({
+      defaultPath: 'performance-traces.jsonl',
+      filters: [{ name: 'JSONL', extensions: ['jsonl'] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    await exportPerformanceTraces(result.filePath)
+    return result.filePath
+  })
+  ipcMain.handle('performance:reveal', async () => {
+    shell.showItemInFolder(getPerformanceTracePath())
+  })
+  ipcMain.on('performance:record', (_event, event) => recordPerformanceTrace(event))
+  ipcMain.handle(
+    'development:subscribe',
+    (event, projectId: string | null, conversationId: string | null) =>
+      subscribeDevelopmentProgress(event.sender, projectId, conversationId),
+  )
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
     updateKeepAwake(saved)
+    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
   ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('bridge:status', () => bridgeHandover.status())
+  ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
+  ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
+    await bridgeHandover.approve(channelId, requestId, devicePublicKey, await getProjects())
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:reject', async (_event, channelId: string, requestId: string) => {
+    await bridgeHandover.reject(channelId, requestId)
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:sync', async (_event, channelId?: string) => {
+    await bridgeHandover.sync(await getProjects(), channelId)
+    return bridgeHandover.status()
+  })
+  ipcMain.handle('bridge:refresh', async (_event, channelId: string) => bridgeHandover.refreshEnrollment(channelId))
+  ipcMain.handle('bridge:remove', async (_event, channelId: string) => {
+    await bridgeHandover.removeChannel(channelId)
+    return bridgeHandover.status()
+  })
   ipcMain.handle('projects:create', async (_event, name: string) => {
     const config = await readConfig()
     return createProject(name, config.activeModelConfigId)
@@ -388,6 +776,10 @@ app.whenReady().then(() => {
     ensureAllIdle()
     return setProjectContextConfig(projectId, contextConfig)
   })
+  ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
+    ensureProjectIdle(projectId)
+    return setProjectArchived(projectId, archived)
+  })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId))
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
@@ -402,7 +794,44 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string) => {
+  ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationArchived(projectId, conversationId, archived)
+  })
+  ipcMain.handle('clipboard:screenshot', async (_event, hideWindow: boolean) => {
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main window is unavailable')
+    const captured = await captureDisplay(mainWindow, hideWindow)
+    try {
+      const selection = await selectScreenshotArea(
+        captured.image,
+        captured.display,
+        captured.restoreWindow,
+      )
+      if (!selection) return null
+      const image = cropScreenshot(captured.image, selection, captured.display)
+      copyImageToClipboard(image)
+      return createImageAttachment(image)
+    } finally {
+      captured.restoreWindow()
+    }
+  })
+  ipcMain.on('clipboard:screenshot-ready', (event) => {
+    const entry = [...pendingScreenshots.entries()]
+      .find(([, pending]) => event.sender === pending.window.webContents)
+    if (entry) sendScreenshotSource(entry[1], entry[0])
+  })
+  ipcMain.on('clipboard:screenshot-complete', (event, captureId: string, selection: ScreenshotSelection) => {
+    const pending = pendingScreenshots.get(captureId)
+    if (!pending || event.sender !== pending.window.webContents) return
+    closePendingScreenshot(captureId, selection)
+  })
+  ipcMain.on('clipboard:screenshot-cancel', (event, captureId: string) => {
+    const pending = pendingScreenshots.get(captureId)
+    if (!pending || event.sender !== pending.window.webContents) return
+    closePendingScreenshot(captureId, null)
+  })
+
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -410,15 +839,20 @@ app.whenReady().then(() => {
     const controller = new AbortController()
     const startedAt = Date.now()
     conversationControllers.set(key, controller)
+    publishDevelopmentProgress(event.sender, projectId, conversationId, { type: 'reset' })
     setConversationState(projectId, conversationId, 'running')
     try {
-      return await developProject(projectId, conversationId, content, (timeline) => {
-        if (!event.sender.isDestroyed()) {
-          const progress: DevelopmentProgress = { projectId, conversationId, timeline }
-          event.sender.send('development:progress', progress)
-        }
-      }, controller.signal, startedAt)
+      const result = await developProject(projectId, conversationId, content, images, (update) => {
+        publishDevelopmentProgress(event.sender, projectId, conversationId, update)
+      }, controller.signal, startedAt, (project) => {
+        if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
+      }, traceId)
+      if (!result.error && !result.stopped) {
+        void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
+      }
+      return result
     } finally {
+      developmentProgressStates.delete(key)
       if (conversationControllers.get(key) === controller) {
         conversationControllers.delete(key)
       }
@@ -430,6 +864,15 @@ app.whenReady().then(() => {
     if (!controller) return false
     controller.abort()
     return true
+  })
+  ipcMain.handle('frontend:open-preview', (_event, projectId: string, conversationId: string, serverId: string) => {
+    const server = getFrontendServer(projectId, conversationId, serverId)
+    if (server.status === 'starting') return { status: 'starting' as const }
+    if (server.status === 'failed') return { status: 'failed' as const }
+    if (server.status === 'stopped') return { status: 'stopped' as const }
+    if (!server.previewUrl) return { status: 'starting' as const }
+    openPreviewWindow(server.serverId, server.previewUrl)
+    return { status: 'opened' as const }
   })
 
   ipcMain.handle('context-debug:open', (_event, projectId: string, conversationId: string) =>
@@ -444,21 +887,42 @@ app.whenReady().then(() => {
     readContextSnapshotMessage(projectId, conversationId, messageId))
   ipcMain.handle('context-debug:search', (_event, projectId: string, conversationId: string, query: string) =>
     runDebugOperation(projectId, conversationId, () => searchColdContext(projectId, conversationId, query)))
+  ipcMain.handle('context-debug:promote', (_event, projectId: string, conversationId: string, messageId: string) =>
+    runDebugOperation(projectId, conversationId, () => promoteContext(projectId, conversationId, messageId)))
   ipcMain.handle('context-debug:set-pin', (_event, projectId: string, conversationId: string, messageId: string, pinnedToHot: boolean) =>
     runDebugOperation(projectId, conversationId, () => setContextPin(projectId, conversationId, messageId, pinnedToHot)))
   ipcMain.handle('context-debug:demote', (_event, projectId: string, conversationId: string, messageId?: string) =>
     runDebugOperation(projectId, conversationId, () => demoteContext(projectId, conversationId, messageId)))
+  ipcMain.handle('context-debug:unpin-lowest', (_event, projectId: string, conversationId: string) =>
+    runDebugOperation(projectId, conversationId, () => unpinLowestPriorityContext(projectId, conversationId)))
   ipcMain.handle('context-debug:simulate', (_event, projectId: string, conversationId: string, requestTokens: number) =>
     runDebugOperation(projectId, conversationId, () => simulateTokenLimit(projectId, conversationId, requestTokens)))
 
   void readConfig()
-    .then(updateKeepAwake)
+    .then((config) => {
+      updateKeepAwake(config)
+      setPerformanceTracingEnabled(config.developerMode && config.performanceTracingEnabled)
+    })
     .catch((error) => log.warn('power.keep-awake.config.failed', error))
 
+  void pollBridge()
+  setInterval(() => void pollBridge(), 4_000)
   createMainWindow()
   app.on('activate', () => {
     if (!mainWindow) createMainWindow()
   })
+})
+
+let frontendShutdownStarted = false
+app.on('will-quit', (event) => {
+  if (frontendShutdownStarted) return
+  frontendShutdownStarted = true
+  event.preventDefault()
+  closeAllPendingScreenshots()
+  closeAllPreviewWindows()
+  if (performanceTraceWindow && !performanceTraceWindow.isDestroyed()) performanceTraceWindow.close()
+  performanceTraceWindow = null
+  void stopAllFrontendServers().then(() => flushPerformanceTraces()).finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

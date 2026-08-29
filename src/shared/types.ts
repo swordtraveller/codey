@@ -1,3 +1,6 @@
+import type { ImageAttachment } from './image-attachments'
+export type { ImageAttachment, ImageMediaType } from './image-attachments'
+
 export type AppLanguage = 'system' | 'en' | 'zh-CN'
 
 export type ModelConfig = {
@@ -28,6 +31,9 @@ export type ContextManagementConfig = {
   hotTokenBudget: number
   warmTokenBudget: number
   coldRecallTokenBudget: number
+  /** Developer-only conversation override for a custom Rhai strategy. */
+  customStrategyEnabled?: boolean
+  customStrategyScript?: string
 }
 
 export const defaultContextManagementConfig: ContextManagementConfig = {
@@ -40,6 +46,8 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   hotTokenBudget: 64_000,
   warmTokenBudget: 32_000,
   coldRecallTokenBudget: 8_000,
+  customStrategyEnabled: false,
+  customStrategyScript: '',
 }
 
 export const maximumAgentLimit = 100
@@ -50,8 +58,8 @@ export type AgentLimitsConfig = {
 }
 
 export const defaultAgentLimitsConfig: AgentLimitsConfig = {
-  modelRequestsPerRound: 12,
-  toolCallsPerRequest: 20,
+  modelRequestsPerRound: 64,
+  toolCallsPerRequest: 32,
 }
 
 export type AppConfig = {
@@ -62,6 +70,8 @@ export type AppConfig = {
   developerMode: boolean
   keepAwakeEnabled: boolean
   keepAwakeOnlyWhileWorking: boolean
+  networkAccessEnabled: boolean
+  performanceTracingEnabled: boolean
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -72,9 +82,43 @@ export const defaultAppConfig: AppConfig = {
   developerMode: false,
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
+  networkAccessEnabled: false,
+  performanceTracingEnabled: false,
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
+export type PerformanceTraceScope = 'renderer' | 'main' | 'agent'
+
+export type PerformanceTraceValue = number | boolean | string | null
+
+export type ContextAction = {
+  type: 'promote' | 'demote' | 'summarize' | 'recall'
+  messageIds: string[]
+  truthRefs: string[]
+  tokenDelta?: number
+}
+
+export type PerformanceTraceEvent = {
+  traceId: string
+  scope: PerformanceTraceScope
+  phase: string
+  projectId?: string
+  conversationId?: string
+  durationMs?: number
+  data?: Record<string, PerformanceTraceValue>
+}
+
+export type PerformanceTraceStatus = {
+  enabled: boolean
+  path: string
+  sizeBytes: number
+}
+
+export type PerformanceTraceFile = {
+  name: string
+  sizeBytes: number
+  modifiedAt: string
+}
 
 export type ContextMetrics = {
   originalTokens: number
@@ -91,7 +135,7 @@ export type ContextMetrics = {
 
 export type AssistantMessageBlock =
   | { type: 'content'; content: string }
-  | { type: 'function_call'; id: string; name: string; parameters: string }
+  | { type: 'function_call'; id: string; name: string; parameters: string; result?: string; resultError?: boolean }
 
 export type ContextCompressionNotice = {
   originalTokens: number
@@ -117,6 +161,7 @@ export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  images?: ImageAttachment[]
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
@@ -144,6 +189,7 @@ export type AgentContextMessage = {
   createdAt?: string
   role: ChatMessage['role'] | 'tool'
   content: string | null
+  images?: ImageAttachment[]
   toolCalls?: unknown[]
   toolCallId?: string
   pinnedToHot?: boolean
@@ -154,6 +200,8 @@ export type AgentContextMessage = {
   contextSource?: ContextSource
   recalledAtRoundId?: string
   lastAccessedAt?: string
+  enteredHotAt?: string
+  reuseCount?: number
   manualContextLayer?: 'warm'
   /** Legacy persisted fields, read only for migration. */
   manualProtected?: boolean
@@ -182,6 +230,7 @@ export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
 export type Conversation = {
   id: string
   title: string
+  archived: boolean
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
   agentLimits: AgentLimitsConfig
@@ -198,6 +247,7 @@ export type ProjectFolder = {
 export type Project = {
   id: string
   name: string
+  archived: boolean
   defaultModelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
   folders: ProjectFolder[]
@@ -205,10 +255,33 @@ export type Project = {
   conversations: Conversation[]
 }
 
+export type DevelopmentStreamDelta = {
+  content?: string
+  toolCalls?: Array<{
+    index: number
+    id?: string
+    name?: string
+    parameters?: string
+  }>
+}
+
+export type DevelopmentProgressUpdate =
+  | { type: 'reset' }
+  | { type: 'append'; items: DevelopmentTimelineItem[] }
+  | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
+  | { type: 'append-stream'; delta: DevelopmentStreamDelta }
+  | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
+  | { type: 'update-tool-result'; toolCallId: string; result: string; resultError: boolean }
+
 export type DevelopmentProgress = {
   projectId: string
   conversationId: string
+  update: DevelopmentProgressUpdate
+}
+
+export type DevelopmentProgressState = {
   timeline: DevelopmentTimelineItem[]
+  streamingBlocks: AssistantMessageBlock[]
 }
 
 export type DevelopmentResult = {
@@ -233,11 +306,16 @@ export type ContextLayerItem = {
   region: ContextRegion
   source: 'system' | ContextSource
   pendingDemotion: boolean
+  enteredHotAt: string
+  lastAccessedAt?: string
+  reuseCount: number
+  importanceScore: number
 }
 
 export type ContextDebugSnapshot = {
   requestId: string
   roundId: string
+  roundCount: number
   createdAt: string
   modelMaxContext: number
   triggerThreshold: number
@@ -245,6 +323,8 @@ export type ContextDebugSnapshot = {
   toolDefinitionTokens: number
   hotTokens: number
   hotTokenBudget: number
+  hotHighWatermark: number
+  hotLowWatermark: number
   warmTokens: number
   warmTokenBudget: number
   pinnedHotTokens: number
@@ -300,15 +380,19 @@ export type ContextAuditEvent = {
   projectId: string
   conversationId: string
   roundId?: string
+  roundCount?: number
   requestId?: string
+  truthRefs?: string[]
   type:
     | 'hot_to_warm'
     | 'warm_to_cold'
+    | 'warm_to_hot'
     | 'cold_recall'
     | 'pin_changed'
     | 'manual_demotion'
     | 'pinned_ratio_warning'
     | 'token_simulation'
+    | 'hot_warm_initialization'
   messageIds: string[]
   tokenDelta?: number
   description: string
@@ -344,4 +428,20 @@ export type ConversationStateChange = {
   projectId: string
   conversationId: string
   state: ConversationRuntimeState
+}
+
+export type ScreenshotSource = {
+  captureId: string
+  dataUrl: string
+  width: number
+  height: number
+  scaleX: number
+  scaleY: number
+}
+
+export type ScreenshotSelection = {
+  x: number
+  y: number
+  width: number
+  height: number
 }

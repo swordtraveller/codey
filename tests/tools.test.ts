@@ -22,6 +22,7 @@ describe('agent tools', () => {
     project = {
       id: 'project',
       name: 'Project',
+      archived: false,
       defaultModelConfigId: null,
       contextConfigOverride: null,
       folders: [{ id: 'root', path: root }],
@@ -46,7 +47,9 @@ describe('agent tools', () => {
       'project_tree',
       'project_search_text',
       'python_execute',
+      'node_validate',
       'git_status',
+      'git_unstage',
       'git_commit',
     ]))
   })
@@ -106,6 +109,24 @@ describe('agent tools', () => {
     expect(await readFile(target, 'utf8')).toBe('same\nsame\n')
   })
 
+  it('patches CRLF files when snippets use LF line endings and preserves the file convention', async () => {
+    const target = join(root, 'crlf.py')
+    await writeFile(target, 'value = 1\r\nnext = 2\r\n', 'utf8')
+
+    const patched = JSON.parse(await runAgentTool(
+      project,
+      toolCall('file_patch', {
+        folder_id: 'root',
+        path: 'crlf.py',
+        old_snippet: 'value = 1\nnext = 2',
+        new_snippet: 'value = 3\nnext = 4',
+      }),
+      [],
+    )) as { success: boolean }
+
+    expect(patched.success).toBe(true)
+    expect(await readFile(target, 'utf8')).toBe('value = 3\r\nnext = 4\r\n')
+  })
   it('does not start a file operation after the round is stopped', async () => {
     const controller = new AbortController()
     controller.abort()
