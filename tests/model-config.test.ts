@@ -45,6 +45,7 @@ const config: AppConfig = {
 const project: Project = {
   id: 'project',
   name: 'Project',
+  archived: false,
   defaultModelConfigId: 'project',
   contextConfigOverride: null,
   folders: [],
@@ -54,6 +55,7 @@ const project: Project = {
 const conversation: Conversation = {
   id: 'conversation',
   title: 'Conversation',
+  archived: false,
   modelConfigId: null,
   contextConfigOverride: null,
   agentLimits: defaultAgentLimitsConfig,

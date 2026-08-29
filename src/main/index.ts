@@ -83,9 +83,11 @@ import {
   getProjectsLive,
   saveConversationContext,
   setConversationAgentLimits,
+  setConversationArchived,
   setConversationContextConfig,
   setConversationModelConfig,
   setProjectContextConfig,
+  setProjectArchived,
   setProjectModelConfig,
   updateConversationAgentMessages,
   updateConversationTurn,
@@ -206,6 +208,12 @@ function ensureAllIdle(): void {
     throw new Error('Context settings cannot be changed during a conversation round or debug operation')
   }
 }
+
+function ensureProjectIdle(projectId: string): void {
+  const busy = [...conversationStates.entries()].some(([key, state]) => key.startsWith(`${projectId}:`) && state !== 'idle')
+  if (busy) throw new Error('The project must be idle')
+}
+
 
 async function runDebugOperation<T>(
   projectId: string,
@@ -768,6 +776,10 @@ app.whenReady().then(() => {
     ensureAllIdle()
     return setProjectContextConfig(projectId, contextConfig)
   })
+  ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
+    ensureProjectIdle(projectId)
+    return setProjectArchived(projectId, archived)
+  })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId))
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
@@ -781,6 +793,10 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
+  })
+  ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationArchived(projectId, conversationId, archived)
   })
   ipcMain.handle('clipboard:screenshot', async (_event, hideWindow: boolean) => {
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main window is unavailable')

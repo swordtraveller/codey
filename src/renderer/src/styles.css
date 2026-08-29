@@ -1521,3 +1521,63 @@ h1 {
     grid-column: 1 / -1;
   }
 }
+
+.conversation-nav-item {
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-nav-row {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.conversation-nav-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-menu-panel {
+  margin: 0 8px 4px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+
+.archive-list {
+  display: grid;
+  gap: 18px;
+}
+
+.archive-list section {
+  display: grid;
+  gap: 8px;
+}
+
+.archive-list h2 {
+  margin: 0;
+  color: #424242;
+  font-size: 14px;
+}
+
+.archive-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 6px 0;
+}
+
+.archive-list-item > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-list-item small {
+  color: #707070;
+}

@@ -22,6 +22,7 @@ describe('agent tools', () => {
     project = {
       id: 'project',
       name: 'Project',
+      archived: false,
       defaultModelConfigId: null,
       contextConfigOverride: null,
       folders: [{ id: 'root', path: root }],

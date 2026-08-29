@@ -1235,6 +1235,9 @@ export function App(): React.JSX.Element {
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
+  const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
@@ -1256,8 +1259,16 @@ export function App(): React.JSX.Element {
   const activeTraceIdsRef = useRef<Record<string, string>>({})
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
 
-  const activeProject = projects.find((project) => project.id === activeProjectId)
-  const activeConversation = activeProject?.conversations.find(
+  const visibleProjects = projects.filter((project) => !project.archived)
+  const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
+  const visibleConversations = activeProject?.conversations.filter((conversation) => !conversation.archived) ?? []
+  const archivedProjects = projects.filter((project) => project.archived)
+  const archivedConversations = projects
+    .filter((project) => !project.archived)
+    .flatMap((project) => project.conversations
+      .filter((conversation) => conversation.archived)
+      .map((conversation) => ({ project, conversation })))
+  const activeConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
@@ -1311,10 +1322,11 @@ export function App(): React.JSX.Element {
       .getProjects()
       .then((savedProjects) => {
         setProjects(savedProjects)
-        const firstProject = savedProjects[0]
+        const firstProject = savedProjects.find((project) => !project.archived)
+        const firstConversation = firstProject?.conversations.find((conversation) => !conversation.archived)
         if (firstProject) {
           setActiveProjectId(firstProject.id)
-          setActiveConversationId(firstProject.conversations[0]?.id ?? '')
+          setActiveConversationId(firstConversation?.id ?? '')
         }
       })
       .catch(() => setError(t('unableLoadProjects')))
@@ -1419,10 +1431,52 @@ export function App(): React.JSX.Element {
   }
 
   function selectProject(project: Project): void {
+    const firstConversation = project.conversations.find((conversation) => !conversation.archived)
     setActiveProjectId(project.id)
-    setActiveConversationId(project.conversations[0]?.id ?? '')
+    setActiveConversationId(firstConversation?.id ?? '')
     setOpenProjectMenuId(null)
+    setOpenConversationMenuId(null)
     setError('')
+  }
+
+  async function setProjectArchive(project: Project, archived: boolean): Promise<void> {
+    try {
+      const updated = await window.codey.setProjectArchived(project.id, archived)
+      replaceProject(updated)
+      setOpenProjectMenuId(null)
+      if (archived && activeProjectId === project.id) {
+        const nextProject = projects.find((item) => item.id !== project.id && !item.archived)
+        if (nextProject) selectProject(nextProject)
+        else {
+          setActiveProjectId('')
+          setActiveConversationId('')
+        }
+      } else if (!archived && !activeProjectId) {
+        selectProject(updated)
+      }
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : t('unableArchive'))
+    }
+  }
+
+  async function setConversationArchive(projectId: string, conversationId: string, archived: boolean): Promise<void> {
+    try {
+      const updated = await window.codey.setConversationArchived(projectId, conversationId, archived)
+      replaceProject(updated)
+      setOpenConversationMenuId(null)
+      if (archived && activeProjectId === projectId && activeConversationId === conversationId) {
+        const nextConversation = updated.conversations.find((conversation) => !conversation.archived)
+        setActiveConversationId(nextConversation?.id ?? '')
+      }
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : t('unableArchive'))
+    }
+  }
+
+  function openArchiveList(): void {
+    setSettingsOpen(false)
+    setArchiveError('')
+    setArchiveDialogOpen(true)
   }
 
   function createSettingsDraft(): typeof defaultAppConfig {
@@ -1984,24 +2038,13 @@ export function App(): React.JSX.Element {
           <section className="sidebar-section">
             <p className="section-label">{t('projects')}</p>
             <nav className="nav-list" aria-label={t('projects')}>
-              {projects.map((project) => (
+              {visibleProjects.map((project) => (
                 <div className="project-nav-item" key={project.id}>
                   <div className="project-nav-row">
-                    <Button
-                      appearance={project.id === activeProjectId ? 'secondary' : 'subtle'}
-                      onClick={() => selectProject(project)}
-                    >
+                    <Button appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
                       {project.name}
                     </Button>
-                    <Button
-                      appearance="subtle"
-                      size="small"
-                      aria-expanded={openProjectMenuId === project.id}
-                      aria-label={t('projectOptions')}
-                      onClick={() => setOpenProjectMenuId((current) =>
-                        current === project.id ? null : project.id
-                      )}
-                    >
+                    <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
                     </Button>
                   </div>
@@ -2009,26 +2052,13 @@ export function App(): React.JSX.Element {
                     <div className="project-menu-panel">
                       <label>
                         <span>{t('projectDefaultModel')}</span>
-                        <Select
-                          aria-label={t('projectDefaultModel')}
-                          disabled={interactionLocked || config.modelConfigs.length === 0}
-                          value={project.defaultModelConfigId ?? ''}
-                          onChange={(_, data) => {
-                            setOpenProjectMenuId(null)
-                            void changeProjectModelConfig(project.id, data.value)
-                          }}
-                        >
+                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.modelConfigs.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
                           <option value="">{t('applicationDefault')}</option>
-                          {config.modelConfigs.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.name || model.modelName || t('unnamedModel')}
-                            </option>
-                          ))}
+                          {config.modelConfigs.map((model) => <option key={model.id} value={model.id}>{model.name || model.modelName || t('unnamedModel')}</option>)}
                         </Select>
                       </label>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>
-                        {t('contextSettings')}
-                      </Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>{t('contextSettings')}</Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setProjectArchive(project, true)}>{t('archiveProject')}</Button>
                     </div>
                   )}
                 </div>
@@ -2040,28 +2070,23 @@ export function App(): React.JSX.Element {
             <section className="sidebar-section conversations-section">
               <div className="section-heading">
                 <p className="section-label">{t('conversations')}</p>
-                <Button
-                  appearance="subtle"
-                  size="small"
-                  onClick={() => void startNewConversation()}
-                >
-                  {t('new')}
-                </Button>
+                <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
               </div>
               <nav className="nav-list" aria-label={t('conversations')}>
-                {activeProject.conversations.map((conversation) => (
-                  <Button
-                    appearance={
-                      conversation.id === activeConversationId ? 'secondary' : 'subtle'
-                    }
-                    key={conversation.id}
-                    onClick={() => {
-                      setActiveConversationId(conversation.id)
-                      setError('')
-                    }}
-                  >
-                    {conversation.title}
-                  </Button>
+                {visibleConversations.map((conversation) => (
+                  <div className="conversation-nav-item" key={conversation.id}>
+                    <div className="conversation-nav-row">
+                      <Button appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => { setActiveConversationId(conversation.id); setOpenConversationMenuId(null); setError('') }}>
+                        {conversation.title}
+                      </Button>
+                      <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
+                    </div>
+                    {openConversationMenuId === conversation.id && (
+                      <div className="conversation-menu-panel">
+                        <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setConversationArchive(activeProject.id, conversation.id, true)}>{t('archiveConversation')}</Button>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </nav>
             </section>
@@ -2458,6 +2483,13 @@ export function App(): React.JSX.Element {
                 />
               </section>
               <section className="settings-group">
+                <h2>{t('archivedItems')}</h2>
+                <p className="settings-description">{t('archivedItemsDescription')}</p>
+                <Button appearance="secondary" onClick={openArchiveList}>
+                  {t('openArchivedItems')}
+                </Button>
+              </section>
+              <section className="settings-group">
                 <h2>{t('developerSettings')}</h2>
                 <Switch
                   checked={configDraft.developerMode}
@@ -2481,6 +2513,51 @@ export function App(): React.JSX.Element {
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={archiveDialogOpen} onOpenChange={(_, data) => setArchiveDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('archivedItems')}</DialogTitle>
+            <DialogContent className="dialog-fields archive-list">
+              <section>
+                <h2>{t('archivedProjects')}</h2>
+                {archivedProjects.length === 0 ? (
+                  <p className="settings-description">{t('noArchivedProjects')}</p>
+                ) : archivedProjects.map((project) => (
+                  <div className="archive-list-item" key={project.id}>
+                    <span>{project.name}</span>
+                    <Button size="small" onClick={() => void setProjectArchive(project, false)}>
+                      {t('unarchive')}
+                    </Button>
+                  </div>
+                ))}
+              </section>
+              <section>
+                <h2>{t('archivedConversations')}</h2>
+                {archivedConversations.length === 0 ? (
+                  <p className="settings-description">{t('noArchivedConversations')}</p>
+                ) : archivedConversations.map(({ project, conversation }) => (
+                  <div className="archive-list-item" key={`${project.id}:${conversation.id}`}>
+                    <span>
+                      <strong>{conversation.title}</strong>
+                      <small>{project.name}</small>
+                    </span>
+                    <Button size="small" onClick={() => void setConversationArchive(project.id, conversation.id, false)}>
+                      {t('unarchive')}
+                    </Button>
+                  </div>
+                ))}
+              </section>
+              {archiveError && <p className="dialog-error">{archiveError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setArchiveDialogOpen(false)}>
+                {t('close')}
               </Button>
             </DialogActions>
           </DialogBody>

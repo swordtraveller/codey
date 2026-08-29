@@ -230,6 +230,7 @@ export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
 export type Conversation = {
   id: string
   title: string
+  archived: boolean
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
   agentLimits: AgentLimitsConfig
@@ -246,6 +247,7 @@ export type ProjectFolder = {
 export type Project = {
   id: string
   name: string
+  archived: boolean
   defaultModelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
   folders: ProjectFolder[]
