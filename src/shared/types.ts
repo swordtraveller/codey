@@ -91,6 +91,13 @@ export type PerformanceTraceScope = 'renderer' | 'main' | 'agent'
 
 export type PerformanceTraceValue = number | boolean | string | null
 
+export type ContextAction = {
+  type: 'promote' | 'demote' | 'summarize' | 'recall'
+  messageIds: string[]
+  truthRefs: string[]
+  tokenDelta?: number
+}
+
 export type PerformanceTraceEvent = {
   traceId: string
   scope: PerformanceTraceScope
@@ -306,6 +313,7 @@ export type ContextLayerItem = {
 export type ContextDebugSnapshot = {
   requestId: string
   roundId: string
+  roundCount: number
   createdAt: string
   modelMaxContext: number
   triggerThreshold: number
@@ -370,7 +378,9 @@ export type ContextAuditEvent = {
   projectId: string
   conversationId: string
   roundId?: string
+  roundCount?: number
   requestId?: string
+  truthRefs?: string[]
   type:
     | 'hot_to_warm'
     | 'warm_to_cold'

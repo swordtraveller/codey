@@ -572,14 +572,19 @@ export function buildAgentContext(
   contextConfig: ContextManagementConfig,
   agentMessages: AgentContextMessage[],
   networkAccessEnabled = false,
-  customStrategy?: { allow: boolean; latestUserMessageId?: string },
+  customStrategy?: { allow: boolean; latestUserMessageId?: string; roundId?: string; roundCount?: number },
 ): ContextResult {
   return manageContext(
     [createAgentSystemMessage(project, networkAccessEnabled), ...toApiMessages(agentMessages)],
     createAgentTools(project, networkAccessEnabled),
     config,
     contextConfig,
-    { allowCustomStrategy: customStrategy?.allow, latestUserMessageId: customStrategy?.latestUserMessageId },
+    {
+      allowCustomStrategy: customStrategy?.allow,
+      latestUserMessageId: customStrategy?.latestUserMessageId,
+      roundId: customStrategy?.roundId,
+      roundCount: customStrategy?.roundCount,
+    },
   )
 }
 export async function develop(
@@ -590,7 +595,16 @@ export async function develop(
   agentMessages: AgentContextMessage[],
   onProgress?: (update: DevelopmentProgressUpdate) => void,
   onContextSnapshot?: (result: ContextResult) => void,
-  runtime?: { conversationId: string; projectId?: string; traceId?: string; signal?: AbortSignal; latestUserMessageId?: string; allowCustomStrategy?: boolean },
+  runtime?: {
+    conversationId: string
+    projectId?: string
+    traceId?: string
+    signal?: AbortSignal
+    latestUserMessageId?: string
+    allowCustomStrategy?: boolean
+    roundId?: string
+    roundCount?: number
+  },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
   if (project.folders.length === 0) {
@@ -634,12 +648,20 @@ export async function develop(
       const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
+        roundId: runtime?.roundId,
+        roundCount: runtime?.roundCount,
       })
       recordPerformanceTrace({
         traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'context-manage',
         projectId: runtime?.projectId, conversationId: runtime?.conversationId,
         durationMs: performance.now() - contextManageStartedAt,
-        data: { requestIndex, inputMessages: activeHistory.length + 1, outputMessages: managed.messages.length, outputTokens: managed.metrics.compressedTokens },
+        data: {
+          requestIndex,
+          roundCount: runtime?.roundCount ?? 0,
+          inputMessages: activeHistory.length + 1,
+          outputMessages: managed.messages.length,
+          outputTokens: managed.metrics.compressedTokens,
+        },
       })
       if ((!runtime?.allowCustomStrategy || !contextConfig.customStrategyEnabled || !contextConfig.customStrategyScript?.trim()) &&
         runtime?.latestUserMessageId && !managed.messages.some((message) =>

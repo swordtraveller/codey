@@ -330,6 +330,7 @@ async function developProject(
   // context-store write needs to delay the first model request.
 
   const roundId = randomUUID()
+  const roundCount = conversation.agentMessages.filter((message) => message.role === 'user').length + 1
   const contextReadStartedAt = performance.now()
   const requestHistory = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
@@ -342,6 +343,7 @@ async function developProject(
         conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
         userMessageId,
         currentUserMessage,
+        roundId,
       )
     : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
   recordPerformanceTrace({
@@ -365,8 +367,8 @@ async function developProject(
     requestHistory,
     onProgress,
     (managed) => {
-      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId)
-      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts)
+      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
+      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
     },
     {
       conversationId,
@@ -375,6 +377,8 @@ async function developProject(
       signal,
       latestUserMessageId: userMessageId,
       allowCustomStrategy,
+      roundId,
+      roundCount,
     },
     appConfig.networkAccessEnabled,
   )
@@ -596,13 +600,20 @@ async function initializeContextDebugContext(
         conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
       )
     : await readConversationMessages(projectId, conversationId)
-  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, { allow: appConfig.developerMode && conversation.contextConfigOverride !== null })
-  const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), randomUUID())
+  const initializationRoundId = randomUUID()
+  const initializationRoundCount = conversation.agentMessages.filter((message) => message.role === 'user').length
+  const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, {
+    allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
+    roundId: initializationRoundId,
+    roundCount: initializationRoundCount,
+  })
+  const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
   rememberInitializedSnapshot(
     projectId,
     conversationId,
     snapshot,
     [...managed.messages, ...managed.warmMessages],
+    managed.actions,
   )
 }
 async function openContextDebugWindow(projectId: string, conversationId: string): Promise<void> {

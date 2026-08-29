@@ -36,9 +36,26 @@ function messageMetadataSignature(message: ContextMessage): string {
   ].join('\u0001')
 }
 
+function isContextMessage(value: unknown): value is { role: string; content: unknown; images?: unknown; tool_calls?: unknown; tool_call_id?: unknown } {
+  return Boolean(value && typeof value === 'object' && 'role' in value && 'content' in value)
+}
+
+function modelFacingValue(value: unknown): unknown {
+  if (isContextMessage(value)) {
+    return {
+      role: value.role,
+      content: value.content,
+      images: value.images,
+      tool_calls: value.tool_calls,
+      tool_call_id: value.tool_call_id,
+    }
+  }
+  if (Array.isArray(value) && value.every(isContextMessage)) return value.map(modelFacingValue)
+  return value
+}
 export function countContextTokens(value: unknown): number {
   let imageCount = 0
-  const serialized = JSON.stringify(value, (_key, item: unknown) => {
+  const serialized = JSON.stringify(modelFacingValue(value), (_key, item: unknown) => {
     if (
       item && typeof item === 'object' &&
       'dataUrl' in item && 'mediaType' in item &&

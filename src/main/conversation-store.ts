@@ -472,6 +472,7 @@ export async function readConversationWorkingSet(
   rememberedHot: AgentContextMessage[] = [],
   latestUserMessageId?: string,
   latestUserMessage?: AgentContextMessage,
+  currentRoundId?: string,
 ): Promise<AgentContextMessage[]> {
   const index = await readConversationIndex(projectId, conversationId)
   const indexById = new Map(index.map((item) => [item.id, item]))
@@ -497,7 +498,7 @@ export async function readConversationWorkingSet(
     ...message,
     contextLayer: 'warm',
     contextRegion: message.contextRegion ?? 'newborn',
-    contextSource: message.contextSource === 'cold-summary-recall' ? 'cold-summary-recall' : 'hot-demotion',
+    contextSource: message.contextSource ?? 'hot-demotion',
     representation: message.representation ?? 'original',
     truthRefs: message.truthRefs?.length ? message.truthRefs : message.id ? [message.id] : [],
   })
@@ -568,13 +569,13 @@ export async function readConversationWorkingSet(
   for (const { message } of warmMatches) {
     const tokenCount = countContextMessageTokens(message)
     if (recalledTokens + tokenCount > config.coldRecallTokenBudget) continue
-    recalled.push(asHot({
+    recalled.push(asWarm({
       ...message,
       contextSource: 'warm-recall',
+      recalledAtRoundId: currentRoundId,
       lastAccessedAt: now,
       reuseCount: (message.reuseCount ?? 0) + 1,
-    }, true))
-    warmById.delete(message.id ?? '')
+    }))
     for (const truthRef of message.truthRefs ?? []) recalledTruthRefs.add(truthRef)
     recalledTokens += tokenCount
   }
@@ -584,7 +585,7 @@ export async function readConversationWorkingSet(
     if (residentIds.has(match.id) || warmById.has(match.id) || match.truthRefs.some((id) => recalledTruthRefs.has(id)) || recalledTokens + match.tokenCount > config.coldRecallTokenBudget) continue
     const [message] = await readContextRecords(projectId, conversationId, [match.id])
     if (!message) continue
-    recalled.push(message)
+    recalled.push(asWarm({ ...message, recalledAtRoundId: currentRoundId }))
     for (const truthRef of message.truthRefs ?? []) recalledTruthRefs.add(truthRef)
     recalledTokens += match.tokenCount
   }
