@@ -52,3 +52,7 @@ handover/dist/
 
 # Local packaging artifacts
 *.zip
+
+# RULER performance evaluation cache and results
+tests/performance/.cache/
+tests/performance/results/
