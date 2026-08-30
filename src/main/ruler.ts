@@ -6,7 +6,8 @@ import { countContextTokens } from './context-utils'
 import { toProviderMessages } from './model-messages'
 
 export const RULER_TASKS = ['niah_single', 'niah_multi', 'variable_tracking'] as const
-export type RulerTaskName = typeof RULER_TASKS[number]
+export const RULER_OFFICIAL_TASKS = ['niah_single', 'niah_multivalue', 'variable_tracking'] as const
+export type RulerTaskName = typeof RULER_TASKS[number] | typeof RULER_OFFICIAL_TASKS[number]
 
 export type RulerCase = {
   id: string
@@ -14,6 +15,10 @@ export type RulerCase = {
   messages: ContextMessage[]
   latestUserMessageId: string
   expectedAnswers: string[]
+  inputText?: string
+  targetTokens?: number
+  tokenizer?: string
+  seed?: number
 }
 
 export type RulerStrategy = 'builtin' | 'rhai'
@@ -38,12 +43,16 @@ export type RulerCaseResult = {
 }
 
 export type RulerEvaluationResult = {
-  benchmark: 'ruler-subset'
+  benchmark: 'ruler-subset' | 'ruler-official-subset'
   generatedAt: string
   model: string
   tasks: RulerTaskName[]
   strategies: RulerStrategy[]
   results: RulerCaseResult[]
+  mode?: 'legacy' | 'official'
+  tokenizer?: string
+  targetTokens?: number
+  seed?: number
   summary: Record<string, {
     cases: number
     correct: number
@@ -191,7 +200,7 @@ function responseText(value: unknown): string {
     .join('')
 }
 
-async function requestModel(
+export async function requestRulerModel(
   messages: ContextMessage[],
   remote: RulerRemoteConfig,
   signal?: AbortSignal,
@@ -288,7 +297,7 @@ export async function runRulerEvaluation(options: RulerEvaluationOptions): Promi
       }
       try {
         const requestStarted = performance.now()
-        result.answer = await requestModel(contextResult.messages, options.remote, options.signal)
+        result.answer = await requestRulerModel(contextResult.messages, options.remote, options.signal)
         result.remoteRequestMs = performance.now() - requestStarted
         result.correct = scoreRulerAnswer(result.answer, result.expectedAnswers)
       } catch (error) {

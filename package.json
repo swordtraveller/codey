@@ -18,7 +18,9 @@
     "handover:dev": "vite --config handover/vite.config.ts",
     "handover:build": "vite build --config handover/vite.config.ts",
     "test:performance:ruler": "tsx scripts/ruler.ts",
-    "test:performance:ruler:smoke": "tsx scripts/ruler.ts --smoke"
+    "test:performance:ruler:smoke": "tsx scripts/ruler.ts --smoke",
+    "test:performance:ruler:official": "tsx scripts/ruler.ts --official",
+    "test:performance:ruler:official:smoke": "tsx scripts/ruler.ts --official --smoke"
   },
   "dependencies": {
     "@awesome.me/webawesome": "^3.12.0",
