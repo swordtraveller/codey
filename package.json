@@ -20,7 +20,11 @@
     "test:performance:ruler": "tsx scripts/ruler.ts",
     "test:performance:ruler:smoke": "tsx scripts/ruler.ts --smoke",
     "test:performance:ruler:official": "tsx scripts/ruler.ts --official",
-    "test:performance:ruler:official:smoke": "tsx scripts/ruler.ts --official --smoke"
+    "test:performance:ruler:official:smoke": "tsx scripts/ruler.ts --official --smoke",
+    "test:performance:loca": "tsx scripts/loca.ts",
+    "test:performance:loca:smoke": "tsx scripts/loca.ts --smoke",
+    "test:performance:loca:official": "tsx scripts/loca.ts --official",
+    "test:performance:loca:official:smoke": "tsx scripts/loca.ts --official --smoke"
   },
   "dependencies": {
     "@awesome.me/webawesome": "^3.12.0",

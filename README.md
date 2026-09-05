@@ -53,3 +53,7 @@ Build artifacts are written to `dist/`.
 ## Public deployment
 
 Use the Compose deployment package in [docker/README.md](docker/README.md).
+
+## Performance evaluation
+
+LOCA-bench and RULER are optional external performance harnesses. They run outside Electron with developer-local dependencies and remote OpenAI-compatible models; see [tests/performance/loca/README.md](tests/performance/loca/README.md) and [tests/performance/ruler/README.md](tests/performance/ruler/README.md).
