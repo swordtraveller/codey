@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  applyFixtureContextTokens,
   configurationServerTypes,
+  contextConfig,
   filterConfigurations,
   isFilesystemOnlyConfiguration,
   locaConfigSourcePath,
@@ -141,6 +143,14 @@ describe('LOCA runner arguments and result validation', () => {
     expect(locaConfigSourcePath(args)).toMatch(/tests[\\/]performance[\\/]loca[\\/]configs[\\/]filesystem_only\.json$/)
   })
 
+  it('selects and parameterizes the long-context filesystem fixture', () => {
+    const args = parseArguments(['--smoke', '--filesystem-only', '--long-context', '--fixture-context-tokens', '4096'])
+    expect(locaConfigSourcePath(args).replaceAll('\\', '/')).toContain('/tests/performance/loca/configs/filesystem_only_long.json')
+    expect(args).toMatchObject({ longContext: true, fixtureContextTokens: 4096 })
+    const configured = applyFixtureContextTokens({ configurations: [{ name: 'fixture', env_params: { expected_answer: 'ok' } }] }, 4096)
+    expect(configured.configurations[0]?.env_params).toEqual({ expected_answer: 'ok', context_tokens: 4096 })
+  })
+
   it('requires at least one actual successful LOCA task', () => {
     expect(() => validateLocaResults({
       metadata: { total_tasks: 2 },
@@ -199,5 +209,61 @@ describe('LOCA runner arguments and result validation', () => {
     expect(() => patchLocaFilesystemLoggingSource('import shutil\n\nshutil.rmtree(path)')).toThrow(
       'Unsupported LOCA filesystem compatibility patch format',
     )
+  })
+})
+
+describe('LOCA context management configuration', () => {
+  const marginEnvVars = ['LOCA_SAFE_OUTPUT_MARGIN', 'RULER_SAFE_OUTPUT_MARGIN'] as const
+  let savedEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    savedEnv = {}
+    for (const key of marginEnvVars) {
+      savedEnv[key] = process.env[key]
+      delete process.env[key]
+    }
+  })
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  it('binds the output margin to an explicitly provided --max-tokens value', () => {
+    const config = contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })
+    expect(config.safeOutputMargin).toBe(256)
+  })
+
+  it('scales the margin with the model window when --max-tokens is not provided', () => {
+    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: false }).safeOutputMargin).toBe(512)
+    expect(contextConfig({ modelContextSize: 8_192, maxTokens: 256, maxTokensProvided: false }).safeOutputMargin).toBe(1_024)
+  })
+
+  it('keeps the 16k default margin for the default 128k full-run window', () => {
+    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).safeOutputMargin).toBe(16_000)
+  })
+
+  it('prefers an explicit LOCA_SAFE_OUTPUT_MARGIN override over both other strategies', () => {
+    process.env.LOCA_SAFE_OUTPUT_MARGIN = '128'
+    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true }).safeOutputMargin).toBe(128)
+    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).safeOutputMargin).toBe(128)
+  })
+
+  it('rejects a non-numeric or negative LOCA_SAFE_OUTPUT_MARGIN instead of producing NaN', () => {
+    process.env.LOCA_SAFE_OUTPUT_MARGIN = 'wat'
+    expect(() => contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })).toThrow(
+      'LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number',
+    )
+    process.env.LOCA_SAFE_OUTPUT_MARGIN = '-1'
+    expect(() => contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })).toThrow(
+      'LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number',
+    )
+  })
+
+  it('never reserves more than the window minus one token', () => {
+    const config = contextConfig({ modelContextSize: 200, maxTokens: 256, maxTokensProvided: true })
+    expect(config.safeOutputMargin).toBe(199)
   })
 })

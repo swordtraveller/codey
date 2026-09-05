@@ -13,12 +13,15 @@ export type Arguments = {
   config: string
   configProvided: boolean
   filesystemOnly: boolean
+  longContext: boolean
+  fixtureContextTokens?: number
   task?: string
   samples?: number
   model?: string
   maxContextSize: number
   modelContextSize: number
   maxTokens: number
+  maxTokensProvided: boolean
   maxWorkers: number
   timeout: number
   totalTimeout?: number
@@ -95,12 +98,15 @@ export function parseArguments(argv: string[]): Arguments {
     config: config ?? 'task-configs/final_8k_set_config.json',
     configProvided: config !== undefined,
     filesystemOnly: argv.includes('--filesystem-only'),
+    longContext: argv.includes('--long-context'),
+    fixtureContextTokens: optionalPositive(value(argv, '--fixture-context-tokens'), '--fixture-context-tokens'),
     task: value(argv, '--task'),
     samples: optionalPositive(value(argv, '--samples'), '--samples'),
     model: value(argv, '--model'),
     maxContextSize: positive(value(argv, '--max-context-size'), smoke ? 8_192 : 128_000, '--max-context-size'),
     modelContextSize: modelContextSize(argv),
     maxTokens: positive(value(argv, '--max-tokens'), smoke ? 256 : 4_096, '--max-tokens'),
+    maxTokensProvided: value(argv, '--max-tokens') !== undefined,
     maxWorkers: positive(value(argv, '--max-workers'), smoke ? 1 : 4, '--max-workers'),
     timeout: positive(value(argv, '--timeout'), smoke ? 120 : 600, '--timeout'),
     totalTimeout: optionalPositive(value(argv, '--total-timeout'), '--total-timeout') ?? (smoke ? 300 : undefined),
@@ -484,8 +490,18 @@ async function prepare(args: Arguments): Promise<void> {
   }
 }
 
-function contextConfig(modelMaxContext: number): typeof defaultContextManagementConfig {
-  const safeOutputMargin = Number(process.env.LOCA_SAFE_OUTPUT_MARGIN ?? process.env.RULER_SAFE_OUTPUT_MARGIN ?? defaultContextManagementConfig.safeOutputMargin)
+export function contextConfig(args: Pick<Arguments, 'modelContextSize' | 'maxTokens' | 'maxTokensProvided'>): typeof defaultContextManagementConfig {
+  const modelMaxContext = args.modelContextSize
+  const explicitMargin = process.env.LOCA_SAFE_OUTPUT_MARGIN ?? process.env.RULER_SAFE_OUTPUT_MARGIN
+  if (explicitMargin !== undefined && (!Number.isFinite(Number(explicitMargin)) || Number(explicitMargin) < 0)) {
+    throw new Error('LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number')
+  }
+  // The margin must shrink with small windows: clamping the 16k default to a 4k window
+  // collapses the compression trigger threshold to ~1 token and every request overflows.
+  const fallbackMargin = Math.min(defaultContextManagementConfig.safeOutputMargin, Math.floor(modelMaxContext / 8))
+  const safeOutputMargin = explicitMargin !== undefined ? Number(explicitMargin)
+    : args.maxTokensProvided ? args.maxTokens
+      : fallbackMargin
   return {
     ...defaultContextManagementConfig,
     layeredEnabled: process.env.LOCA_LAYERED !== 'false',
@@ -501,20 +517,44 @@ function outputPath(args: Arguments): string {
   return resolve(resultRoot, `loca-${args.strategy}-${Date.now()}`)
 }
 
-export function locaConfigSourcePath(args: Pick<Arguments, 'config' | 'configProvided' | 'filesystemOnly'>): string {
+export function locaConfigSourcePath(args: Pick<Arguments, 'config' | 'configProvided' | 'filesystemOnly' | 'longContext'>): string {
   if (args.filesystemOnly && !args.configProvided) {
-    return resolve(root, 'tests/performance/loca/configs/filesystem_only.json')
+    return resolve(root, args.longContext
+      ? 'tests/performance/loca/configs/filesystem_only_long.json'
+      : 'tests/performance/loca/configs/filesystem_only.json')
   }
   return isAbsolute(args.config) ? args.config : resolve(upstreamRoot, args.config)
 }
 
+
+export function applyFixtureContextTokens(config: LocaConfigFile, contextTokens: number | undefined): LocaConfigFile {
+  if (contextTokens === undefined) return config
+  return {
+    ...config,
+    configurations: config.configurations.map((configuration) => ({
+      ...configuration,
+      env_params: {
+        ...(configuration.env_params && typeof configuration.env_params === 'object' && !Array.isArray(configuration.env_params)
+          ? configuration.env_params
+          : {}),
+        context_tokens: contextTokens,
+      },
+    })),
+  }
+}
 async function effectiveConfigPath(args: Arguments, output: string): Promise<string> {
   const sourcePath = locaConfigSourcePath(args)
-  const shouldFilter = args.filesystemOnly || args.smoke || args.task !== undefined || args.samples !== undefined
+  const shouldFilter = args.filesystemOnly || args.smoke || args.task !== undefined || args.samples !== undefined || args.longContext || args.fixtureContextTokens !== undefined
   if (!shouldFilter) return sourcePath
+  if (args.longContext && !args.filesystemOnly) {
+    throw new Error('--long-context requires --filesystem-only')
+  }
+  if (args.fixtureContextTokens !== undefined && !args.longContext) {
+    throw new Error('--fixture-context-tokens requires --long-context')
+  }
   const raw = await readFile(sourcePath, 'utf8')
   const config = JSON.parse(raw) as LocaConfigFile
-  const filtered = filterConfigurations(config, args)
+  const filtered = applyFixtureContextTokens(filterConfigurations(config, args), args.fixtureContextTokens)
   const path = resolve(output, 'effective-config.json')
   await writeFile(path, `${JSON.stringify(filtered, null, 2)}\n`, 'utf8')
   return path
@@ -546,7 +586,7 @@ async function runLoca(args: Arguments): Promise<LocaResultsSummary> {
       targetBaseUrl,
       targetApiKey: apiKey,
       modelConfig,
-      contextConfig: contextConfig(args.modelContextSize),
+      contextConfig: contextConfig(args),
       rhaiScript: args.strategy === 'rhai' ? script : undefined,
       tracePath,
     })
@@ -584,6 +624,7 @@ async function runLoca(args: Arguments): Promise<LocaResultsSummary> {
     `LOCA benchmark context: ${args.maxContextSize} tokens\n` +
     `Codey model context: ${args.modelContextSize} tokens\n` +
     `Filesystem-only: ${args.filesystemOnly ? 'enabled' : 'disabled'}\n` +
+    `Long context fixture: ${args.longContext ? `${args.fixtureContextTokens ?? 1400} target filler tokens` : 'disabled'}\n` +
     `Config: ${configPath}\nOutput: ${output}`,
   )
   try {

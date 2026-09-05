@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { locaUpstreamEndpoint, startLocaContextProxy } from '../src/main/loca-proxy'
+import { contextConfig } from '../scripts/loca'
 import { defaultContextManagementConfig, defaultModelConfig } from '../src/shared/types'
 
 async function listen(status = 200, responseBody?: string): Promise<{ url: string; close: () => Promise<void> }> {
@@ -39,6 +40,60 @@ async function readTrace(path: string): Promise<Record<string, unknown>> {
   }
   throw new Error(`trace was not written: ${path}`)
 }
+
+describe('LOCA context proxy small-window regression', () => {
+  function longContextTaskMessage(): string {
+    const filler = 'archived '.repeat(400)
+    return `The following archive is intentionally verbose background context.\n\n<background>\n${filler}\n</background>\n\nWrite CODEY-FILESYSTEM-LONG-CONTEXT-OK to answer.txt, then claim done.`
+  }
+
+  async function roundTrip(safeOutputMargin: number): Promise<{ status: number; body: string }> {
+    const upstream = await listen()
+    const proxy = await startLocaContextProxy({
+      targetBaseUrl: upstream.url,
+      targetApiKey: 'target-key',
+      modelConfig: { ...defaultModelConfig, modelName: 'test-model', modelMaxContext: 4_096 },
+      contextConfig: { ...defaultContextManagementConfig, layeredEnabled: true, safeOutputMargin },
+    })
+    try {
+      const response = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'test-model',
+          messages: [{ role: 'user', content: longContextTaskMessage() }],
+        }),
+      })
+      return { status: response.status, body: await response.text() }
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
+  }
+
+  it('rejects every request when the margin collapses a 4k window threshold to one token', async () => {
+    const result = await roundTrip(4_095)
+    expect(result.status).toBe(400)
+    expect(result.body).toContain('latest_user_too_large')
+  })
+
+  it('forwards the same request when the runner binds the margin to --max-tokens', async () => {
+    const saved = { LOCA_SAFE_OUTPUT_MARGIN: process.env.LOCA_SAFE_OUTPUT_MARGIN, RULER_SAFE_OUTPUT_MARGIN: process.env.RULER_SAFE_OUTPUT_MARGIN }
+    delete process.env.LOCA_SAFE_OUTPUT_MARGIN
+    delete process.env.RULER_SAFE_OUTPUT_MARGIN
+    try {
+      const runnerConfig = contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })
+      expect(runnerConfig.safeOutputMargin).toBe(256)
+      const result = await roundTrip(runnerConfig.safeOutputMargin)
+      expect(result.status).toBe(200)
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+})
 
 describe('LOCA context proxy', () => {
   it('normalizes the configured upstream base URL to chat completions', () => {

@@ -41,6 +41,52 @@ pnpm test:performance:loca:smoke -- `
   --total-timeout 300
 ```
 
+## Long-context filesystem fixture
+
+To exercise Codey context management rather than only the tool loop, add `--long-context` to the filesystem-only smoke run. The fixture injects a compact, deterministic background observation before the two-call write/claim task. `--fixture-context-tokens` controls the approximate number of filler tokens (one filler word ≈ one token).
+
+The safe output margin no longer needs an override: when `--max-tokens` is passed explicitly the margin binds to it (256 below), and otherwise it scales with the window (`window / 8`, capped at the 16k default). Do not set `LOCA_SAFE_OUTPUT_MARGIN` unless you really want a manual override.
+
+### Baseline (context management passes through, no compression)
+
+```powershell
+pnpm test:performance:loca:smoke -- `
+  --filesystem-only `
+  --long-context `
+  --fixture-context-tokens 300 `
+  --samples 1 `
+  --max-context-size 4096 `
+  --model-context-size 4096 `
+  --max-tokens 256 `
+  --timeout 180 `
+  --total-timeout 300
+```
+
+Expected: accuracy 1.0 with two tool calls; every `codey-context-trace.jsonl` entry reports `compressionRatio` 1 (input stays under the trigger threshold, so nothing is compressed).
+
+### Layered strategy under pressure (demotion actually fires)
+
+The layered demotion of completed tool rounds only triggers when the hot budget is exceeded, so cap it between the two rounds with `LOCA_HOT_TOKEN_BUDGET`:
+
+```powershell
+$env:LOCA_HOT_TOKEN_BUDGET = '5550'
+pnpm test:performance:loca:smoke -- `
+  --filesystem-only `
+  --long-context `
+  --fixture-context-tokens 5300 `
+  --samples 1 `
+  --max-context-size 8192 `
+  --model-context-size 8192 `
+  --max-tokens 256 `
+  --timeout 180 `
+  --total-timeout 300
+Remove-Item Env:LOCA_HOT_TOKEN_BUDGET -ErrorAction SilentlyContinue
+```
+
+Expected: the first request passes uncompressed; from the second request on, `compressedTokens < originalTokens` in the trace (ratio ≈ 1.02) — the completed tool round is demoted to the warm layer. Accuracy usually drops to 0 because the model loses sight of its completed write; that accuracy cost is exactly what this fixture measures. Note that LOCA's own harness trimming runs on top of the proxy (see `Avg API Tokens (+Trim)`), so proxy compression is only part of the total savings.
+
+This fixture is deliberately limited to `filesystem` and `claim_done`; it does not represent LOCA's full multi-service task set.
+
 ## Filesystem-only verification
 
 Some upstream LOCA configurations require service-specific MCP servers (for example Canvas, email, Excel, or cloud backends). Those tasks are unsuitable for a quick verification of Codey's context proxy because a missing or incompatible external service can consume the full task timeout before the model reaches a meaningful step.
@@ -95,6 +141,8 @@ pnpm test:performance:loca:official:smoke
 --install                   Install LOCA into its local .venv before running
 --official                  Disable the Codey proxy and use LOCA's own strategy
 --filesystem-only           Permit only filesystem/claim_done; defaults to Codey's small local fixture
+--long-context              Use the deterministic long-context filesystem fixture
+--fixture-context-tokens <n> Approximate filler tokens for --long-context
 ```
 
 `--task` and `--samples` create an `effective-config.json` beneath the run output; the upstream config is never changed. With `--task`, samples are selected from that task. With `--samples` alone, the first n configurations from the whole config are retained.
