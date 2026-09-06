@@ -8,6 +8,7 @@ import {
   locaConfigSourcePath,
   parseArguments,
   patchLocaFilesystemLoggingSource,
+  patchLocaPythonExecuteSource,
   patchLocaPythonExecutableSource,
   validateLocaResults,
   type LocaConfigFile,
@@ -197,6 +198,139 @@ describe('LOCA runner arguments and result validation', () => {
     expect(patched).toContain('# Codey LOCA Python executable compatibility patch')
     expect(patched).toContain('return sys.executable, args')
     expect(patchLocaPythonExecutableSource(patched)).toBe(patched)
+  })
+
+  it('patches python_execute to run scripts without uv and kill stuck process trees', () => {
+    const source = [
+      'import os',
+      'import sys',
+      '',
+      'def get_workspace() -> str:',
+      '    """Get the workspace directory from environment or use default."""',
+      '    return os.environ.get("PYTHON_EXECUTE_WORKSPACE", DEFAULT_WORKSPACE)',
+      '',
+      '        # Ensure filename ends with .py',
+      '        if not filename.endswith(".py"):',
+      '            filename += ".py"',
+      '',
+      '        # Execute Python file',
+      '        cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"',
+      '        try:',
+      '            result = subprocess.run(',
+      '                cmd,',
+      '                shell=True,',
+      '                capture_output=True,',
+      '                text=True,',
+      "                encoding='utf-8',",
+      '                timeout=timeout',
+      '            )',
+      '        except subprocess.TimeoutExpired:',
+      '            execution_time = time.time() - start_time',
+      '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+    ].join('\n')
+
+    const patched = patchLocaPythonExecuteSource(source)
+    expect(patched).toContain('# Codey LOCA python_execute compatibility patch')
+    expect(patched).toContain('        filename = os.path.basename(filename)')
+    expect(patched).toContain('        cmd = [sys.executable, os.path.abspath(file_path)]')
+    expect(patched).not.toContain('uv run')
+    expect(patched).not.toContain('shell=True')
+    expect(patched).toContain('# Codey LOCA python_execute timeout patch')
+    expect(patched).toContain('def _kill_process_tree(process):')
+    expect(patched).toContain("'taskkill', '/T', '/F', '/PID'")
+    expect(patched).toContain('        if timeout > 30:')
+    expect(patched).toContain('subprocess.Popen(')
+    expect(patched).toContain('stdin=subprocess.DEVNULL,')
+    expect(patched).toContain('_kill_process_tree(process)')
+    expect(patchLocaPythonExecuteSource(patched)).toBe(patched)
+  })
+
+  it('upgrades an already timeout-patched source that still inherits the MCP stdin pipe', () => {
+    const source = [
+      'import os',
+      'import sys',
+      '',
+      'def get_workspace() -> str:',
+      '    """Get the workspace directory from environment or use default."""',
+      '    return os.environ.get("PYTHON_EXECUTE_WORKSPACE", DEFAULT_WORKSPACE)',
+      '',
+      '        # Codey LOCA python_execute compatibility patch',
+      '        filename = os.path.basename(filename)',
+      '        cmd = [sys.executable, os.path.abspath(file_path)]',
+      '        # Codey LOCA python_execute timeout patch',
+      '        if timeout > 30:',
+      '            timeout = 30',
+      '        try:',
+      '            process = subprocess.Popen(',
+      '                cmd,',
+      '                cwd=agent_workspace,',
+      '                stdout=subprocess.PIPE,',
+      '                stderr=subprocess.PIPE,',
+      '            )',
+    ].join('\n')
+
+    const patched = patchLocaPythonExecuteSource(source)
+    expect(patched).toContain('                stdin=subprocess.DEVNULL,')
+    expect(patched.indexOf('stdin=subprocess.DEVNULL')).toBeLessThan(patched.indexOf('stdout=subprocess.PIPE'))
+    expect(patchLocaPythonExecuteSource(patched)).toBe(patched)
+  })
+
+  it('applies the timeout patch to a source that already carries the first patch', () => {
+    const source = [
+      'import os',
+      'import sys',
+      '',
+      'def get_workspace() -> str:',
+      '    """Get the workspace directory from environment or use default."""',
+      '    return os.environ.get("PYTHON_EXECUTE_WORKSPACE", DEFAULT_WORKSPACE)',
+      '',
+      '        # Codey LOCA python_execute compatibility patch',
+      '        filename = os.path.basename(filename)',
+      '        cmd = [sys.executable, os.path.abspath(file_path)]',
+      '        try:',
+      '            result = subprocess.run(',
+      '                cmd,',
+      '                cwd=agent_workspace,',
+      '                capture_output=True,',
+      '                text=True,',
+      "                encoding='utf-8',",
+      '                timeout=timeout',
+      '            )',
+      '        except subprocess.TimeoutExpired:',
+      '            execution_time = time.time() - start_time',
+      '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+    ].join('\n')
+
+    const patched = patchLocaPythonExecuteSource(source)
+    expect(patched).toContain('# Codey LOCA python_execute timeout patch')
+    expect(patched).toContain('def _kill_process_tree(process):')
+    expect(patchLocaPythonExecuteSource(patched)).toBe(patched)
+  })
+
+  it('rejects an unexpected python_execute server source', () => {
+    expect(() => patchLocaPythonExecuteSource('import os\nimport sys\n')).toThrow(
+      'Unsupported LOCA python_execute compatibility patch format',
+    )
+    const missingHelper = [
+      '        # Codey LOCA python_execute compatibility patch',
+      '        filename = os.path.basename(filename)',
+      '        cmd = [sys.executable, os.path.abspath(file_path)]',
+      '        try:',
+      '            result = subprocess.run(',
+      '                cmd,',
+      '                cwd=agent_workspace,',
+      '                capture_output=True,',
+      '                text=True,',
+      "                encoding='utf-8',",
+      '                timeout=timeout',
+      '            )',
+      '        except subprocess.TimeoutExpired:',
+      '            execution_time = time.time() - start_time',
+      '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+    ].join('\n')
+    expect(() => patchLocaPythonExecuteSource(missingHelper)).toThrow(
+      'Unsupported LOCA python_execute timeout patch format',
+    )
   })
 
   it('rejects an unexpected LOCA Python command source', () => {

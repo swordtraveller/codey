@@ -210,6 +210,132 @@ async function patchLocaPythonExecutable(): Promise<void> {
   }
 }
 
+export function patchLocaPythonExecuteSource(source: string): string {
+  const patchMarker = '# Codey LOCA python_execute compatibility patch'
+  const timeoutMarker = '# Codey LOCA python_execute timeout patch'
+  const lineEnding = source.includes('\r\n') ? '\r\n' : '\n'
+  let patched = source
+
+  if (!patched.includes(patchMarker)) {
+    const suffixMarker = '        if not filename.endswith(".py"):'
+    const commandMarker = '        cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"'
+    const shellMarker = '                shell=True,'
+    if (!patched.includes(suffixMarker) || !patched.includes(commandMarker) || !patched.includes(shellMarker)) {
+      throw new Error('Unsupported LOCA python_execute compatibility patch format')
+    }
+    patched = patched
+      .replace(
+        suffixMarker,
+        `        ${patchMarker}${lineEnding}        filename = os.path.basename(filename)${lineEnding}${suffixMarker}`,
+      )
+      .replace(
+        commandMarker,
+        '        cmd = [sys.executable, os.path.abspath(file_path)]',
+      )
+      .replace(shellMarker, '                cwd=agent_workspace,')
+  }
+
+  if (!patched.includes(timeoutMarker)) {
+    const helperAnchor = [
+      'def get_workspace() -> str:',
+      '    """Get the workspace directory from environment or use default."""',
+      '    return os.environ.get("PYTHON_EXECUTE_WORKSPACE", DEFAULT_WORKSPACE)',
+    ].join(lineEnding)
+    const runAnchor = [
+      '        try:',
+      '            result = subprocess.run(',
+      '                cmd,',
+      '                cwd=agent_workspace,',
+      '                capture_output=True,',
+      '                text=True,',
+      "                encoding='utf-8',",
+      '                timeout=timeout',
+      '            )',
+      '        except subprocess.TimeoutExpired:',
+      '            execution_time = time.time() - start_time',
+      '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+    ].join(lineEnding)
+    if (!patched.includes(helperAnchor) || !patched.includes(runAnchor)) {
+      throw new Error('Unsupported LOCA python_execute timeout patch format')
+    }
+    const helper = [
+      '',
+      '',
+      'def _kill_process_tree(process):',
+      `    # ${timeoutMarker}: a subprocess kill only terminates the direct child;`,
+      '    # grandchildren inheriting the pipes keep communicate() blocked forever.',
+      "    if sys.platform == 'win32':",
+      "        subprocess.run(['taskkill', '/T', '/F', '/PID', str(process.pid)], capture_output=True)",
+      '    else:',
+      '        import signal',
+      '        try:',
+      '            os.killpg(os.getpgid(process.pid), signal.SIGKILL)',
+      '        except (ProcessLookupError, PermissionError):',
+      '            process.kill()',
+    ].join(lineEnding)
+    const replacement = [
+      `        # ${timeoutMarker}`,
+      '        if timeout > 30:',
+      '            timeout = 30',
+      '        try:',
+      '            process = subprocess.Popen(',
+      '                cmd,',
+      '                cwd=agent_workspace,',
+      '                stdin=subprocess.DEVNULL,',
+      '                stdout=subprocess.PIPE,',
+      '                stderr=subprocess.PIPE,',
+      '                text=True,',
+      "                encoding='utf-8',",
+      "                start_new_session=sys.platform != 'win32',",
+      '            )',
+      '            try:',
+      '                stdout, stderr = process.communicate(timeout=timeout)',
+      '            except subprocess.TimeoutExpired:',
+      '                _kill_process_tree(process)',
+      '                stdout, stderr = process.communicate()',
+      '                execution_time = time.time() - start_time',
+      '                return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+      '            result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)',
+      '        except subprocess.TimeoutExpired:',
+      '            execution_time = time.time() - start_time',
+      '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+    ].join(lineEnding)
+    patched = patched
+      .replace(helperAnchor, helperAnchor + helper)
+      .replace(runAnchor, replacement)
+  } else if (!patched.includes('stdin=subprocess.DEVNULL')) {
+    // Upgrade v2 caches written before the stdin fix: a stdio MCP server's
+    // stdin is the JSON-RPC pipe, and children inheriting it never start.
+    const pipeAnchor = [
+      '                cwd=agent_workspace,',
+      '                stdout=subprocess.PIPE,',
+    ].join(lineEnding)
+    if (!patched.includes(pipeAnchor)) {
+      throw new Error('Unsupported LOCA python_execute stdin patch upgrade format')
+    }
+    patched = patched.replace(
+      pipeAnchor,
+      [
+        '                cwd=agent_workspace,',
+        '                stdin=subprocess.DEVNULL,',
+        '                stdout=subprocess.PIPE,',
+      ].join(lineEnding),
+    )
+  }
+
+  return patched
+}
+
+async function patchLocaPythonExecute(): Promise<void> {
+  const path = resolve(upstreamRoot, 'gem/tools/mcp_server/python_execute/server.py')
+  const source = await readFile(path, 'utf8')
+  const patched = patchLocaPythonExecuteSource(source)
+  if (patched !== source) {
+    await writeFile(path, patched, 'utf8')
+    console.log('Patched LOCA python_execute to run scripts with the benchmark interpreter.')
+  }
+}
+
 export function patchLocaFilesystemLoggingSource(source: string): string {
   const patchMarker = '# Codey LOCA compatibility patch v2'
   const lineEnding = source.includes('\r\n') ? '\r\n' : '\n'
@@ -481,6 +607,7 @@ async function prepare(args: Arguments): Promise<void> {
   await patchFastMcpCompatibility()
   await patchLocaPythonExecutable()
   await patchLocaFilesystemLogging()
+  await patchLocaPythonExecute()
   if (args.install) {
     const result = await runProcess(python, ['-m', 'pip', 'install', '-e', upstreamRoot], process.env, upstreamRoot)
     if (result.exitCode !== 0 || result.timedOut) throw new Error(`LOCA-bench installation failed with exit code ${result.exitCode}`)
