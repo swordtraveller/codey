@@ -102,16 +102,32 @@ npx tsx scripts/swe-bench-prepare.ts --instance pallets__flask-5014 --verify
 pnpm test:performance:loca -- `
   --config tests/performance/loca/configs/swe_flask5014.json `
   --samples 1 `
-  --max-context-size 128000 `
-  --model-context-size 128000 `
-  --max-tokens 1024 `
+  --max-context-size 1000000 `
+  --model-context-size 1000000 `
+  --max-tokens 131072 `
   --max-workers 1 `
   --timeout 600 `
   --total-timeout 1800 `
   --output tests/performance/results/swe-A-layered
 ```
 
+### Model window parameters
+
+`--max-tokens` must be the model's real output window; `--model-context-size` is the model's real total window as seen by the Codey context proxy; `--max-context-size` is the upstream benchmark budget, which reserves the output window from the context (input and output share it), so it must also be the model's real total window. For glm-5.3: all three are `1000000 / 1000000 / 131072`. Whoever runs the benchmark is responsible for looking these up.
+
+The runner rejects inconsistent values early (`parseArguments` and `contextConfig` in `scripts/loca.ts`): a `--max-tokens` that is not smaller than `--max-context-size` would leave the upstream with negative input space (it self-terminates with `Cannot fit messages within available context`), and a `--max-tokens` that is not smaller than `--model-context-size` would collapse the compression trigger line. The historical 1024 runs (A6–A8) truncated completions (`finish_reason=length` → invalid-response retries) for the same reason; their comparisons are invalid.
+
 A `run_tests.py` helper is placed next to the repo copy so the agent can run the pinned test environment (`python run_tests.py tests/ -q`). Adding another instance requires a recipe entry in `scripts/swe-bench-prepare.ts` and a small config JSON.
+
+### Retry policy alignment with the product agent loop
+
+The upstream react loop used to retry invalid model responses (error/empty/length-finish, no tool calls) with the same payload up to 200 times, which can burn the full task budget on a degenerate response. The runner patches it (`patchLocaReactRetrySource` in `scripts/loca.ts`) to match the product agent limits:
+
+- Invalid responses retry at most 3 times (`LOCA_REACT_MAX_INVALID_RETRIES`), then the request fails; network errors keep the existing separate retry path.
+- Tool calls per response are capped at 32 (`LOCA_REACT_MAX_TOOL_CALLS_PER_RESPONSE`), like the product `toolCallsPerRequest`.
+- The episode budget defaults to 64 tool uses (`LOCA_MAX_TOOL_USES`, passed as `--max-tool-uses`), mirroring the product `modelRequestsPerRound` default.
+- A permanently rejected request — HTTP 402/403, or 429 with a quota/balance message — aborts the task immediately with a `CodeyFatal: upstream rejected the request permanently` error instead of retrying 50 times (observed: 71 wasted 403 responses in one quota-exhausted run). Top up the upstream account or fix the API key, then rerun.
+- The request read timeout is raised from the upstream's hardcoded 60s to 300s (`LOCA_REACT_REQUEST_TIMEOUT_SECONDS`): slow generations on large prompts used to time out on the runner side while the proxy still completed (and billed) the request, causing orphan double-billing (observed: 9 orphan requests in a 44-request run).
 
 ## Filesystem-only verification
 

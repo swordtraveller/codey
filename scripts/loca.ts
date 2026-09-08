@@ -84,7 +84,9 @@ function modelContextSize(argv: string[]): number {
   }
 
   const environmentValue = process.env.LOCA_MODEL_MAX_CONTEXT ?? process.env.RULER_MODEL_MAX_CONTEXT
-  return positive(environmentValue, defaultModelConfig.modelMaxContext, 'LOCA_MODEL_MAX_CONTEXT')
+  // glm-5.3 (reference model): real total window. Keeps the non-smoke defaults
+  // self-consistent with the 131_072 output window default.
+  return positive(environmentValue, 1_000_000, 'LOCA_MODEL_MAX_CONTEXT')
 }
 
 export function parseArguments(argv: string[]): Arguments {
@@ -92,6 +94,16 @@ export function parseArguments(argv: string[]): Arguments {
   const config = value(argv, '--config')
   const strategy = (value(argv, '--strategy') ?? 'builtin') as Strategy
   if (strategy !== 'builtin' && strategy !== 'rhai') throw new Error('--strategy must be builtin or rhai')
+  const maxContextSize = positive(value(argv, '--max-context-size'), smoke ? 8_192 : 1_000_000, '--max-context-size')
+  const maxTokens = positive(value(argv, '--max-tokens'), smoke ? 256 : 131_072, '--max-tokens')
+  if (maxTokens >= maxContextSize) {
+    throw new Error(
+      `--max-tokens (${maxTokens}) must be smaller than --max-context-size (${maxContextSize}). ` +
+      'The upstream benchmark reserves the output window from the benchmark context, so a larger ' +
+      '--max-tokens leaves no input space. Pass the model\'s real windows ' +
+      '(glm-5.3: --max-context-size 1000000 --model-context-size 1000000 --max-tokens 131072).',
+    )
+  }
   return {
     official: argv.includes('--official'),
     smoke,
@@ -104,9 +116,9 @@ export function parseArguments(argv: string[]): Arguments {
     task: value(argv, '--task'),
     samples: optionalPositive(value(argv, '--samples'), '--samples'),
     model: value(argv, '--model'),
-    maxContextSize: positive(value(argv, '--max-context-size'), smoke ? 8_192 : 128_000, '--max-context-size'),
+    maxContextSize,
     modelContextSize: modelContextSize(argv),
-    maxTokens: positive(value(argv, '--max-tokens'), smoke ? 256 : 4_096, '--max-tokens'),
+    maxTokens,
     maxTokensProvided: value(argv, '--max-tokens') !== undefined,
     maxWorkers: positive(value(argv, '--max-workers'), smoke ? 1 : 4, '--max-workers'),
     timeout: positive(value(argv, '--timeout'), smoke ? 120 : 600, '--timeout'),
@@ -362,6 +374,180 @@ async function patchLocaPythonExecute(): Promise<void> {
   if (patched !== source) {
     await writeFile(path, patched, 'utf8')
     console.log('Patched LOCA python_execute to run scripts with the benchmark interpreter.')
+  }
+}
+
+export function patchLocaReactRetrySource(source: string): string {
+  const patchMarker = '# Codey LOCA react retry policy patch'
+  const quotaMarker = '# Codey LOCA quota guard patch'
+  const lineEnding = source.includes('\r\n') ? '\r\n' : '\n'
+  let patched = source
+
+  if (!patched.includes(patchMarker)) {
+    const counterAnchor = [
+      '    # Track retry attempts',
+      '    times = 0',
+    ].join(lineEnding)
+    const toolCallsAnchor = [
+      '                            if has_tool_calls:',
+      '                                # Handle tool calls regardless of finish_reason',
+      "                                result.extend(message.get('tool_calls', []))",
+    ].join(lineEnding)
+    const retryAnchor = [
+      '                    # If we should retry, continue to the next iteration',
+      '                    if should_retry:',
+      '                        times += 1',
+    ].join(lineEnding)
+    const swallowAnchor = [
+      '        except Exception as e:',
+      '            if verbose:',
+      '                print(f"Request error: {e}")',
+    ].join(lineEnding)
+    if (!patched.includes(counterAnchor) || !patched.includes(toolCallsAnchor) || !patched.includes(retryAnchor) || !patched.includes(swallowAnchor)) {
+      throw new Error('Unsupported LOCA react retry policy patch format')
+    }
+
+    // Invalid responses (error/None/length finish reason, empty content, tool-call
+    // overflow) retry a bounded number of times, separate from network retries,
+    // then fail the request. Aligned with the product agent loop limits.
+    const counterPatch = [
+      '    # Track retry attempts',
+      '    times = 0',
+      `    # ${patchMarker}: invalid responses (error/None/length finish,`,
+      '    # empty content, tool-call overflow) get a small bounded retry budget,',
+      '    # separate from network retries, aligned with the product agent loop',
+      '    # limits (modelRequestsPerRound / toolCallsPerRequest).',
+      '    class CodeyInvalidResponseError(RuntimeError):',
+      '        pass',
+      '    invalid_times = 0',
+      "    max_invalid_retries = max(0, int(os.environ.get('LOCA_REACT_MAX_INVALID_RETRIES', '3')))",
+      "    max_tool_calls_per_response = max(1, int(os.environ.get('LOCA_REACT_MAX_TOOL_CALLS_PER_RESPONSE', '32')))",
+    ].join(lineEnding)
+    const toolCallsPatch = [
+      '                            if has_tool_calls:',
+      '                                # Handle tool calls regardless of finish_reason',
+      `                                # ${patchMarker}: cap the tool calls accepted`,
+      '                                # from one response (product: toolCallsPerRequest).',
+      '                                if len(message.get(\'tool_calls\', [])) > max_tool_calls_per_response:',
+      '                                    if verbose:',
+      '                                        print(f"Tool call count {len(message.get(\'tool_calls\', []))} exceeds the per-response limit {max_tool_calls_per_response}. Retrying...")',
+      '                                    should_retry = True',
+      '                                    break',
+      "                                result.extend(message.get('tool_calls', []))",
+    ].join(lineEnding)
+    const retryPatch = [
+      '                    # If we should retry, continue to the next iteration',
+      '                    if should_retry:',
+      `                        # ${patchMarker}: retry a bounded number of times,`,
+      '                        # then fail the request instead of looping',
+      '                        # indefinitely on the same payload.',
+      '                        invalid_times += 1',
+      '                        if invalid_times > max_invalid_retries:',
+      '                            raise CodeyInvalidResponseError(',
+      '                                f"Invalid model response (finish_reason={finish_reason!r}) after "',
+      '                                f"{max_invalid_retries} retry attempt(s); giving up on this request"',
+      '                            )',
+    ].join(lineEnding)
+    const swallowPatch = [
+      '        except Exception as e:',
+      `            # ${patchMarker}: propagate the bounded invalid-response`,
+      '            # give-up instead of swallowing it as a retry.',
+      '            if isinstance(e, CodeyInvalidResponseError):',
+      '                raise',
+      '            if verbose:',
+      '                print(f"Request error: {e}")',
+    ].join(lineEnding)
+
+    patched = patched
+      .replace(counterAnchor, counterPatch)
+      .replace(toolCallsAnchor, toolCallsPatch)
+      .replace(retryAnchor, retryPatch)
+      .replace(swallowAnchor, swallowPatch)
+  }
+
+  if (!patched.includes(quotaMarker)) {
+    const postAnchor = [
+      '            response = requests.post(',
+      '                aihubmix_api_url,',
+      '                headers=headers,',
+      '                json=json_data,',
+      '                timeout=60',
+      '            )',
+    ].join(lineEnding)
+    const swallowAnchor = [
+      '            if isinstance(e, CodeyInvalidResponseError):',
+      '                raise',
+    ].join(lineEnding)
+    if (!patched.includes(postAnchor) || !patched.includes(swallowAnchor)) {
+      throw new Error('Unsupported LOCA quota guard patch format')
+    }
+    const quotaCheck = [
+      '            response = requests.post(',
+      '                aihubmix_api_url,',
+      '                headers=headers,',
+      '                json=json_data,',
+      `                timeout=max(60, int(os.environ.get('LOCA_REACT_REQUEST_TIMEOUT_SECONDS', '300'))),`,
+      '            )',
+      `            # ${quotaMarker}: a permanently rejected request (payment,`,
+      '            # quota, forbidden) never recovers by retrying; abort the',
+      '            # task immediately instead of retrying into the same wall.',
+      '            quota_fatal = response.status_code in (402, 403)',
+      '            if response.status_code == 429:',
+      '                quota_body = str(response.text).lower()',
+      "                quota_markers = ('insufficient', 'arrearage', 'billing', 'payment', 'quota', 'balance', '额度', '余额', '欠费', '充值')",
+      '                quota_fatal = any(marker in quota_body for marker in quota_markers)',
+      '            if quota_fatal:',
+      '                raise RuntimeError(',
+      '                    f"CodeyFatal: upstream rejected the request permanently "',
+      '                    f"(HTTP {response.status_code}, likely account quota exhausted): {str(response.text)[:200]}"',
+      '                )',
+    ].join(lineEnding)
+    const swallowGuard = [
+      '            if isinstance(e, CodeyInvalidResponseError):',
+      '                raise',
+      `            # ${quotaMarker}: fatal quota rejections must escape the`,
+      '            # generic retry handler instead of being swallowed.',
+      "            if str(e).startswith('CodeyFatal:'):",
+      '                raise',
+    ].join(lineEnding)
+    patched = patched
+      .replace(postAnchor, quotaCheck)
+      .replace(swallowAnchor, swallowGuard)
+  } else {
+    // Upgrade caches written with the hardcoded 60s read timeout: a react-side
+    // timeout shorter than the proxy timeout made the runner abandon and resend
+    // while the first request was still billed upstream (orphan double-billing).
+    const legacyTimeout = [
+      '            response = requests.post(',
+      '                aihubmix_api_url,',
+      '                headers=headers,',
+      '                json=json_data,',
+      '                timeout=60',
+      '            )',
+    ].join(lineEnding)
+    const raisedTimeout = [
+      '            response = requests.post(',
+      '                aihubmix_api_url,',
+      '                headers=headers,',
+      '                json=json_data,',
+      `                timeout=max(60, int(os.environ.get('LOCA_REACT_REQUEST_TIMEOUT_SECONDS', '300'))),`,
+      '            )',
+    ].join(lineEnding)
+    if (patched.includes(legacyTimeout)) {
+      patched = patched.replace(legacyTimeout, raisedTimeout)
+    }
+  }
+
+  return patched
+}
+
+async function patchLocaReactRetry(): Promise<void> {
+  const path = resolve(upstreamRoot, 'inference/run_react.py')
+  const source = await readFile(path, 'utf8')
+  const patched = patchLocaReactRetrySource(source)
+  if (patched !== source) {
+    await writeFile(path, patched, 'utf8')
+    console.log('Patched LOCA react retry policy to bound invalid-response retries.')
   }
 }
 
@@ -645,6 +831,7 @@ async function prepare(args: Arguments): Promise<void> {
   await patchLocaPythonExecutable()
   await patchLocaFilesystemLogging()
   await patchLocaPythonExecute()
+  await patchLocaReactRetry()
   if (args.install) {
     const result = await runProcess(python, ['-m', 'pip', 'install', '-e', upstreamRoot], process.env, upstreamRoot)
     if (result.exitCode !== 0 || result.timedOut) throw new Error(`LOCA-bench installation failed with exit code ${result.exitCode}`)
@@ -656,6 +843,12 @@ async function prepare(args: Arguments): Promise<void> {
 
 export function contextConfig(args: Pick<Arguments, 'modelContextSize' | 'maxTokens' | 'maxTokensProvided'>): typeof defaultContextManagementConfig {
   const modelMaxContext = args.modelContextSize
+  if (args.maxTokensProvided && args.maxTokens >= modelMaxContext) {
+    throw new Error(
+      `--max-tokens (${args.maxTokens}) must be smaller than --model-context-size (${modelMaxContext}). ` +
+      'Pass the model\'s real output window together with its real context window (glm-5.3: 131072 within 1000000).',
+    )
+  }
   const explicitMargin = process.env.LOCA_SAFE_OUTPUT_MARGIN ?? process.env.RULER_SAFE_OUTPUT_MARGIN
   if (explicitMargin !== undefined && (!Number.isFinite(Number(explicitMargin)) || Number(explicitMargin) < 0)) {
     throw new Error('LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number')
@@ -774,6 +967,7 @@ async function runLoca(args: Arguments): Promise<LocaResultsSummary> {
     '-m', args.model ?? model,
     '--max-context-size', String(args.maxContextSize),
     '--max-tokens', String(args.maxTokens),
+    '--max-tool-uses', String(positive(process.env.LOCA_MAX_TOOL_USES, 64, 'LOCA_MAX_TOOL_USES')),
     '--max-workers', String(args.maxWorkers),
     '--timeout', String(args.timeout),
     '--output-dir', output,
