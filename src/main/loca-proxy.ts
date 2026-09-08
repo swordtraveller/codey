@@ -28,6 +28,7 @@ export type LocaProxyOptions = {
   contextConfig?: Partial<ContextManagementConfig>
   rhaiScript?: string
   tracePath?: string
+  upstreamTimeoutMs?: number
 }
 
 export type LocaProxy = {
@@ -128,10 +129,14 @@ async function forward(request: OpenAIRequest, options: LocaProxyOptions): Promi
     'content-type': 'application/json',
     authorization: `Bearer ${options.targetApiKey}`,
   }
+  // A dead upstream connection can hang a plain fetch indefinitely (observed
+  // 76 minutes); abort so the runner can retry instead of stalling the task.
+  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? 300_000
   return fetch(locaUpstreamEndpoint(options.targetBaseUrl), {
     method: 'POST',
     headers,
     body: JSON.stringify({ ...request, model: request.model || options.modelConfig.modelName }),
+    signal: AbortSignal.timeout(upstreamTimeoutMs),
   })
 }
 
@@ -178,7 +183,28 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       ...payload,
       messages: toProviderMessages(contextResult.messages),
     }
-    const upstream = await forward(managedRequest, options)
+    let upstream: Response
+    try {
+      upstream = await forward(managedRequest, options)
+    } catch (error) {
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+      const message = timedOut
+        ? `Upstream timeout after ${options.upstreamTimeoutMs ?? 300_000}ms`
+        : error instanceof Error ? error.message : 'LOCA proxy forward failed'
+      await appendTrace(options, {
+        timestamp: new Date().toISOString(),
+        durationMs: performance.now() - started,
+        upstreamEndpoint,
+        strategy,
+        originalTokens: contextResult.metrics.originalTokens,
+        compressedTokens: contextResult.metrics.compressedTokens,
+        compressionRatio: contextResult.metrics.compressionRatio,
+        coldRecallCount,
+        error: message,
+      })
+      sendJson(response, timedOut ? 504 : 502, { error: { message } })
+      return
+    }
     const text = await upstream.text()
     response.statusCode = upstream.status
     response.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json')

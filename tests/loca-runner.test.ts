@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { resolve } from 'node:path'
 import {
   applyFixtureContextTokens,
   configurationServerTypes,
@@ -144,6 +145,11 @@ describe('LOCA runner arguments and result validation', () => {
     expect(locaConfigSourcePath(args)).toMatch(/tests[\\/]performance[\\/]loca[\\/]configs[\\/]filesystem_only\.json$/)
   })
 
+  it('resolves a repo-relative --config path before falling back to the upstream cache', () => {
+    const args = parseArguments(['--config', 'tests/performance/loca/configs/swe_flask5014.json'])
+    expect(locaConfigSourcePath(args)).toBe(resolve('tests/performance/loca/configs/swe_flask5014.json'))
+  })
+
   it('selects and parameterizes the long-context filesystem fixture', () => {
     const args = parseArguments(['--smoke', '--filesystem-only', '--long-context', '--fixture-context-tokens', '4096'])
     expect(locaConfigSourcePath(args).replaceAll('\\', '/')).toContain('/tests/performance/loca/configs/filesystem_only_long.json')
@@ -227,6 +233,11 @@ describe('LOCA runner arguments and result validation', () => {
       '        except subprocess.TimeoutExpired:',
       '            execution_time = time.time() - start_time',
       '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+      '        output_parts = []',
+      '        if result.stdout:',
+      '            output_parts.append(result.stdout.rstrip())',
+      '        if result.stderr:',
+      '            output_parts.append(result.stderr.rstrip())',
     ].join('\n')
 
     const patched = patchLocaPythonExecuteSource(source)
@@ -242,6 +253,10 @@ describe('LOCA runner arguments and result validation', () => {
     expect(patched).toContain('subprocess.Popen(')
     expect(patched).toContain('stdin=subprocess.DEVNULL,')
     expect(patched).toContain('_kill_process_tree(process)')
+    expect(patched).toContain('# Codey LOCA python_execute output truncation patch')
+    expect(patched).toContain('def _clip(text: str, limit: int = 2000) -> str:')
+    expect(patched).toContain('output_parts.append(_clip(result.stdout.rstrip()))')
+    expect(patched).toContain('output_parts.append(_clip(result.stderr.rstrip()))')
     expect(patchLocaPythonExecuteSource(patched)).toBe(patched)
   })
 
@@ -267,6 +282,11 @@ describe('LOCA runner arguments and result validation', () => {
       '                stdout=subprocess.PIPE,',
       '                stderr=subprocess.PIPE,',
       '            )',
+      '        output_parts = []',
+      '        if result.stdout:',
+      '            output_parts.append(result.stdout.rstrip())',
+      '        if result.stderr:',
+      '            output_parts.append(result.stderr.rstrip())',
     ].join('\n')
 
     const patched = patchLocaPythonExecuteSource(source)
@@ -299,6 +319,11 @@ describe('LOCA runner arguments and result validation', () => {
       '        except subprocess.TimeoutExpired:',
       '            execution_time = time.time() - start_time',
       '            return f"=== EXECUTION TIMEOUT ===\\nExecution timed out after {timeout} seconds\\nExecution time: {execution_time:.3f} seconds"',
+      '        output_parts = []',
+      '        if result.stdout:',
+      '            output_parts.append(result.stdout.rstrip())',
+      '        if result.stderr:',
+      '            output_parts.append(result.stderr.rstrip())',
     ].join('\n')
 
     const patched = patchLocaPythonExecuteSource(source)

@@ -1,4 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -323,6 +324,34 @@ export function patchLocaPythonExecuteSource(source: string): string {
     )
   }
 
+  const truncationMarker = '# Codey LOCA python_execute output truncation patch'
+  if (!patched.includes(truncationMarker)) {
+    // Unbounded tool output can blow up the caller's context budget with a
+    // single huge run (observed: one full-suite pytest dump ≈ 98k tokens).
+    const buildAnchor = '        output_parts = []'
+    const stdoutAnchor = '            output_parts.append(result.stdout.rstrip())'
+    const stderrAnchor = '            output_parts.append(result.stderr.rstrip())'
+    if (!patched.includes(buildAnchor) || !patched.includes(stdoutAnchor) || !patched.includes(stderrAnchor)) {
+      throw new Error('Unsupported LOCA python_execute output truncation patch format')
+    }
+    const clipper = [
+      '',
+      `        # ${truncationMarker}`,
+      '        def _clip(text: str, limit: int = 2000) -> str:',
+      '            if len(text) <= limit:',
+      '                return text',
+      '            dropped = len(text) - limit',
+      '            return (',
+      '                text[:limit]',
+      '                + "\\n...[" + str(dropped) + " characters truncated - narrow the output, e.g. a single test id with -q, or print a summary]"',
+      '            )',
+    ].join(lineEnding)
+    patched = patched
+      .replace(buildAnchor, buildAnchor + clipper)
+      .replace(stdoutAnchor, '            output_parts.append(_clip(result.stdout.rstrip()))')
+      .replace(stderrAnchor, '            output_parts.append(_clip(result.stderr.rstrip()))')
+  }
+
   return patched
 }
 
@@ -442,7 +471,7 @@ async function terminateProcessTree(child: ChildProcess): Promise<void> {
     child.kill('SIGTERM')
     return
   }
-  await new Promise<void>((resolveKill) => {
+  const taskkill = (): Promise<void> => new Promise<void>((resolveKill) => {
     const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
       stdio: 'ignore',
       shell: false,
@@ -454,6 +483,14 @@ async function terminateProcessTree(child: ChildProcess): Promise<void> {
     })
     killer.once('close', () => resolveKill())
   })
+  await taskkill()
+  // A tree kill can miss blocked children; verify and escalate once.
+  const exited = new Promise<void>((resolveExited) => child.once('close', resolveExited))
+  await Promise.race([exited, new Promise<void>((resolveWait) => setTimeout(resolveWait, 10_000))])
+  if (child.exitCode === null) {
+    child.kill('SIGKILL')
+    await taskkill()
+  }
 }
 
 async function runProcess(
@@ -650,7 +687,10 @@ export function locaConfigSourcePath(args: Pick<Arguments, 'config' | 'configPro
       ? 'tests/performance/loca/configs/filesystem_only_long.json'
       : 'tests/performance/loca/configs/filesystem_only.json')
   }
-  return isAbsolute(args.config) ? args.config : resolve(upstreamRoot, args.config)
+  if (isAbsolute(args.config)) return args.config
+  // 仓库内相对路径(如 tests/performance/loca/configs/*.json)优先于上游缓存路径
+  const repoRelative = resolve(root, args.config)
+  return existsSync(repoRelative) ? repoRelative : resolve(upstreamRoot, args.config)
 }
 
 
@@ -716,6 +756,7 @@ async function runLoca(args: Arguments): Promise<LocaResultsSummary> {
       contextConfig: contextConfig(args),
       rhaiScript: args.strategy === 'rhai' ? script : undefined,
       tracePath,
+      upstreamTimeoutMs: positive(process.env.LOCA_UPSTREAM_TIMEOUT_MS, 300_000, 'LOCA_UPSTREAM_TIMEOUT_MS') * 1_000,
     })
     baseUrl = `http://127.0.0.1:${proxy.port}/v1`
   }

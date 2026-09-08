@@ -87,6 +87,32 @@ Expected: the first request passes uncompressed; from the second request on, `co
 
 This fixture is deliberately limited to `filesystem` and `claim_done`; it does not represent LOCA's full multi-service task set.
 
+## SWE-bench coding task (repo fix)
+
+`tests/performance/loca/fixtures/swe_repo_fix.py` wraps a SWE-bench Verified instance as a deterministic coding task: the agent receives the original issue text (`problem_statement`) plus a repository snapshot and must fix it by editing `src/` only. Judging is binary — `resolved = 1` iff every baseline file outside `src/` is byte-identical (hash check), all fail-to-pass tests turn green, and all pass-to-pass tests stay green after the hidden test patch is applied at grading time. `info.failure_reason` distinguishes `pass | f2p | p2p | tampered`.
+
+Materials never enter git (license-safe pattern): a fetch script builds everything into the ignored `tests/performance/.cache/swe-materials/<instance_id>/` — repo snapshot at `base_commit`, a pinned dependency venv (the "era recipe", e.g. pytest 8.x + werkzeug 2.3.8 for the flask instance on Python 3.12), the hidden test patch, and the gold patch used only for offline validation.
+
+```powershell
+# 1) prepare + offline red/green validation (no model involved)
+npx tsx scripts/swe-bench-prepare.ts --instance pallets__flask-5014 --verify
+
+# 2) run one seed with its own per-task timeout (recommended: one invocation per seed
+#    so a slow seed cannot starve the others; timeout counts as a failed seed)
+pnpm test:performance:loca -- `
+  --config tests/performance/loca/configs/swe_flask5014.json `
+  --samples 1 `
+  --max-context-size 128000 `
+  --model-context-size 128000 `
+  --max-tokens 1024 `
+  --max-workers 1 `
+  --timeout 600 `
+  --total-timeout 1800 `
+  --output tests/performance/results/swe-A-layered
+```
+
+A `run_tests.py` helper is placed next to the repo copy so the agent can run the pinned test environment (`python run_tests.py tests/ -q`). Adding another instance requires a recipe entry in `scripts/swe-bench-prepare.ts` and a small config JSON.
+
 ## Filesystem-only verification
 
 Some upstream LOCA configurations require service-specific MCP servers (for example Canvas, email, Excel, or cloud backends). Those tasks are unsuitable for a quick verification of Codey's context proxy because a missing or incompatible external service can consume the full task timeout before the model reaches a meaningful step.

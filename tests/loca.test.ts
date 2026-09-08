@@ -41,6 +41,19 @@ async function readTrace(path: string): Promise<Record<string, unknown>> {
   throw new Error(`trace was not written: ${path}`)
 }
 
+async function neverRespondingServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer(() => {
+    // 接受请求但永不响应,模拟死连接
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('test server did not start')
+  return {
+    url: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  }
+}
+
 describe('LOCA context proxy small-window regression', () => {
   function longContextTaskMessage(): string {
     const filler = 'archived '.repeat(400)
@@ -161,6 +174,41 @@ describe('LOCA context proxy', () => {
       expect(trace.upstreamStatus).toBe(429)
       expect(trace.error).toBe('Upstream returned HTTP 429')
       expect(JSON.stringify(trace)).not.toContain('super-secret-key')
+    } finally {
+      await proxy.close()
+      await upstream.close()
+      await rm(traceDir, { recursive: true, force: true })
+    }
+  })
+
+  it('死连接在超时后返回 504 而不是无限挂起', async () => {
+    const upstream = await neverRespondingServer()
+    const traceDir = await mkdtemp(join(tmpdir(), 'codey-loca-trace-'))
+    const tracePath = join(traceDir, 'trace.jsonl')
+    const proxy = await startLocaContextProxy({
+      targetBaseUrl: upstream.url,
+      targetApiKey: 'target-key',
+      tracePath,
+      upstreamTimeoutMs: 200,
+      modelConfig: { ...defaultModelConfig, modelMaxContext: 10_000 },
+      contextConfig: { ...defaultContextManagementConfig, layeredEnabled: false, hotTokenBudget: 10_000 },
+    })
+
+    try {
+      const started = Date.now()
+      const response = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'hang test' }],
+        }),
+      })
+      expect(response.status).toBe(504)
+      expect(Date.now() - started).toBeLessThan(5_000)
+
+      const trace = await readTrace(tracePath)
+      expect(trace.error).toBe('Upstream timeout after 200ms')
     } finally {
       await proxy.close()
       await upstream.close()
