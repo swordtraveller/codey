@@ -1,5 +1,6 @@
 import type { ImageAttachment } from '../shared/image-attachments'
 import type { ContextAction, ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
+import { resolveMaxInputTokens } from '../shared/types'
 import type { ToolCall } from './tools'
 import { countContextMessageTokens, countContextTokens, createContextTokenCounter, normalizeToolCallSequence } from './context-utils'
 import { applyCustomRhaiStrategy } from './rhai-strategy'
@@ -251,22 +252,21 @@ function metrics(originalTokens: number, compressedTokens: number, modelConfig: 
     originalTokens,
     compressedTokens,
     modelMaxContext: modelConfig.modelMaxContext,
-    triggerThreshold: Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin),
+    maxInputTokens: resolveMaxInputTokens(contextConfig, modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens),
     compressionRatio: compressedTokens ? originalTokens / compressedTokens : 1,
     ...state,
   }
 }
 
 function manageSingleLayer(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig): ContextResult {
-  const effectiveOutputMargin = contextConfig.safeOutputMargin >= modelConfig.modelMaxContext ? 0 : Math.max(0, contextConfig.safeOutputMargin)
-  const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - effectiveOutputMargin)
+  const maxInputTokens = resolveMaxInputTokens(contextConfig, modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens)
   const counter = createContextTokenCounter(tools)
   const originalTokens = counter.request(messages)
   let managed = messages
   let filtered = false
   let rewritten = false
   let truncated = false
-  if (originalTokens >= triggerThreshold) {
+  if (originalTokens >= maxInputTokens) {
     const recentStart = getRecentStart(messages, contextConfig.recentKeepRounds)
     const system = messages.slice(0, 1)
     let older = messages.slice(1, recentStart)
@@ -285,7 +285,7 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
       managedMessageTokens = systemTokens + olderTokens + recentTokens
       filtered = olderTokens < before
     }
-    if (managedTokens() >= triggerThreshold && contextConfig.rewriteEnabled) {
+    if (managedTokens() >= maxInputTokens && contextConfig.rewriteEnabled) {
       const before = olderTokens
       older = older.map((message) => transformMessage(message, rewriteNaturalLanguage))
       managed = [...system, ...older, ...recent]
@@ -295,7 +295,7 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
     }
     if (contextConfig.truncateEnabled) {
       const rounds = splitRounds(older)
-      while (managedTokens() >= triggerThreshold && rounds.length > 0) {
+      while (managedTokens() >= maxInputTokens && rounds.length > 0) {
         const removed = rounds.shift() ?? []
         olderTokens -= counter.messages(removed)
         managedMessageTokens = systemTokens + olderTokens + recentTokens
@@ -317,11 +317,12 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
 }
 
 function manageLayered(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig, runtime: ContextManagementRuntime): ContextResult {
-  const effectiveOutputMargin = contextConfig.safeOutputMargin >= modelConfig.modelMaxContext ? 0 : Math.max(0, contextConfig.safeOutputMargin)
-  const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - effectiveOutputMargin)
+  const totalTokens = Math.max(1, Math.floor(modelConfig.modelMaxContext))
   const counter = createContextTokenCounter(tools)
   const toolDefinitionTokens = counter.toolDefinitionTokens
-  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, triggerThreshold - toolDefinitionTokens))
+  // The user-configured hot budget wins; the physical request cap is the model
+  // window itself (tool definitions must still fit or nothing can be sent).
+  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, totalTokens - toolDefinitionTokens))
   const highWatermark = Math.max(1, Math.floor(hotBudget * 0.9))
   const lowWatermark = Math.max(1, Math.floor(hotBudget * 0.8))
   const messageCount = (items: ContextMessage[]) => counter.messages(items)
@@ -379,7 +380,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   let hotMessageTokens = messageCount(system) + messageCount(hot)
   const hotTokens = () => counter.layerBaseTokens + hotMessageTokens
   const hotRequestTokens = () => counter.requestBaseTokens + hotMessageTokens
-  const fitsHardLimit = () => hotTokens() < hotBudget && hotRequestTokens() < triggerThreshold
+  const fitsHardLimit = () => hotTokens() < hotBudget && hotRequestTokens() < totalTokens
   const replacementSet = replaceableIds([...historicalHot, ...recalled, ...currentHot])
   const demote = (items: ContextMessage[]): void => {
     const selected = new Set(items)
@@ -425,10 +426,10 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const latestOnlyLayerTokens = counter.layerBaseTokens + latestOnlyMessageTokens
   const latestOnlyRequestTokens = counter.requestBaseTokens + latestOnlyMessageTokens
   let overflow: ContextResult['overflow']
-  if (latestUser && (latestOnlyLayerTokens >= hotBudget || latestOnlyRequestTokens >= triggerThreshold)) {
+  if (latestUser && (latestOnlyLayerTokens >= hotBudget || latestOnlyRequestTokens >= totalTokens)) {
     overflow = {
       reason: 'latest_user_too_large',
-      requiredReleaseTokens: Math.max(1, latestOnlyLayerTokens - hotBudget + 1, latestOnlyRequestTokens - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, latestOnlyLayerTokens - hotBudget + 1, latestOnlyRequestTokens - totalTokens + 1),
     }
   }
 
@@ -483,7 +484,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     const pinnedBlockers = hot.some((message) => message.pinnedToHot === true)
     overflow = {
       reason: pinnedBlockers ? 'pinned_hot_overflow' : current.length > 1 ? 'current_round_too_large' : 'hot_overflow',
-      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, hotRequestTokens() - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, hotRequestTokens() - totalTokens + 1),
     }
   }
 

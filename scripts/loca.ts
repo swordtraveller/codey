@@ -849,23 +849,19 @@ export function contextConfig(args: Pick<Arguments, 'modelContextSize' | 'maxTok
       'Pass the model\'s real output window together with its real context window (glm-5.3: 131072 within 1000000).',
     )
   }
-  const explicitMargin = process.env.LOCA_SAFE_OUTPUT_MARGIN ?? process.env.RULER_SAFE_OUTPUT_MARGIN
-  if (explicitMargin !== undefined && (!Number.isFinite(Number(explicitMargin)) || Number(explicitMargin) < 0)) {
-    throw new Error('LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number')
+  const explicitMaxInput = process.env.LOCA_MAX_INPUT_TOKENS ?? process.env.RULER_MAX_INPUT_TOKENS
+  if (explicitMaxInput !== undefined && (!Number.isFinite(Number(explicitMaxInput)) || Number(explicitMaxInput) < 0)) {
+    throw new Error('LOCA_MAX_INPUT_TOKENS must be a non-negative number')
   }
-  // The margin must shrink with small windows: clamping the 16k default to a 4k window
-  // collapses the compression trigger threshold to ~1 token and every request overflows.
-  const fallbackMargin = Math.min(defaultContextManagementConfig.safeOutputMargin, Math.floor(modelMaxContext / 8))
-  const safeOutputMargin = explicitMargin !== undefined ? Number(explicitMargin)
-    : args.maxTokensProvided ? args.maxTokens
-      : fallbackMargin
+  // maxInputTokens = 0 means "derive from the model windows at runtime"
+  // (input = floor(max((total - output) * 0.95, total * 0.618))).
   return {
     ...defaultContextManagementConfig,
     layeredEnabled: process.env.LOCA_LAYERED !== 'false',
     hotTokenBudget: Number(process.env.LOCA_HOT_TOKEN_BUDGET ?? process.env.RULER_HOT_TOKEN_BUDGET ?? defaultContextManagementConfig.hotTokenBudget),
     warmTokenBudget: Number(process.env.LOCA_WARM_TOKEN_BUDGET ?? process.env.RULER_WARM_TOKEN_BUDGET ?? defaultContextManagementConfig.warmTokenBudget),
     coldRecallTokenBudget: Number(process.env.LOCA_COLD_RECALL_TOKEN_BUDGET ?? process.env.RULER_COLD_RECALL_TOKEN_BUDGET ?? defaultContextManagementConfig.coldRecallTokenBudget),
-    safeOutputMargin: Math.min(Math.max(0, modelMaxContext - 1), Math.max(0, safeOutputMargin)),
+    maxInputTokens: Math.min(Math.max(0, modelMaxContext), Math.max(0, explicitMaxInput !== undefined ? Number(explicitMaxInput) : 0)),
   }
 }
 
@@ -933,6 +929,7 @@ async function runLoca(args: Arguments): Promise<LocaResultsSummary> {
     apiKey,
     modelName: model,
     modelMaxContext: args.modelContextSize,
+    modelMaxOutputTokens: args.maxTokensProvided ? args.maxTokens : undefined,
   }
   const output = outputPath(args)
   await mkdir(output, { recursive: true })

@@ -50,7 +50,8 @@ export type ContextManagementConfig = {
   filterEnabled: boolean
   rewriteEnabled: boolean
   truncateEnabled: boolean
-  safeOutputMargin: number
+  /** Default mode: hard cap on model input tokens (compression trigger line). */
+  maxInputTokens: number
   recentKeepRounds: number
   hotTokenBudget: number
   warmTokenBudget: number
@@ -65,7 +66,7 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   filterEnabled: true,
   rewriteEnabled: true,
   truncateEnabled: true,
-  safeOutputMargin: 16_000,
+  maxInputTokens: 0,
   recentKeepRounds: 5,
   hotTokenBudget: 64_000,
   warmTokenBudget: 32_000,
@@ -87,14 +88,14 @@ export const defaultAgentLimitsConfig: AgentLimitsConfig = {
 }
 
 /**
- * Derives experienced-context budgets from a model's windows.
+ * Derives experienced context budgets from a model's windows.
  *
- * output = max output tokens when known, otherwise half the context window.
- * hot = floor(max((total - output) * 0.95, total * 0.618))
- * warm = floor(hot * 10); cold recall = floor(hot * 0.1)
+ * input = floor(max((total - output) * 0.95, total * 0.618)) where output is
+ * the model's max output tokens when known, otherwise half the context window.
+ * warm = floor(input * 10); cold recall = floor(input * 0.1).
  */
 export function deriveContextBudgets(total: number, maxOutputTokens?: number): {
-  safeOutputMargin: number
+  maxInputTokens: number
   hotTokenBudget: number
   warmTokenBudget: number
   coldRecallTokenBudget: number
@@ -103,13 +104,21 @@ export function deriveContextBudgets(total: number, maxOutputTokens?: number): {
   const output = maxOutputTokens !== undefined && maxOutputTokens >= 1
     ? Math.floor(maxOutputTokens)
     : Math.floor(context / 2)
-  const hot = Math.max(1, Math.floor(Math.max((context - output) * 0.95, context * 0.618)))
+  const input = Math.max(1, Math.floor(Math.max((context - output) * 0.95, context * 0.618)))
   return {
-    safeOutputMargin: Math.max(1, output),
-    hotTokenBudget: hot,
-    warmTokenBudget: Math.floor(hot * 10),
-    coldRecallTokenBudget: Math.floor(hot * 0.1),
+    maxInputTokens: input,
+    hotTokenBudget: input,
+    warmTokenBudget: Math.floor(input * 10),
+    coldRecallTokenBudget: Math.floor(input * 0.1),
   }
+}
+
+/** The max input tokens to use when no explicit value is configured. */
+export function resolveMaxInputTokens(config: ContextManagementConfig, total: number, maxOutputTokens?: number): number {
+  if (Number.isFinite(config.maxInputTokens) && config.maxInputTokens >= 1) {
+    return Math.min(Math.floor(config.maxInputTokens), Math.max(1, Math.floor(total)))
+  }
+  return deriveContextBudgets(total, maxOutputTokens).maxInputTokens
 }
 
 export type AppConfig = {
@@ -174,7 +183,7 @@ export type ContextMetrics = {
   originalTokens: number
   compressedTokens: number
   modelMaxContext: number
-  triggerThreshold: number
+  maxInputTokens: number
   compressionRatio: number
   layered: boolean
   recalled: boolean
@@ -368,7 +377,7 @@ export type ContextDebugSnapshot = {
   roundCount: number
   createdAt: string
   modelMaxContext: number
-  triggerThreshold: number
+  maxInputTokens: number
   systemTokens: number
   toolDefinitionTokens: number
   hotTokens: number
@@ -469,7 +478,7 @@ export type ColdRecallPreview = {
 
 export type TokenLimitSimulation = {
   requestTokens: number
-  triggerThreshold: number
+  maxInputTokens: number
   modelMaxContext: number
   status: 'normal' | 'warning' | 'exceeded'
 }

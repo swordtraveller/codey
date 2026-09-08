@@ -93,9 +93,12 @@ async function main(): Promise<void> {
     hotTokenBudget: Number(process.env.RULER_HOT_TOKEN_BUDGET ?? 64_000),
     warmTokenBudget: Number(process.env.RULER_WARM_TOKEN_BUDGET ?? 32_000),
     coldRecallTokenBudget: Number(process.env.RULER_COLD_RECALL_TOKEN_BUDGET ?? 8_000),
-    // Scale the margin with the window: a fixed 16k margin collapses the trigger
-    // threshold to ~1 token for small evaluation windows (e.g. 4k).
-    safeOutputMargin: Number(process.env.RULER_SAFE_OUTPUT_MARGIN ?? Math.min(16_000, Math.floor(modelConfig.modelMaxContext / 8))),
+    // 0 = derive at runtime from the model windows
+    // (input = floor(max((total - output) * 0.95, total * 0.618))).
+    maxInputTokens: Math.min(
+      Math.max(0, modelConfig.modelMaxContext),
+      Math.max(0, Number(process.env.RULER_MAX_INPUT_TOKENS ?? 0)),
+    ),
   }
   const result = args.official
     ? await runOfficialRulerEvaluation({

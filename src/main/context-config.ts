@@ -8,19 +8,21 @@ import {
 
 export function normalizeContextManagementConfig(
   value: Partial<ContextManagementConfig> | null | undefined,
-  legacy?: { safeOutputMargin?: number; recentKeepRounds?: number },
 ): ContextManagementConfig {
   const merged = {
     ...defaultContextManagementConfig,
-    ...legacy,
     ...value,
   }
+  // maxInputTokens = 0 means "not set"; runtime derives it from the model windows.
+  const maxInputTokens = Number.isFinite(merged.maxInputTokens) && merged.maxInputTokens >= 1
+    ? Math.floor(merged.maxInputTokens)
+    : 0
   return {
     layeredEnabled: Boolean(merged.layeredEnabled),
     filterEnabled: Boolean(merged.filterEnabled),
     rewriteEnabled: Boolean(merged.rewriteEnabled),
     truncateEnabled: Boolean(merged.truncateEnabled),
-    safeOutputMargin: Math.floor(merged.safeOutputMargin),
+    maxInputTokens,
     recentKeepRounds: Math.floor(merged.recentKeepRounds),
     hotTokenBudget: Math.floor(merged.hotTokenBudget),
     warmTokenBudget: Math.floor(merged.warmTokenBudget),
@@ -31,7 +33,7 @@ export function normalizeContextManagementConfig(
 }
 
 export function isValidContextManagementConfig(config: ContextManagementConfig): boolean {
-  return Number.isInteger(config.safeOutputMargin) && config.safeOutputMargin >= 1 &&
+  return Number.isInteger(config.maxInputTokens) && config.maxInputTokens >= 0 &&
     Number.isInteger(config.recentKeepRounds) && config.recentKeepRounds >= 1 && config.recentKeepRounds <= 20 &&
     Number.isInteger(config.hotTokenBudget) && config.hotTokenBudget >= 1_000 &&
     Number.isInteger(config.warmTokenBudget) && config.warmTokenBudget >= 0 &&

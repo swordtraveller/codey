@@ -80,7 +80,7 @@ fn main() {
             return;
         }
     };
-    let content = request.get("content").cloned().unwrap_or(Value::Null);
+    let context = request.get("context").cloned().unwrap_or(Value::Null);
 
     let mut engine = Engine::new();
     engine.set_max_operations(MAX_OPERATIONS);
@@ -88,6 +88,24 @@ fn main() {
     engine.set_max_array_size(10_000);
     engine.set_max_map_size(10_000);
     engine.set_max_string_size(1_000_000);
+    if let Some(module_value) = request.get("contextModule") {
+        let mut module = rhai::Module::new();
+        if let Some(total) = module_value.get("model_max_context").and_then(Value::as_i64) {
+            module.set_var("model_max_context", total);
+        }
+        match module_value.get("model_max_output") {
+            Some(Value::Number(number)) => {
+                if let Some(output) = number.as_i64() {
+                    module.set_var("model_max_output", output);
+                }
+            }
+            _ => {
+                // Unknown output window: expose the constant as the unit value ().
+                module.set_var("model_max_output", Dynamic::UNIT);
+            }
+        }
+        engine.register_static_module("context", module.into());
+    }
     let mut scope = Scope::new();
     let ast = match engine.compile(script) {
         Ok(ast) => ast,
@@ -96,7 +114,7 @@ fn main() {
             return;
         }
     };
-    let argument = to_dynamic(content);
+    let argument = to_dynamic(context);
     let result = match engine.call_fn::<Dynamic>(&mut scope, &ast, "manage", (argument,)) {
         Ok(value) => value,
         Err(error) => {

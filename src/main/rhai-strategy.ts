@@ -13,15 +13,10 @@ export type RhaiStrategyRuntime = {
 
 type RhaiRequest = {
   script: string
-  content: {
+  context: {
     messages: Array<ContextMessage & { id: string }>
     tools: object[]
-    budget: number
     config: {
-      modelMaxContext: number
-      triggerThreshold: number
-      hotTokenBudget: number
-      warmTokenBudget: number
       recentKeepRounds: number
     }
     runtime: {
@@ -53,25 +48,29 @@ function findRunner(): string | undefined {
 
 function runRhai(request: RhaiRequest): RhaiResponse {
   const runner = findRunner()
-  if (!runner) return { ok: false, error: 'Rhai runner is unavailable' }
-  const child = spawnSync(runner, [], {
+  if (!runner) {
+    return { ok: false, error: 'rhai-runner is not available' }
+  }
+  const result = spawnSync(runner, {
     input: JSON.stringify(request),
     encoding: 'utf8',
-    timeout: 1_000,
     windowsHide: true,
-    maxBuffer: 4 * 1024 * 1024,
+    timeout: 5_000,
   })
-  if (child.error) return { ok: false, error: child.error.message }
-  if (child.status !== 0) return { ok: false, error: child.stderr.trim() || `Rhai runner exited with code ${child.status}` }
+  if (result.error || result.status !== 0 || !result.stdout) {
+    return { ok: false, error: 'rhai-runner failed' }
+  }
   try {
-    return JSON.parse(child.stdout) as RhaiResponse
+    const parsed = JSON.parse(result.stdout) as RhaiResponse
+    if (parsed.ok === true || parsed.ok === false) return parsed
+    return { ok: false, error: 'rhai-runner returned an invalid response' }
   } catch {
-    return { ok: false, error: 'Rhai runner returned invalid JSON' }
+    return { ok: false, error: 'rhai-runner returned invalid JSON' }
   }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function selectedMessages(result: unknown): unknown[] | undefined {
@@ -80,17 +79,12 @@ function selectedMessages(result: unknown): unknown[] | undefined {
   return undefined
 }
 
-/**
- * Executes the intentionally small, host-controlled Rhai contract.
- * Scripts may select existing messages, but cannot create or rewrite them.
- * Invalid scripts/results simply fall back to built-in policy.
- */
 export function applyCustomRhaiStrategy(
   messages: ContextMessage[],
   tools: object[],
   modelConfig: ModelConfig,
   contextConfig: ContextManagementConfig,
-  runtime: RhaiStrategyRuntime = {},
+  runtime: RhaiStrategyRuntime,
 ): ContextMessage[] | undefined {
   if (!runtime.allowCustomStrategy || !contextConfig.customStrategyEnabled || !contextConfig.customStrategyScript?.trim()) {
     return undefined
@@ -102,22 +96,15 @@ export function applyCustomRhaiStrategy(
     idByDslId.set(id, message)
     return { ...message, id }
   })
-  const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin)
+  const totalTokens = Math.max(1, Math.floor(modelConfig.modelMaxContext))
   const inferredLatestUserMessageId = [...dslMessages].reverse().find((message) => message.role === 'user')?.id
   const latestUserMessageId = runtime.latestUserMessageId ?? inferredLatestUserMessageId
   const request: RhaiRequest = {
     script: contextConfig.customStrategyScript,
-    content: {
+    context: {
       messages: dslMessages,
       tools,
-      budget: contextConfig.layeredEnabled
-        ? Math.min(contextConfig.hotTokenBudget, triggerThreshold)
-        : triggerThreshold,
       config: {
-        modelMaxContext: modelConfig.modelMaxContext,
-        triggerThreshold,
-        hotTokenBudget: contextConfig.hotTokenBudget,
-        warmTokenBudget: contextConfig.warmTokenBudget,
         recentKeepRounds: contextConfig.recentKeepRounds,
       },
       runtime: {
@@ -125,7 +112,13 @@ export function applyCustomRhaiStrategy(
       },
     },
   }
-  const response = runRhai(request)
+
+  const contextModule = {
+    model_max_context: totalTokens,
+    model_max_output: modelConfig.modelMaxOutputTokens === undefined ? null : modelConfig.modelMaxOutputTokens,
+  }
+
+  const response = runRhaiWithModule(request, contextModule)
   if (!response.ok) return undefined
   const selected = selectedMessages(response.result)
   if (!selected) return undefined
@@ -140,6 +133,32 @@ export function applyCustomRhaiStrategy(
     .filter((message) => selectedIds.has(message.id))
     .map((message) => idByDslId.get(message.id)!)
   const normalized = normalizeToolCallSequence(selectedContextMessages)
-  if (createContextTokenCounter(tools).request(normalized) > triggerThreshold) return undefined
+  // The only physical guard: a request larger than the model context window
+  // cannot be sent. The strategy author owns every other trade-off.
+  if (createContextTokenCounter(tools).request(normalized) > totalTokens) return undefined
   return normalized
+}
+
+function runRhaiWithModule(request: RhaiRequest, contextModule: { model_max_context: number; model_max_output: number | null }): RhaiResponse {
+  const runner = findRunner()
+  if (!runner) {
+    return { ok: false, error: 'rhai-runner is not available' }
+  }
+  const payload = JSON.stringify({ ...request, contextModule })
+  const result = spawnSync(runner, {
+    input: payload,
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 5_000,
+  })
+  if (result.error || result.status !== 0 || !result.stdout) {
+    return { ok: false, error: 'rhai-runner failed' }
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as RhaiResponse
+    if (parsed.ok === true || parsed.ok === false) return parsed
+    return { ok: false, error: 'rhai-runner returned an invalid response' }
+  } catch {
+    return { ok: false, error: 'rhai-runner returned invalid JSON' }
+  }
 }

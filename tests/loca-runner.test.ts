@@ -525,7 +525,7 @@ describe('LOCA runner arguments and result validation', () => {
 })
 
 describe('LOCA context management configuration', () => {
-  const marginEnvVars = ['LOCA_SAFE_OUTPUT_MARGIN', 'RULER_SAFE_OUTPUT_MARGIN'] as const
+  const marginEnvVars = ['LOCA_MAX_INPUT_TOKENS', 'RULER_MAX_INPUT_TOKENS'] as const
   let savedEnv: Record<string, string | undefined>
 
   beforeEach(() => {
@@ -541,11 +541,6 @@ describe('LOCA context management configuration', () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-  })
-
-  it('binds the output margin to an explicitly provided --max-tokens value', () => {
-    const config = contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })
-    expect(config.safeOutputMargin).toBe(256)
   })
 
   it('rejects a --max-tokens that cannot fit inside the model window', () => {
@@ -565,35 +560,31 @@ describe('LOCA context management configuration', () => {
     expect(parseArguments(['--smoke']).maxTokens).toBe(256)
   })
 
-  it('scales the margin with the model window when --max-tokens is not provided', () => {
-    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: false }).safeOutputMargin).toBe(512)
-    expect(contextConfig({ modelContextSize: 8_192, maxTokens: 256, maxTokensProvided: false }).safeOutputMargin).toBe(1_024)
+  it('leaves max input tokens unset (runtime derivation) by default', () => {
+    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: false }).maxInputTokens).toBe(0)
+    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).maxInputTokens).toBe(0)
   })
 
-  it('keeps the 16k default margin for the default 128k full-run window', () => {
-    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).safeOutputMargin).toBe(16_000)
+  it('prefers an explicit LOCA_MAX_INPUT_TOKENS override and clamps it to the window', () => {
+    process.env.LOCA_MAX_INPUT_TOKENS = '2048'
+    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true }).maxInputTokens).toBe(2_048)
+    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).maxInputTokens).toBe(2_048)
   })
 
-  it('prefers an explicit LOCA_SAFE_OUTPUT_MARGIN override over both other strategies', () => {
-    process.env.LOCA_SAFE_OUTPUT_MARGIN = '128'
-    expect(contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true }).safeOutputMargin).toBe(128)
-    expect(contextConfig({ modelContextSize: 128_000, maxTokens: 4_096, maxTokensProvided: false }).safeOutputMargin).toBe(128)
-  })
-
-  it('rejects a non-numeric or negative LOCA_SAFE_OUTPUT_MARGIN instead of producing NaN', () => {
-    process.env.LOCA_SAFE_OUTPUT_MARGIN = 'wat'
+  it('rejects a non-numeric or negative LOCA_MAX_INPUT_TOKENS instead of producing NaN', () => {
+    process.env.LOCA_MAX_INPUT_TOKENS = 'wat'
     expect(() => contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })).toThrow(
-      'LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number',
+      'LOCA_MAX_INPUT_TOKENS must be a non-negative number',
     )
-    process.env.LOCA_SAFE_OUTPUT_MARGIN = '-1'
+    process.env.LOCA_MAX_INPUT_TOKENS = '-1'
     expect(() => contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })).toThrow(
-      'LOCA_SAFE_OUTPUT_MARGIN must be a non-negative number',
+      'LOCA_MAX_INPUT_TOKENS must be a non-negative number',
     )
   })
 
-  it('never reserves more than the window minus one token', () => {
-    process.env.LOCA_SAFE_OUTPUT_MARGIN = '256'
+  it('never sets max input tokens above the model window', () => {
+    process.env.LOCA_MAX_INPUT_TOKENS = '999999'
     const config = contextConfig({ modelContextSize: 200, maxTokens: 100, maxTokensProvided: true })
-    expect(config.safeOutputMargin).toBe(199)
+    expect(config.maxInputTokens).toBe(200)
   })
 })

@@ -301,8 +301,8 @@ async function developProject(
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
-  if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
-    return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
+  if (contextConfig.maxInputTokens > modelConfig.modelMaxContext) {
+    return { project, writtenFiles: [], error: 'Max input tokens must not exceed the model context window' }
   }
 
   const userMessageId = randomUUID()

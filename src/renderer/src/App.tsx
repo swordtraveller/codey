@@ -120,7 +120,7 @@ function formatMessageTime(createdAt: string | undefined): string {
 }
 
 function isValidContextConfig(value: ContextManagementConfig): boolean {
-  return Number.isInteger(value.safeOutputMargin) && value.safeOutputMargin >= 1 &&
+  return Number.isInteger(value.maxInputTokens) && value.maxInputTokens >= 0 &&
     Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
     Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
     Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
@@ -870,16 +870,6 @@ function ContextSettingsFields({
               }}
             />
           </Field>
-          <Field label={t('outputTokenMargin')} required>
-            <Input
-              disabled={disabled}
-              min={1}
-              step={1000}
-              type="number"
-              value={String(value.safeOutputMargin)}
-              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-            />
-          </Field>
         </>
       ) : (
         <>
@@ -934,16 +924,22 @@ function ContextSettingsFields({
           >
             {t('generateExperiencedConfig')}
           </Button>
-          <Field label={t('outputTokenMargin')} required>
-            <Input
-              disabled={disabled}
-              min={1}
-              step={1000}
-              type="number"
-              value={String(value.safeOutputMargin)}
-              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-            />
-          </Field>
+          {strategyMode === 'default' && (
+            <Field label={t('maxInputTokens')} hint={t('maxInputTokensHint')}>
+              <Input
+                disabled={disabled}
+                min={0}
+                step={1000}
+                type="number"
+                value={value.maxInputTokens >= 1 ? String(value.maxInputTokens) : ''}
+                onChange={(_, data) => onChange({
+                  maxInputTokens: data.value === '' || !Number.isFinite(Number(data.value)) || Number(data.value) < 1
+                    ? 0
+                    : Number(data.value),
+                })}
+              />
+            </Field>
+          )}
           {strategyMode === 'layered' && (
             <div className="context-budgets">
               <Field label={t('hotTokenBudget')} required>
@@ -1325,10 +1321,10 @@ export function App(): React.JSX.Element {
   const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
-  const outputMarginError = effectiveModelConfig &&
-    effectiveContextConfig.safeOutputMargin >= effectiveModelConfig.modelMaxContext
-    ? t('outputMarginContextError', {
-        margin: effectiveContextConfig.safeOutputMargin.toLocaleString(),
+  const maxInputTokensError = effectiveModelConfig &&
+    effectiveContextConfig.maxInputTokens > effectiveModelConfig.modelMaxContext
+    ? t('maxInputTokensContextError', {
+        tokens: effectiveContextConfig.maxInputTokens.toLocaleString(),
         context: effectiveModelConfig.modelMaxContext.toLocaleString(),
         model: effectiveModelConfig.name,
       })
@@ -1342,7 +1338,7 @@ export function App(): React.JSX.Element {
   const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
-    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
+    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
     : ''
   const activeConversationKey = activeProject && activeConversation
     ? `${activeProject.id}:${activeConversation.id}`
@@ -1691,12 +1687,6 @@ export function App(): React.JSX.Element {
     } finally {
       setBridgeBusy(false)
     }
-  }
-  function updateAppContextConfig(patch: Partial<ContextManagementConfig>): void {
-    setConfigDraft((current) => ({
-      ...current,
-      contextManagement: { ...current.contextManagement, ...patch },
-    }))
   }
 
   function updateContextDraft(patch: Partial<ContextManagementConfig>): void {
@@ -2154,7 +2144,7 @@ export function App(): React.JSX.Element {
   )
   const minimumModelContext = Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement) ||
-    configDraft.contextManagement.safeOutputMargin >= minimumModelContext
+    configDraft.contextManagement.maxInputTokens > minimumModelContext
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
@@ -2418,8 +2408,8 @@ export function App(): React.JSX.Element {
             onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
             onStop={() => void stopMessage()}
             onSubmit={(content, images) => {
-              if (outputMarginError) {
-                setError(outputMarginError)
+              if (maxInputTokensError) {
+                setError(maxInputTokensError)
                 return false
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
@@ -2527,13 +2517,6 @@ export function App(): React.JSX.Element {
                   <Button appearance="secondary" onClick={addModelConfig}>
                     {t('addModelConfig')}
                   </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedModel?.modelName.trim() || capabilitiesBusy}
-                    onClick={() => void fetchModelCapabilitiesForSelected()}
-                  >
-                    {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
-                  </Button>
                   <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
                     {t('deleteModelConfig')}
                   </Button>
@@ -2565,6 +2548,13 @@ export function App(): React.JSX.Element {
                     placeholder="model-name"
                   />
                 </Field>
+                <Button
+                  appearance="secondary"
+                  disabled={!selectedModel?.modelName.trim() || capabilitiesBusy}
+                  onClick={() => void fetchModelCapabilitiesForSelected()}
+                >
+                  {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
+                </Button>
                 <Field label={t('maximumContextTokens')} required>
                   <Input
                     min={1000}
@@ -2612,20 +2602,6 @@ export function App(): React.JSX.Element {
                     />
                   </div>
                 </div>
-              </section>
-              <section className="settings-group">
-                <h2>{t('contextSettings')}</h2>
-                <ContextSettingsFields
-                  disabled={interactionLocked}
-                  modelConfigs={configDraft.modelConfigs}
-                  activeModelConfigId={configDraft.activeModelConfigId}
-                  onModelConfigChange={(modelConfigId) => setConfigDraft((current) => ({
-                    ...current,
-                    activeModelConfigId: modelConfigId || null,
-                  }))}
-                  value={configDraft.contextManagement}
-                  onChange={updateAppContextConfig}
-                />
               </section>
               <section className="settings-group">
                 <h2>{t('languageSettings')}</h2>

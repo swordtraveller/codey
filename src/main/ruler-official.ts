@@ -206,7 +206,7 @@ function evaluationConfig(modelConfig: ModelConfig, overrides: Partial<ContextMa
     ...overrides,
     hotTokenBudget: Math.max(1_000, overrides.hotTokenBudget ?? defaultContextManagementConfig.hotTokenBudget),
     warmTokenBudget: Math.max(0, overrides.warmTokenBudget ?? defaultContextManagementConfig.warmTokenBudget),
-    safeOutputMargin: Math.min(modelConfig.modelMaxContext - 1, overrides.safeOutputMargin ?? defaultContextManagementConfig.safeOutputMargin),
+    maxInputTokens: Math.min(modelConfig.modelMaxContext, overrides.maxInputTokens || 0),
   }
 }
 

@@ -60,13 +60,18 @@ describe('LOCA context proxy small-window regression', () => {
     return `The following archive is intentionally verbose background context.\n\n<background>\n${filler}\n</background>\n\nWrite CODEY-FILESYSTEM-LONG-CONTEXT-OK to answer.txt, then claim done.`
   }
 
-  async function roundTrip(safeOutputMargin: number): Promise<{ status: number; body: string }> {
+  async function roundTrip(options: { maxInputTokens?: number; hotTokenBudget?: number }): Promise<{ status: number; body: string }> {
     const upstream = await listen()
     const proxy = await startLocaContextProxy({
       targetBaseUrl: upstream.url,
       targetApiKey: 'target-key',
       modelConfig: { ...defaultModelConfig, modelName: 'test-model', modelMaxContext: 4_096 },
-      contextConfig: { ...defaultContextManagementConfig, layeredEnabled: true, safeOutputMargin },
+      contextConfig: {
+        ...defaultContextManagementConfig,
+        layeredEnabled: true,
+        maxInputTokens: options.maxInputTokens ?? 0,
+        hotTokenBudget: options.hotTokenBudget ?? defaultContextManagementConfig.hotTokenBudget,
+      },
     })
     try {
       const response = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
@@ -84,20 +89,40 @@ describe('LOCA context proxy small-window regression', () => {
     }
   }
 
-  it('rejects every request when the margin collapses a 4k window threshold to one token', async () => {
-    const result = await roundTrip(4_095)
-    expect(result.status).toBe(400)
-    expect(result.body).toContain('latest_user_too_large')
+  it('rejects every request when the message exceeds the model window', async () => {
+    const upstream = await listen()
+    const proxy = await startLocaContextProxy({
+      targetBaseUrl: upstream.url,
+      targetApiKey: 'target-key',
+      modelConfig: { ...defaultModelConfig, modelName: 'test-model', modelMaxContext: 4_096 },
+      contextConfig: { ...defaultContextManagementConfig, layeredEnabled: true },
+    })
+    try {
+      const response = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'test-model',
+          messages: [{ role: 'user', content: `archived `.repeat(6_000) }],
+        }),
+      })
+      expect(response.status).toBe(400)
+      expect(await response.text()).toContain('latest_user_too_large')
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
   })
 
-  it('forwards the same request when the runner binds the margin to --max-tokens', async () => {
-    const saved = { LOCA_SAFE_OUTPUT_MARGIN: process.env.LOCA_SAFE_OUTPUT_MARGIN, RULER_SAFE_OUTPUT_MARGIN: process.env.RULER_SAFE_OUTPUT_MARGIN }
-    delete process.env.LOCA_SAFE_OUTPUT_MARGIN
-    delete process.env.RULER_SAFE_OUTPUT_MARGIN
+  it('forwards the same request when max input tokens derive from the model windows', async () => {
+    const saved = { LOCA_MAX_INPUT_TOKENS: process.env.LOCA_MAX_INPUT_TOKENS, RULER_MAX_INPUT_TOKENS: process.env.RULER_MAX_INPUT_TOKENS }
+    delete process.env.LOCA_MAX_INPUT_TOKENS
+    delete process.env.RULER_MAX_INPUT_TOKENS
     try {
       const runnerConfig = contextConfig({ modelContextSize: 4_096, maxTokens: 256, maxTokensProvided: true })
-      expect(runnerConfig.safeOutputMargin).toBe(256)
-      const result = await roundTrip(runnerConfig.safeOutputMargin)
+      expect(runnerConfig.maxInputTokens).toBe(0)
+      // 4k window, no output window known: input = floor(max((4096-2048)*0.95, 4096*0.618)) = 2530.
+      const result = await roundTrip({ maxInputTokens: 2_530 })
       expect(result.status).toBe(200)
     } finally {
       for (const [key, value] of Object.entries(saved)) {

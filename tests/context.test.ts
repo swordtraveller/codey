@@ -47,7 +47,7 @@ describe('manageContext', () => {
       { role: 'assistant', content: 'Hi' },
     ]
 
-    const result = manageContext(messages, [], model({ modelMaxContext: 10_000 }), context({ safeOutputMargin: 1_000 }))
+    const result = manageContext(messages, [], model({ modelMaxContext: 10_000 }), context({ maxInputTokens: 9_000 }))
 
     expect(result.messages).toBe(messages)
     expect(result.metrics).toEqual(expect.objectContaining({ layered: false, filtered: false, rewritten: false, truncated: false, compressionRatio: 1 }))
@@ -66,7 +66,7 @@ describe('manageContext', () => {
     ]
     const threshold = compressionThreshold(messages)
 
-    const result = manageContext(messages, [], model({ modelMaxContext: threshold + 100 }), context({ safeOutputMargin: 100, recentKeepRounds: 1 }))
+    const result = manageContext(messages, [], model({ modelMaxContext: threshold + 100 }), context({ maxInputTokens: threshold, recentKeepRounds: 1 }))
 
     expect(result.metrics.filtered).toBe(true)
     expect(result.messages[1].content).toContain(code)
@@ -84,7 +84,7 @@ describe('manageContext', () => {
       { role: 'user', content: 'Latest request' },
     ]
 
-    const result = manageContext(messages, [], model({ modelMaxContext: 100 }), context({ safeOutputMargin: 10, recentKeepRounds: 1, filterEnabled: false, rewriteEnabled: false, truncateEnabled: false }))
+    const result = manageContext(messages, [], model({ modelMaxContext: 100 }), context({ maxInputTokens: 90, recentKeepRounds: 1, filterEnabled: false, rewriteEnabled: false, truncateEnabled: false }))
 
     expect(result.messages).toBe(messages)
     expect(result.metrics).toEqual(expect.objectContaining({ filtered: false, rewritten: false, truncated: false }))
@@ -101,7 +101,7 @@ describe('manageContext', () => {
     ]
 
     const threshold = compressionThreshold(messages)
-    const result = manageContext(messages, [], model({ modelMaxContext: threshold + 100 }), context({ safeOutputMargin: 100, recentKeepRounds: 1 }))
+    const result = manageContext(messages, [], model({ modelMaxContext: threshold + 100 }), context({ maxInputTokens: threshold, recentKeepRounds: 1 }))
 
     expect(result.messages.find((message) => message.tool_calls)?.tool_calls).toEqual([toolCall])
     expect(result.messages.find((message) => message.tool_call_id === 'call-1')?.content).toBe('const exact = true')
@@ -116,7 +116,7 @@ describe('manageContext', () => {
       { role: 'assistant', content: 'Latest response' },
     ]
 
-    const result = manageContext(messages, [], model({ modelMaxContext: 100 }), context({ safeOutputMargin: 10, recentKeepRounds: 1, filterEnabled: false, rewriteEnabled: false }))
+    const result = manageContext(messages, [], model({ modelMaxContext: 100 }), context({ maxInputTokens: 90, recentKeepRounds: 1, filterEnabled: false, rewriteEnabled: false }))
 
     expect(result.metrics.truncated).toBe(true)
     expect(result.messages[0]).toEqual(messages[0])
@@ -178,12 +178,12 @@ describe('manageContext', () => {
       messages,
       [],
       model({ modelMaxContext: 100_000 }),
-      context({ layeredEnabled: true, safeOutputMargin: 1_000, recentKeepRounds: 1, hotTokenBudget: 1_000 }),
+      context({ layeredEnabled: true, maxInputTokens: 99_000, recentKeepRounds: 1, hotTokenBudget: 1_000 }),
     )
 
     expect(result.messages.some((message) => message.id === 'recalled-small')).toBe(true)
     expect(result.messages.some((message) => message.id === 'recalled-large')).toBe(false)
-    expect(result.metrics.compressedTokens).toBeLessThan(result.metrics.triggerThreshold)
+    expect(result.metrics.compressedTokens).toBeLessThan(result.metrics.maxInputTokens)
   })
   it('keeps the current user message in Hot even when older rounds are demoted', () => {
     const messages: ContextMessage[] = [
@@ -222,7 +222,7 @@ describe('manageContext', () => {
       { id: 'latest-user', role: 'user', content: 'Use the prior decision.' },
     ]
 
-    const result = manageContext(messages, [], model({ modelMaxContext: 100_000 }), context({ layeredEnabled: true, safeOutputMargin: 1_000, recentKeepRounds: 1, hotTokenBudget: 10_000 }))
+    const result = manageContext(messages, [], model({ modelMaxContext: 100_000 }), context({ layeredEnabled: true, maxInputTokens: 99_000, recentKeepRounds: 1, hotTokenBudget: 10_000 }))
     const recalled = result.messages.find((message) => message.id === 'summary-1')
 
     expect(recalled).toEqual(expect.objectContaining({ content: summary, representation: 'summary', truthRefs: ['truth-1'], contextLayer: 'hot' }))
@@ -267,10 +267,10 @@ describe('manageContext', () => {
       { id: 'latest-user', role: 'user', content: 'Latest request' },
     ]
     const tools = [{ type: 'function', function: { name: 'read_file', description: 'Read a project file '.repeat(50) } }]
-    const triggerThreshold = 10_000 - 1_000
-    const expectedBudget = triggerThreshold - countContextTokens(tools)
+    // The user hot budget only yields to the physical window: total - tool definitions.
+    const expectedBudget = 10_000 - countContextTokens(tools)
 
-    const result = manageContext(messages, tools, model({ modelMaxContext: 10_000 }), context({ layeredEnabled: true, safeOutputMargin: 1_000, hotTokenBudget: 10_000 }), { latestUserMessageId: 'latest-user' })
+    const result = manageContext(messages, tools, model({ modelMaxContext: 10_000 }), context({ layeredEnabled: true, hotTokenBudget: 10_000 }), { latestUserMessageId: 'latest-user' })
 
     expect(result.hotTokenBudget).toBe(expectedBudget)
     expect(result.hotHighWatermark).toBe(Math.floor(expectedBudget * 0.9))
@@ -414,8 +414,8 @@ describe('manageContext', () => {
       messages,
       [],
       model({ modelMaxContext: 10_000 }),
-      context({ safeOutputMargin: 100, customStrategyEnabled: true,
-        customStrategyScript: 'fn manage(content) { #{ messages: [content.messages[0], content.messages[2]] } }',
+      context({ maxInputTokens: 9_000, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(context) { #{ messages: [context.messages[0], context.messages[2]] } }',
       }),
       { allowCustomStrategy: true, latestUserMessageId: 'latest' },
     )
@@ -434,8 +434,8 @@ describe('manageContext', () => {
       messages,
       [],
       model({ modelMaxContext: 10_000 }),
-      context({ safeOutputMargin: 100, customStrategyEnabled: true,
-        customStrategyScript: 'fn manage(content) { #{ messages: [content.messages[1]] } }',
+      context({ maxInputTokens: 9_000, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(context) { #{ messages: [context.messages[1]] } }',
       }),
       { allowCustomStrategy: true, latestUserMessageId: 'latest' },
     )
@@ -452,8 +452,8 @@ describe('manageContext', () => {
       messages,
       [],
       model({ modelMaxContext: 10_000 }),
-      context({ safeOutputMargin: 100, customStrategyEnabled: true,
-        customStrategyScript: 'fn manage(content) { [content.messages[0], content.messages[2]] }',
+      context({ maxInputTokens: 9_000, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(context) { [context.messages[0], context.messages[2]] }',
       }),
       { allowCustomStrategy: true, latestUserMessageId: 'latest' },
     )
@@ -470,8 +470,8 @@ describe('manageContext', () => {
       messages,
       [],
       model({ modelMaxContext: 10_000 }),
-      context({ safeOutputMargin: 100, customStrategyEnabled: true,
-        customStrategyScript: 'fn manage(content) { [] }',
+      context({ maxInputTokens: 9_000, customStrategyEnabled: true,
+        customStrategyScript: 'fn manage(context) { [] }',
       }),
       { allowCustomStrategy: false, latestUserMessageId: 'latest' },
     )
@@ -488,7 +488,7 @@ describe('manageContext', () => {
     ]
     const original = structuredClone(messages)
 
-    manageContext(messages, [], model({ modelMaxContext: 100 }), context({ safeOutputMargin: 10, recentKeepRounds: 1 }))
+    manageContext(messages, [], model({ modelMaxContext: 100 }), context({ maxInputTokens: 90, recentKeepRounds: 1 }))
 
     expect(messages).toEqual(original)
   })
