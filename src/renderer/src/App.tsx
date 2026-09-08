@@ -786,23 +786,31 @@ function contextStrategyMode(value: ContextManagementConfig, customStrategyAvail
 function ContextSettingsFields({
   value,
   disabled = false,
+  modelDisabled,
   showCustomStrategy = false,
   modelConfigs,
   activeModelConfigId,
+  fallbackModelId,
+  emptyModelOptionLabel,
   onModelConfigChange,
   onChange,
 }: {
   value: ContextManagementConfig
   disabled?: boolean
+  modelDisabled?: boolean
   showCustomStrategy?: boolean
   modelConfigs?: ModelConfig[]
   activeModelConfigId?: string | null
+  fallbackModelId?: string | null
+  emptyModelOptionLabel?: string
   onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
-  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ?? modelConfigs?.[0]
+  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ??
+    modelConfigs?.find((model) => model.id === fallbackModelId) ??
+    modelConfigs?.[0]
 
   function setStrategyMode(mode: ContextStrategyMode): void {
     if (mode === 'custom') {
@@ -824,6 +832,22 @@ function ContextSettingsFields({
 
   return (
     <div className="context-settings-fields">
+      {modelConfigs !== undefined && modelConfigs.length > 0 && (
+        <Field label={t('modelConfiguration')}>
+          <Select
+            disabled={modelDisabled ?? disabled}
+            value={activeModelConfigId ?? referenceModel?.id ?? ''}
+            onChange={(_, data) => onModelConfigChange?.(data.value)}
+          >
+            {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
+            {modelConfigs.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name || model.modelName || t('unnamedModel')}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
       <Field label={t('contextStrategyMode')}>
         <Select
           disabled={disabled}
@@ -838,21 +862,6 @@ function ContextSettingsFields({
 
       {strategyMode === 'custom' ? (
         <>
-          {modelConfigs !== undefined && (
-            <Field label={t('modelConfiguration')}>
-              <Select
-                disabled={disabled}
-                value={activeModelConfigId ?? referenceModel?.id ?? ''}
-                onChange={(_, data) => onModelConfigChange?.(data.value)}
-              >
-                {modelConfigs.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name || model.modelName || t('unnamedModel')}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
           <Field label={t('customContextStrategyScript')}>
             <Textarea
               disabled={disabled}
@@ -890,21 +899,6 @@ function ContextSettingsFields({
         </>
       ) : (
         <>
-          {modelConfigs !== undefined && (
-            <Field label={t('modelConfiguration')}>
-              <Select
-                disabled={disabled}
-                value={activeModelConfigId ?? referenceModel?.id ?? ''}
-                onChange={(_, data) => onModelConfigChange?.(data.value)}
-              >
-                {modelConfigs.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name || model.modelName || t('unnamedModel')}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
           <Switch
             checked={value.filterEnabled}
             disabled={disabled}
@@ -1275,7 +1269,6 @@ export function App(): React.JSX.Element {
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
   const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
   const [contextProjectId, setContextProjectId] = useState('')
-  const [contextModelConfigId, setContextModelConfigId] = useState('')
   const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
   const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
   const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false)
@@ -1710,6 +1703,19 @@ export function App(): React.JSX.Element {
     setContextDraft((current) => ({ ...current, ...patch }))
   }
 
+  async function changeContextModelConfig(modelConfigId: string): Promise<void> {
+    if (interactionLocked) {
+      return
+    }
+    if (contextScope === 'conversation') {
+      await changeConversationModelConfig(modelConfigId)
+      return
+    }
+    if (contextProjectId) {
+      await changeProjectModelConfig(contextProjectId, modelConfigId)
+    }
+  }
+
   function openContextSettings(scope: 'project' | 'conversation', project = activeProject): void {
     if (!project || interactionLocked) {
       return
@@ -1722,7 +1728,6 @@ export function App(): React.JSX.Element {
       : project.contextConfigOverride ?? config.contextManagement
     setContextScope(scope)
     setContextProjectId(project.id)
-    setContextModelConfigId(activeConversation?.modelConfigId ?? project.defaultModelConfigId ?? config.activeModelConfigId ?? '')
     setContextOverrideEnabled(Boolean(override))
     setContextDraft({ ...(override ?? inherited) })
     setSettingsError('')
@@ -2861,10 +2866,17 @@ export function App(): React.JSX.Element {
               />
               <ContextSettingsFields
                 disabled={interactionLocked || !contextOverrideEnabled}
+                modelDisabled={interactionLocked}
                 showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
                 modelConfigs={config.modelConfigs}
-                activeModelConfigId={contextModelConfigId}
-                onModelConfigChange={setContextModelConfigId}
+                activeModelConfigId={contextScope === 'conversation'
+                  ? activeConversation?.modelConfigId ?? ''
+                  : projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? ''}
+                fallbackModelId={contextScope === 'conversation'
+                  ? activeProject?.defaultModelConfigId ?? config.activeModelConfigId
+                  : config.activeModelConfigId}
+                emptyModelOptionLabel={t(contextScope === 'conversation' ? 'followProjectDefault' : 'applicationDefault')}
+                onModelConfigChange={(modelConfigId) => void changeContextModelConfig(modelConfigId)}
                 value={contextDraft}
                 onChange={updateContextDraft}
               />
