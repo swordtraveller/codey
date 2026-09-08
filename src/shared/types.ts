@@ -10,6 +10,13 @@ export type ModelConfig = {
   apiKey: string
   modelName: string
   modelMaxContext: number
+  /** Optional provider-defined output token limit; undefined means no explicit limit. */
+  modelMaxOutputTokens?: number
+  /** Multimodal input capabilities, default off. */
+  supportsImageInput?: boolean
+  supportsPdfInput?: boolean
+  supportsVideoInput?: boolean
+  supportsAudioInput?: boolean
 }
 
 export const defaultModelConfig: ModelConfig = {
@@ -19,7 +26,24 @@ export const defaultModelConfig: ModelConfig = {
   apiKey: '',
   modelName: '',
   modelMaxContext: 128_000,
+  supportsImageInput: false,
+  supportsPdfInput: false,
+  supportsVideoInput: false,
+  supportsAudioInput: false,
 }
+
+export type ModelCapabilitiesResult =
+  | {
+    status: 'ok'
+    maxContextTokens?: number
+    maxOutputTokens?: number
+    image: boolean
+    pdf: boolean
+    video: boolean
+    audio: boolean
+  }
+  | { status: 'not-found' }
+  | { status: 'network-error' }
 
 export type ContextManagementConfig = {
   layeredEnabled: boolean

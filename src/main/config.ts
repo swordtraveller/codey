@@ -42,6 +42,10 @@ function isAppLanguage(value: unknown): value is AppLanguage {
   return value === 'system' || value === 'en' || value === 'zh-CN'
 }
 
+function toOptionalTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined
+}
+
 function readModelConfig(stored: StoredModelConfig): ModelConfig {
   const apiKey = stored.encrypted
     ? safeStorage.decryptString(Buffer.from(stored.apiKey ?? '', 'base64'))
@@ -55,6 +59,11 @@ function readModelConfig(stored: StoredModelConfig): ModelConfig {
     apiKey: apiKey ?? '',
     modelName: stored.modelName ?? '',
     modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
+    modelMaxOutputTokens: toOptionalTokenCount(stored.modelMaxOutputTokens),
+    supportsImageInput: stored.supportsImageInput === true,
+    supportsPdfInput: stored.supportsPdfInput === true,
+    supportsVideoInput: stored.supportsVideoInput === true,
+    supportsAudioInput: stored.supportsAudioInput === true,
   }
 }
 
@@ -66,6 +75,11 @@ function normalizeModelConfig(config: ModelConfig): ModelConfig {
     apiKey: config.apiKey.trim(),
     modelName: config.modelName.trim(),
     modelMaxContext: Math.floor(config.modelMaxContext),
+    modelMaxOutputTokens: toOptionalTokenCount(config.modelMaxOutputTokens),
+    supportsImageInput: config.supportsImageInput === true,
+    supportsPdfInput: config.supportsPdfInput === true,
+    supportsVideoInput: config.supportsVideoInput === true,
+    supportsAudioInput: config.supportsAudioInput === true,
   }
 }
 
@@ -79,7 +93,9 @@ function isValidModelConfig(config: ModelConfig): boolean {
       config.apiKey &&
       config.modelName &&
       Number.isInteger(config.modelMaxContext) &&
-      config.modelMaxContext >= 1_000
+      config.modelMaxContext >= 1_000 &&
+      (config.modelMaxOutputTokens === undefined ||
+        (Number.isInteger(config.modelMaxOutputTokens) && config.modelMaxOutputTokens >= 1))
     )
   } catch {
     return false

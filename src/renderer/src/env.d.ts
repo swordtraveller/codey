@@ -11,6 +11,7 @@ import type {
   DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
+  ModelCapabilitiesResult,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -38,6 +39,7 @@ declare global {
       revealPerformanceTraces(): Promise<void>
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
+      fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
