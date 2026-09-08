@@ -86,6 +86,32 @@ export const defaultAgentLimitsConfig: AgentLimitsConfig = {
   toolCallsPerRequest: 32,
 }
 
+/**
+ * Derives experienced-context budgets from a model's windows.
+ *
+ * output = max output tokens when known, otherwise half the context window.
+ * hot = floor(max((total - output) * 0.95, total * 0.618))
+ * warm = floor(hot * 10); cold recall = floor(hot * 0.1)
+ */
+export function deriveContextBudgets(total: number, maxOutputTokens?: number): {
+  safeOutputMargin: number
+  hotTokenBudget: number
+  warmTokenBudget: number
+  coldRecallTokenBudget: number
+} {
+  const context = Math.floor(total)
+  const output = maxOutputTokens !== undefined && maxOutputTokens >= 1
+    ? Math.floor(maxOutputTokens)
+    : Math.floor(context / 2)
+  const hot = Math.max(1, Math.floor(Math.max((context - output) * 0.95, context * 0.618)))
+  return {
+    safeOutputMargin: Math.max(1, output),
+    hotTokenBudget: hot,
+    warmTokenBudget: Math.floor(hot * 10),
+    coldRecallTokenBudget: Math.floor(hot * 0.1),
+  }
+}
+
 export type AppConfig = {
   modelConfigs: ModelConfig[]
   activeModelConfigId: string | null

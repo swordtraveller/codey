@@ -53,6 +53,7 @@ import {
   defaultAppConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
+  deriveContextBudgets,
   maximumAgentLimit,
   type ModelConfig,
   type Project,
@@ -786,15 +787,22 @@ function ContextSettingsFields({
   value,
   disabled = false,
   showCustomStrategy = false,
+  modelConfigs,
+  activeModelConfigId,
+  onModelConfigChange,
   onChange,
 }: {
   value: ContextManagementConfig
   disabled?: boolean
   showCustomStrategy?: boolean
+  modelConfigs?: ModelConfig[]
+  activeModelConfigId?: string | null
+  onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
+  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ?? modelConfigs?.[0]
 
   function setStrategyMode(mode: ContextStrategyMode): void {
     if (mode === 'custom') {
@@ -805,6 +813,13 @@ function ContextSettingsFields({
       layeredEnabled: mode === 'layered',
       customStrategyEnabled: false,
     })
+  }
+
+  function applyExperiencedBudgets(): void {
+    if (!referenceModel) {
+      return
+    }
+    onChange(deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens))
   }
 
   return (
@@ -823,6 +838,21 @@ function ContextSettingsFields({
 
       {strategyMode === 'custom' ? (
         <>
+          {modelConfigs !== undefined && (
+            <Field label={t('modelConfiguration')}>
+              <Select
+                disabled={disabled}
+                value={activeModelConfigId ?? referenceModel?.id ?? ''}
+                onChange={(_, data) => onModelConfigChange?.(data.value)}
+              >
+                {modelConfigs.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name || model.modelName || t('unnamedModel')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           <Field label={t('customContextStrategyScript')}>
             <Textarea
               disabled={disabled}
@@ -860,6 +890,21 @@ function ContextSettingsFields({
         </>
       ) : (
         <>
+          {modelConfigs !== undefined && (
+            <Field label={t('modelConfiguration')}>
+              <Select
+                disabled={disabled}
+                value={activeModelConfigId ?? referenceModel?.id ?? ''}
+                onChange={(_, data) => onModelConfigChange?.(data.value)}
+              >
+                {modelConfigs.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name || model.modelName || t('unnamedModel')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           <Switch
             checked={value.filterEnabled}
             disabled={disabled}
@@ -878,16 +923,6 @@ function ContextSettingsFields({
             label={t('contextTruncate')}
             onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
           />
-          <Field label={t('outputTokenMargin')} required>
-            <Input
-              disabled={disabled}
-              min={1}
-              step={1000}
-              type="number"
-              value={String(value.safeOutputMargin)}
-              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-            />
-          </Field>
           <Field label={t('recentRounds')} required>
             <Input
               disabled={disabled}
@@ -896,6 +931,23 @@ function ContextSettingsFields({
               type="number"
               value={String(value.recentKeepRounds)}
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
+            />
+          </Field>
+          <Button
+            appearance="secondary"
+            disabled={disabled || !referenceModel}
+            onClick={applyExperiencedBudgets}
+          >
+            {t('generateExperiencedConfig')}
+          </Button>
+          <Field label={t('outputTokenMargin')} required>
+            <Input
+              disabled={disabled}
+              min={1}
+              step={1000}
+              type="number"
+              value={String(value.safeOutputMargin)}
+              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
             />
           </Field>
           {strategyMode === 'layered' && (
@@ -1223,6 +1275,7 @@ export function App(): React.JSX.Element {
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
   const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
   const [contextProjectId, setContextProjectId] = useState('')
+  const [contextModelConfigId, setContextModelConfigId] = useState('')
   const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
   const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
   const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false)
@@ -1669,6 +1722,7 @@ export function App(): React.JSX.Element {
       : project.contextConfigOverride ?? config.contextManagement
     setContextScope(scope)
     setContextProjectId(project.id)
+    setContextModelConfigId(activeConversation?.modelConfigId ?? project.defaultModelConfigId ?? config.activeModelConfigId ?? '')
     setContextOverrideEnabled(Boolean(override))
     setContextDraft({ ...(override ?? inherited) })
     setSettingsError('')
@@ -2558,6 +2612,12 @@ export function App(): React.JSX.Element {
                 <h2>{t('contextSettings')}</h2>
                 <ContextSettingsFields
                   disabled={interactionLocked}
+                  modelConfigs={configDraft.modelConfigs}
+                  activeModelConfigId={configDraft.activeModelConfigId}
+                  onModelConfigChange={(modelConfigId) => setConfigDraft((current) => ({
+                    ...current,
+                    activeModelConfigId: modelConfigId || null,
+                  }))}
                   value={configDraft.contextManagement}
                   onChange={updateAppContextConfig}
                 />
@@ -2802,6 +2862,9 @@ export function App(): React.JSX.Element {
               <ContextSettingsFields
                 disabled={interactionLocked || !contextOverrideEnabled}
                 showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
+                modelConfigs={config.modelConfigs}
+                activeModelConfigId={contextModelConfigId}
+                onModelConfigChange={setContextModelConfigId}
                 value={contextDraft}
                 onChange={updateContextDraft}
               />
