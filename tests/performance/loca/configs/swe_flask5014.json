@@ -1,0 +1,32 @@
+{
+  "configurations": [
+    {
+      "name": "CodeySweRepoFix",
+      "env_class": "tests.performance.loca.fixtures.swe_repo_fix.SweRepoFixEnv",
+      "env_params": {
+        "instance_id": "pallets__flask-5014"
+      },
+      "mcp_servers": {
+        "filesystem": {
+          "enabled": true,
+          "type": "filesystem",
+          "params": {
+            "workspace_path": "{agent_workspace}"
+          }
+        },
+        "python_execute": {
+          "enabled": true,
+          "type": "python_execute",
+          "params": {
+            "workspace_dir": "{agent_workspace}"
+          }
+        },
+        "claim_done": {
+          "enabled": true,
+          "type": "claim_done",
+          "params": {}
+        }
+      }
+    }
+  ]
+}

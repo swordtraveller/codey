@@ -1,0 +1,26 @@
+{
+  "configurations": [
+    {
+      "name": "CodeyFilesystemLongContext",
+      "env_class": "tests.performance.loca.fixtures.filesystem_long.FilesystemLongContextEnv",
+      "env_params": {
+        "expected_answer": "CODEY-FILESYSTEM-LONG-CONTEXT-OK",
+        "context_tokens": 1400
+      },
+      "mcp_servers": {
+        "filesystem": {
+          "enabled": true,
+          "type": "filesystem",
+          "params": {
+            "workspace_path": "{agent_workspace}"
+          }
+        },
+        "claim_done": {
+          "enabled": true,
+          "type": "claim_done",
+          "params": {}
+        }
+      }
+    }
+  ]
+}

@@ -47,6 +47,7 @@ export type ContextResult = {
     reason: 'latest_user_too_large' | 'pinned_hot_overflow' | 'current_round_too_large' | 'hot_overflow'
     requiredReleaseTokens: number
   }
+  customStrategyApplied?: boolean
 }
 
 export const SUMMARY_LABEL = '[SUMMARY — LOSSY, NOT AUTHORITATIVE]'
@@ -591,6 +592,7 @@ export function manageContext(
         truncated: false,
       }),
       toolDefinitionTokens: counter.toolDefinitionTokens,
+      customStrategyApplied: true,
     }
   }
   return contextConfig.layeredEnabled ? manageLayered(messages, tools, modelConfig, contextConfig, runtime) : manageSingleLayer(messages, tools, modelConfig, contextConfig)
