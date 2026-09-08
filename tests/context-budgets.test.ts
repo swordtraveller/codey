@@ -22,13 +22,12 @@ describe('deriveContextBudgets', () => {
   it('falls back to half the context window when max output is unknown', () => {
     const result = deriveContextBudgets(1_000_000)
     expect(result.safeOutputMargin).toBe(500_000)
-    // (1M - 500k) * 0.95 = 475k < 1M * 0.618 = 618k, so the golden-ratio floor wins.
     expect(result.hotTokenBudget).toBe(618_000)
     expect(result.warmTokenBudget).toBe(6_180_000)
     expect(result.coldRecallTokenBudget).toBe(61_800)
   })
 
-  it('uses the golden-ratio floor when output would starve the input budget', () => {
+  it('uses the 0.618 floor when the output budget leaves little input room', () => {
     const result = deriveContextBudgets(1_000_000, 900_000)
     expect(result.safeOutputMargin).toBe(900_000)
     expect(result.hotTokenBudget).toBe(618_000)
@@ -38,7 +37,6 @@ describe('deriveContextBudgets', () => {
 
   it('floors fractional results and keeps budgets positive for tiny windows', () => {
     const result = deriveContextBudgets(1_001, 500)
-    // (1001 - 500) * 0.95 = 475.95 -> floor 475 < 1001 * 0.618 = 618.6 -> 618 wins.
     expect(result.hotTokenBudget).toBe(618)
     expect(result.warmTokenBudget).toBe(6_180)
     expect(result.coldRecallTokenBudget).toBe(61)
