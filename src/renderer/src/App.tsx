@@ -832,22 +832,6 @@ function ContextSettingsFields({
 
   return (
     <div className="context-settings-fields">
-      {modelConfigs !== undefined && modelConfigs.length > 0 && (
-        <Field label={t('modelConfiguration')}>
-          <Select
-            disabled={modelDisabled ?? disabled}
-            value={activeModelConfigId ?? referenceModel?.id ?? ''}
-            onChange={(_, data) => onModelConfigChange?.(data.value)}
-          >
-            {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
-            {modelConfigs.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name || model.modelName || t('unnamedModel')}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      )}
       <Field label={t('contextStrategyMode')}>
         <Select
           disabled={disabled}
@@ -927,6 +911,22 @@ function ContextSettingsFields({
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
             />
           </Field>
+          {modelConfigs !== undefined && modelConfigs.length > 0 && (
+            <Field label={t('modelConfiguration')}>
+              <Select
+                disabled={modelDisabled ?? disabled}
+                value={activeModelConfigId ?? referenceModel?.id ?? ''}
+                onChange={(_, data) => onModelConfigChange?.(data.value)}
+              >
+                {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
+                {modelConfigs.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name || model.modelName || t('unnamedModel')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           <Button
             appearance="secondary"
             disabled={disabled || !referenceModel}
