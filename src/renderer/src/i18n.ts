@@ -22,6 +22,11 @@ void i18n.use(initReactI18next).init({
     en: {
       translation: {
         copyMessage: 'Copy message',
+        copyTurn: 'Copy turn',
+        copyTurnToolParameters: '--- parameters ---',
+        copyTurnImages: '--- image attachments ---',
+        copyTurnToolResultLabel: '--- result ---',
+        copyTurnToolError: '--- result (error) ---',
         copy: 'Copy',
         attachImage: 'Image',
         networkAccess: 'Web access',
@@ -359,6 +364,11 @@ void i18n.use(initReactI18next).init({
     'zh-CN': {
       translation: {
         copyMessage: '复制消息',
+        copyTurn: '复制本轮对话',
+        copyTurnToolParameters: '--- 参数 ---',
+        copyTurnImages: '--- 图片附件 ---',
+        copyTurnToolResultLabel: '--- 返回 ---',
+        copyTurnToolError: '--- 返回（错误） ---',
         copy: '复制',
         attachImage: '图片',
         networkAccess: '网络访问',

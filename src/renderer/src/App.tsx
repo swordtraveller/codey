@@ -156,6 +156,73 @@ type ConversationTurn = ConversationTurnRecord & {
   userMessageId: string
 }
 
+/** Formats one completed conversation turn as a log-style event stream for
+ *  sharing with another model for evaluation. One event per line header
+ *  (timestamp + role), payload verbatim — no markdown nesting conflicts. */
+function formatTurnForCopy(
+  userMessage: ChatMessage,
+  turn: ConversationTurn,
+  messages: ChatMessage[],
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const startedIndex = messages.findIndex((message) => message.id === userMessage.id)
+  const turnMessages: ChatMessage[] = []
+  if (startedIndex >= 0) {
+    for (let index = startedIndex + 1; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (message.role !== 'assistant' && !message.compression) break
+      turnMessages.push(message)
+    }
+  }
+  const durationLabel = t('duration', {
+    hours: Math.floor(Math.max(0, (turn.endedAt ?? turn.startedAt) - turn.startedAt) / 3_600_000),
+    minutes: Math.floor(Math.max(0, (turn.endedAt ?? turn.startedAt) - turn.startedAt) / 60_000) % 60,
+  })
+  const resultLabel = turn.result === 'stopped'
+    ? t('stopped')
+    : turn.result === 'normal'
+      ? t('normal')
+      : turn.result === 'timeout'
+        ? t('timeout')
+        : t('otherError', { error: turn.error ?? 'Unknown' })
+  const lines: string[] = [
+    `# turn.duration: ${durationLabel}`,
+    `# turn.result: ${resultLabel}`,
+    '',
+    `# ${formatMessageTime(userMessage.createdAt)} [user]`,
+    userMessage.content || '',
+  ]
+  if (userMessage.images?.length) {
+    lines.push(t('copyTurnImages'))
+    for (const image of userMessage.images) {
+      lines.push(`[${image.name} (${image.mediaType})]`)
+    }
+  }
+  for (const message of turnMessages) {
+    if (message.compression) continue
+    const toolCalls = (message.blocks ?? []).filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> => block.type === 'function_call')
+    let toolIndex = 0
+    for (const block of message.blocks ?? []) {
+      if (block.type === 'function_call') {
+        toolIndex += 1
+        const toolLabel = toolCalls.length > 1 ? ` #${toolIndex}` : ''
+        lines.push('', `# ${formatMessageTime(message.createdAt)} [tool] ${block.name}${toolLabel}`, t('copyTurnToolParameters'), block.parameters)
+        if (block.result !== undefined) {
+          lines.push(block.resultError ? t('copyTurnToolError') : t('copyTurnToolResultLabel'), block.result)
+        }
+      }
+    }
+    if (blockHasContent(message)) {
+      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
+    }
+  }
+  return lines.join('\n')
+}
+
+function blockHasContent(message: ChatMessage): boolean {
+  return Boolean(message.content && message.content.trim())
+}
+
 function ConversationStopwatch({ turn }: { turn: ConversationTurnRecord }): React.JSX.Element {
   const { t } = useTranslation()
   const [now, setNow] = useState(Date.now())
@@ -377,11 +444,13 @@ const MemoFunctionCallMessage = memo(FunctionCallMessage)
 
 const ConversationMessage = memo(function ConversationMessage({
   message,
+  messages,
   projectId,
   conversationId,
   conversationTurn,
 }: {
   message: ChatMessage
+  messages: ChatMessage[]
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
@@ -392,6 +461,7 @@ const ConversationMessage = memo(function ConversationMessage({
       ? conversationTurn
       : undefined
   )
+  const turnCompleted = messageTurn !== undefined && messageTurn.endedAt !== undefined
 
   return (
     <>
@@ -417,6 +487,17 @@ const ConversationMessage = memo(function ConversationMessage({
           <div className="user-message-content">
             <div className="message-card-header">
               {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              {turnCompleted && messageTurn && (
+                <Button
+                  aria-label={t('copyTurn')}
+                  appearance="subtle"
+                  size="small"
+                  title={t('copyTurn')}
+                  onClick={() => copyText(formatTurnForCopy(message, messageTurn as ConversationTurn, messages, t))}
+                >
+                  {t('copyTurn')}
+                </Button>
+              )}
               <Button
                 aria-label={t('copyMessage')}
                 appearance="subtle"
@@ -707,6 +788,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
         <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
           <ConversationMessage
             message={message}
+            messages={messages}
             projectId={projectId}
             conversationId={conversationId}
             conversationTurn={conversationTurn}
