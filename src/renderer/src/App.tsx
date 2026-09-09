@@ -603,8 +603,11 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const previousMessageCountRef = useRef(messages.length)
   useLayoutEffect(() => {
     if (previousMessageCountRef.current === messages.length) return
-    previousMessageCountRef.current = messages.length
+    // Do not consume the pending growth while the user is scrolled away:
+    // the effect re-runs when they return to the bottom (shouldStickToBottom
+    // is a dependency) and the window resyncs then.
     if (!shouldStickToBottom) return
+    previousMessageCountRef.current = messages.length
     const nextStart = historyExpandedRef.current
       ? visibleStartIndex
       : initialConversationWindowStart(messages)
@@ -614,6 +617,16 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       end: messages.length,
     })
   }, [messages.length, shouldStickToBottom, visibleStartIndex])
+
+  // Self-heal a degenerate virtual window (its end at or before the visible
+  // region start renders an empty slice — the conversation goes blank until
+  // the component remounts). Recompute from the current scroll position so
+  // content reappears in place, even when no scroll event can fire.
+  useLayoutEffect(() => {
+    if (visibleMessages.length === 0) return
+    if (virtualWindow.end > visibleStartIndex) return
+    updateWindow()
+  }, [virtualWindow.end, visibleStartIndex, visibleMessages.length, updateWindow])
 
   const loadOlderMessages = useCallback(() => {
     const container = scrollContainerRef.current
