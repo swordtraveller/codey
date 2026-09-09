@@ -1911,6 +1911,15 @@ export function App(): React.JSX.Element {
     setCommandDraft({ ...(activeConversation.commandExecution ?? activeProject.commandExecutionDefault) })
     setSettingsError('')
     setCommandDialogOpen(true)
+    // Availability checks need a detection; run one if none is cached so the
+    // first save does not fail with "run environment detection".
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) {
+        setShellDetection(cached)
+        return
+      }
+      return runShellDetection()
+    }).catch(() => undefined)
   }
 
   async function saveCommandExecutionSettings(): Promise<void> {
