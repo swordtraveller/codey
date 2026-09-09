@@ -9,6 +9,8 @@ import type {
   ImageAttachment,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
   ShellDetectionResult,
   Project,
   PerformanceTraceEvent,
@@ -39,6 +41,8 @@ contextBridge.exposeInMainWorld(
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
     fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
+    testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-connectivity', model),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),

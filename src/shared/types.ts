@@ -45,6 +45,13 @@ export type ModelCapabilitiesResult =
   | { status: 'not-found' }
   | { status: 'network-error' }
 
+export type ModelConnectivityResult =
+  | { status: 'ok'; models: number }
+  | { status: 'network-error'; detail: string }
+  | { status: 'auth-error'; detail: string }
+  | { status: 'model-not-found'; available: string[] }
+  | { status: 'endpoint-error'; detail: string }
+
 export type ContextManagementConfig = {
   layeredEnabled: boolean
   filterEnabled: boolean

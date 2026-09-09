@@ -15,6 +15,7 @@ import {
   webLightTheme,
 } from '@fluentui/react-components'
 import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
@@ -1408,6 +1409,7 @@ export function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
+  const [connectivityBusy, setConnectivityBusy] = useState(false)
   const [toast, setToast] = useState<{ message: string; tone: 'info' | 'error' } | null>(null)
   const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
@@ -1421,6 +1423,7 @@ export function App(): React.JSX.Element {
   const activeTraceIdsRef = useRef<Record<string, string>>({})
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
+  const settingsOpenedOnceRef = useRef(false)
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -1651,7 +1654,13 @@ export function App(): React.JSX.Element {
   }
 
   function openSettings(): void {
-    setConfigDraft(createSettingsDraft())
+    // Keep unsaved drafts (e.g. a freshly added model configuration) across
+    // dialog close/reopen; only seed once when the dialog has never been
+    // opened or after a successful save replaced the draft.
+    if (!settingsOpenedOnceRef.current || configDraft === config) {
+      setConfigDraft(createSettingsDraft())
+      settingsOpenedOnceRef.current = true
+    }
     setSettingsError('')
     void window.codey.getCachedShellDetection().then((cached) => {
       if (cached) setShellDetection(cached)
@@ -2007,6 +2016,55 @@ export function App(): React.JSX.Element {
     }))
   }
 
+  function duplicateSelectedModelConfig(): void {
+    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
+    if (!selected) {
+      return
+    }
+    const copy: ModelConfig = {
+      ...selected,
+      id: crypto.randomUUID(),
+      name: `${selected.name || selected.modelName || t('unnamedModel')} ${t('modelConfigCopySuffix')}`,
+    }
+    setConfigDraft((current) => ({
+      ...current,
+      modelConfigs: [...current.modelConfigs, copy],
+      activeModelConfigId: copy.id,
+    }))
+  }
+
+  async function testSelectedModelConnectivity(): Promise<void> {
+    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
+    if (!selected || connectivityBusy || !selected.baseUrl.trim() || !selected.modelName.trim()) {
+      return
+    }
+    setConnectivityBusy(true)
+    try {
+      const result = await window.codey.testModelConnectivity(selected)
+      if (result.status === 'ok') {
+        showToast(t('connectivityOk', { count: result.models }), 'info')
+        return
+      }
+      if (result.status === 'network-error') {
+        showToast(t('connectivityNetworkError'), 'error')
+        return
+      }
+      if (result.status === 'auth-error') {
+        showToast(t('connectivityAuthError'), 'error')
+        return
+      }
+      if (result.status === 'model-not-found') {
+        showToast(t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }), 'error')
+        return
+      }
+      showToast(t('connectivityEndpointError', { detail: result.detail }), 'error')
+    } catch {
+      showToast(t('connectivityNetworkError'), 'error')
+    } finally {
+      setConnectivityBusy(false)
+    }
+  }
+
   function deleteSelectedModelConfig(): void {
     const selectedId = configDraft.activeModelConfigId
     if (!selectedId) {
@@ -2337,6 +2395,7 @@ export function App(): React.JSX.Element {
   const selectedModel = configDraft.modelConfigs.find(
     (model) => model.id === configDraft.activeModelConfigId,
   ) ?? configDraft.modelConfigs[0]
+  const settingsDirty = configDraft !== config
   const invalidModelConfig = configDraft.modelConfigs.length === 0 || configDraft.modelConfigs.some((model) =>
     !model.name.trim() ||
     !model.baseUrl.trim() ||
@@ -2346,9 +2405,7 @@ export function App(): React.JSX.Element {
     (model.modelMaxOutputTokens !== undefined &&
       (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
   )
-  const minimumModelContext = Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext))
-  const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement) ||
-    configDraft.contextManagement.maxInputTokens > minimumModelContext
+  const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
@@ -2726,10 +2783,30 @@ export function App(): React.JSX.Element {
                   <Button appearance="secondary" onClick={addModelConfig}>
                     {t('addModelConfig')}
                   </Button>
+                  <Button appearance="secondary" onClick={duplicateSelectedModelConfig}>
+                    {t('duplicateModelConfig')}
+                  </Button>
                   <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
                     {t('deleteModelConfig')}
                   </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedModel?.baseUrl.trim() || !selectedModel?.modelName.trim() || connectivityBusy}
+                    onClick={() => void testSelectedModelConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                  <Button
+                    appearance="primary"
+                    disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
+                    onClick={() => void saveSettings()}
+                  >
+                    {saving ? t('saving') : t('save')}
+                  </Button>
                 </div>
+                <p className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`} role="status">
+                  {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
+                </p>
                 <Field label={t('modelConfigName')} required>
                   <Input
                     value={selectedModel?.name ?? ''}
@@ -2804,14 +2881,22 @@ export function App(): React.JSX.Element {
                       label={t('modalityVideo')}
                       onChange={(_, data) => updateSelectedModel({ supportsVideoInput: data.checked })}
                     />
-                    <Switch
-                      checked={selectedModel?.supportsAudioInput ?? false}
-                      label={t('modalityAudio')}
-                      onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
-                    />
-                  </div>
-                </div>
-              </section>
+                     <Switch
+                       checked={selectedModel?.supportsAudioInput ?? false}
+                       label={t('modalityAudio')}
+                       onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
+                     />
+                   </div>
+                 </div>
+                {configDraft.contextManagement.maxInputTokens > 0 && configDraft.contextManagement.maxInputTokens > Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext)) && (
+                  <p className="settings-warning" role="alert">
+                    {t('maxInputTokensExceedsModelWarning', {
+                      tokens: configDraft.contextManagement.maxInputTokens.toLocaleString(),
+                      context: Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext)).toLocaleString(),
+                    })}
+                  </p>
+                )}
+               </section>
               <section className="settings-group">
                 <h2>{t('languageSettings')}</h2>
                 <Field label={t('language')}>
@@ -3216,10 +3301,11 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
-      {toast && (
+      {toast && createPortal(
         <div className={`app-toast app-toast-${toast.tone}`} role="status">
           {toast.message}
-        </div>
+        </div>,
+        document.body,
       )}
     </FluentProvider>
   )

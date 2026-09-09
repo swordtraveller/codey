@@ -17,6 +17,7 @@ import type {
   DevelopmentProgressUpdate,
   DevelopmentResult,
   ImageAttachment,
+  ModelConfig,
   ScreenshotSelection,
   ScreenshotSource,
   Conversation,
@@ -66,6 +67,7 @@ import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreen
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
+import { testModelConnectivity } from './model-connectivity'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -814,6 +816,7 @@ app.whenReady().then(() => {
     return saved
   })
   ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
+  ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))

@@ -13,6 +13,8 @@ import type {
   ImageAttachment,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
   ShellDetectionResult,
   Project,
   PerformanceTraceEvent,
@@ -42,6 +44,7 @@ declare global {
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
+      testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>

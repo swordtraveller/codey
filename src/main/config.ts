@@ -224,8 +224,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     modelConfigs.some((model) => !isValidModelConfig(model)) ||
     !activeModelConfigId ||
     !ids.has(activeModelConfigId) ||
-    !isValidContextManagementConfig(contextManagement) ||
-    contextManagement.maxInputTokens > Math.min(...modelConfigs.map((model) => model.modelMaxContext))
+    !isValidContextManagementConfig(contextManagement)
   ) {
     throw new Error('Enter valid model and context settings')
   }
