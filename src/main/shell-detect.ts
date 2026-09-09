@@ -88,6 +88,48 @@ function probe(command: string, args: string[]): Promise<string | null> {
   })
 }
 
+/** wsl.exe writes UTF-16LE; Node reads it as UTF-8 garbage without this. */
+export function probeWsl(args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn('wsl.exe', args, { windowsHide: true, shell: false, timeout: 15_000 })
+    const chunks: Buffer[] = []
+    child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
+    child.stderr?.on('data', () => undefined)
+    child.once('error', () => resolve(null))
+    child.once('close', (code) => {
+      if (code !== 0) {
+        resolve(null)
+        return
+      }
+      const raw = Buffer.concat(chunks)
+      const text = raw[0] === 0xff && raw[1] === 0xfe
+        ? raw.subarray(2).toString('utf16le')
+        : raw.toString('utf8')
+      resolve(text.trim() || '')
+    })
+  })
+}
+
+type WslDistro = { name: string; running: boolean; default: boolean }
+export type { WslDistro }
+
+/** System-internal distros used by Docker Desktop; not usable as a user shell. */
+const WSL_SYSTEM_DISTROS = new Set(['docker-desktop', 'docker-desktop-data'])
+
+/** Parses `wsl --list --verbose` output into distro entries. */
+export function parseWslDistros(listOutput: string | null): WslDistro[] {
+  if (!listOutput) return []
+  const distros: WslDistro[] = []
+  for (const line of listOutput.split(/\r?\n/)) {
+    const match = line.match(/^(\*?)\s*(\S+)\s+(\S+)\s+(\S+)\s*$/)
+    if (!match) continue
+    const [, marker, name, state] = match
+    if (/^name$/i.test(name)) continue
+    distros.push({ name, running: /^running$/i.test(state), default: marker === '*' })
+  }
+  return distros
+}
+
 async function detectBash(): Promise<{ available: boolean; path: string | null; detail: string }> {
   if (manualBashPath) {
     const translated = translateGitBashLauncher(manualBashPath)
@@ -140,10 +182,26 @@ function pwsh51Path(): string {
 }
 
 async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
-  const version = await probe('wsl.exe', ['--status'])
+  const list = await probeWsl(['--list', '--verbose'])
+  if (list === null) {
+    return { available: false, detail: 'wsl is not installed or no distribution exists' }
+  }
+  const userDistros = parseWslDistros(list).filter((distro) => !WSL_SYSTEM_DISTROS.has(distro.name))
+  if (userDistros.length === 0) {
+    return { available: false, detail: 'wsl is installed but has no user distribution (only system distros)' }
+  }
+  const bashCheck = await probeWsl(['--', 'bash', '-c', 'echo ok'])
+  const describe = (distro: WslDistro): string =>
+    `${distro.name} (${distro.running ? 'Running' : 'Stopped'}${distro.default ? ', default' : ''})`
+  if (!bashCheck) {
+    return {
+      available: false,
+      detail: `user distributions exist but bash is unavailable in the default one: ${userDistros.map(describe).join(', ')}`,
+    }
+  }
   return {
-    available: Boolean(version),
-    detail: version ? 'wsl is installed' : 'wsl.exe not available or no distribution installed',
+    available: true,
+    detail: `bash available in the default distribution; distros: ${userDistros.map(describe).join(', ')}`,
   }
 }
 

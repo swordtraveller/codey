@@ -14,7 +14,7 @@ import {
   commandTimeoutMaxSeconds,
   commandConfirmationThresholdSeconds,
 } from '../src/shared/types'
-import { shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
+import { parseWslDistros, shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
 import { parseAuditVerdict } from '../src/main/command-executor'
 import { commandDialogTerms, formatDuration } from '../src/main/i18n-terms'
 import {
@@ -217,6 +217,28 @@ describe('approval dialog i18n', () => {
     expect(en.title).toBe('命令执行审批')
     const fallback = commandDialogTerms('system', 'fr-FR')
     expect(fallback.title).toBe('Command execution approval')
+  })
+})
+
+describe('wsl distro parsing', () => {
+  it('parses the wsl --list --verbose table with the default marker', () => {
+    const output = '  NAME              STATE           VERSION\r\n* Ubuntu-22.04       Running         2\r\n  debian            Stopped         2\r\n'
+    const distros = parseWslDistros(output)
+    expect(distros).toEqual([
+      { name: 'Ubuntu-22.04', running: true, default: true },
+      { name: 'debian', running: false, default: false },
+    ])
+  })
+
+  it('separates system distros from user distros', () => {
+    const output = '  NAME              STATE           VERSION\r\n* docker-desktop    Stopped         2\r\n  Ubuntu            Running         2\r\n'
+    const userDistros = parseWslDistros(output).filter((distro) => !['docker-desktop', 'docker-desktop-data'].includes(distro.name))
+    expect(userDistros).toEqual([{ name: 'Ubuntu', running: true, default: false }])
+  })
+
+  it('returns empty for null or header-only output', () => {
+    expect(parseWslDistros(null)).toEqual([])
+    expect(parseWslDistros('  NAME              STATE           VERSION\r\n')).toEqual([])
   })
 })
 

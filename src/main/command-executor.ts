@@ -17,7 +17,7 @@ import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-de
 import { dockerBashImage, dockerPwshImage, type CommandInterpreter } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
-const AUDIT_TIMEOUT_MS = 60_000
+const AUDIT_TIMEOUT_MS = 120_000
 const CONFIRMATION_TIMEOUT_MS = 120_000
 
 /** Built-in deny rules; matched case-insensitively against the whole command.
@@ -146,45 +146,51 @@ async function requestAuditVerdict(
   const timeout = setTimeout(() => controller.abort(), AUDIT_TIMEOUT_MS)
   const onAbort = () => controller.abort()
   signal?.addEventListener('abort', onAbort, { once: true })
-  let attempt = 0
+  const basePrompt = [
+    `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
+    `Workspace: ${workspacePath}`,
+    `Environment: ${environment}`,
+    `Command: ${command}`,
+    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+  ].join('\n')
   try {
-    while (attempt < 3) {
-      attempt += 1
-      // Third attempt is a rescue for truncated (finish_reason=length) replies:
-      // demand the JSON alone with a much larger budget.
-      const rescue = attempt === 3
-      const prompt = rescue
-        ? `Output ONLY the JSON verdict now, nothing else: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}`
-        : [
-            `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
-            `Workspace: ${workspacePath}`,
-            `Environment: ${environment}`,
-            `Command: ${command}`,
-            // Verdict first, analysis after: chatty models must not burn the
-            // token budget on prose before emitting the JSON (observed
-            // finish_reason=length truncations with a leading-analysis style).
-            `Reply with the JSON verdict on the very first line, then optionally one short line of reasoning. Format: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"} followed by at most one brief sentence.`,
-          ].join('\n')
+    // Pass 1: JSON mode (API-enforced schema; chatty models cannot lead with
+    // prose). Falls back without it when the endpoint rejects the parameter.
+    // Pass 2 (rescue): JSON-only prompt with a large budget, for endpoints
+    // without JSON mode or replies still truncated (finish_reason=length).
+    let jsonModeSupported = true
+    for (let pass = 1; pass <= 2; pass += 1) {
+      const rescue = pass === 2
       try {
+        const body: Record<string, unknown> = {
+          model: auditModel.modelName,
+          messages: [
+            {
+              role: 'user',
+              content: rescue
+                ? `Output ONLY the JSON verdict now, nothing else: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}`
+                : basePrompt,
+            },
+          ],
+          max_tokens: rescue ? 2_000 : 800,
+          temperature: 0,
+        }
+        if (jsonModeSupported) body.response_format = { type: 'json_object' }
         const response = await fetch(`${auditModel.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${auditModel.apiKey}`,
           },
-          body: JSON.stringify({
-            model: auditModel.modelName,
-            messages: [
-              {
-                role: 'user',
-                content: prompt,
-              },
-            ],
-            max_tokens: rescue ? 2_000 : 500,
-            temperature: 0,
-          }),
+          body: JSON.stringify(body),
           signal: controller.signal,
         })
+        if (response.status === 400 && jsonModeSupported) {
+          // Endpoint does not implement response_format; retry without it.
+          jsonModeSupported = false
+          pass -= 1
+          continue
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
         const content = payload.choices?.[0]?.message?.content ?? ''
@@ -197,16 +203,21 @@ async function requestAuditVerdict(
           command: command.slice(0, 200),
           content: content.slice(0, 500),
           finishReason,
-          attempt,
+          pass,
+          jsonMode: jsonModeSupported,
         })
-        // A truncated reply is not a model failure — retry instead of denying.
-        if (finishReason === 'length' && attempt < 3) continue
+        // A truncated reply is not a model failure — go straight to the rescue
+        // pass instead of denying.
+        if (!rescue) continue
         throw new Error('unparseable audit response')
       } catch (error) {
         if (signal?.aborted) return { allow: false, reason: 'aborted' }
-        if (attempt >= 3) {
-          return { allow: false, reason: `audit model unavailable (${error instanceof Error ? error.message : String(error)})` }
+        const message = error instanceof Error ? error.message : String(error)
+        if (rescue) {
+          return { allow: false, reason: `audit model unavailable (${message})` }
         }
+        // Non-rescue failures (network, 5xx): one rescue attempt remains.
+        log.warn('command.audit.request-failed', { command: command.slice(0, 200), error: message, pass })
       }
     }
     return { allow: false, reason: 'audit model unavailable' }
