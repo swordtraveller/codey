@@ -4,6 +4,8 @@ import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import {
   commandExecutionSupported,
+  dockerBashImage,
+  dockerPwshImage,
   type CommandEnvironment,
   type CommandInterpreter,
   type ShellDetectionResult,
@@ -147,9 +149,20 @@ async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
 
 async function detectDocker(): Promise<{ available: boolean; detail: string }> {
   const info = await probe('docker', ['info', '--format', '{{.ServerVersion}}'])
+  if (!info) {
+    return { available: false, detail: 'docker CLI not found or the daemon is not running' }
+  }
+  const bashImage = await probe('docker', ['image', 'inspect', dockerBashImage, '--format', 'ok'])
+  const pwshImage = await probe('docker', ['image', 'inspect', dockerPwshImage, '--format', 'ok'])
+  const missing = [
+    ...(!bashImage ? [dockerBashImage] : []),
+    ...(!pwshImage ? [dockerPwshImage] : []),
+  ]
   return {
-    available: Boolean(info),
-    detail: info ? `docker server ${info}` : 'docker CLI not found or the daemon is not running',
+    available: true,
+    detail: missing.length
+      ? `docker server ${info}; missing images (auto-pulled on first use): ${missing.join(', ')}`
+      : `docker server ${info}`,
   }
 }
 

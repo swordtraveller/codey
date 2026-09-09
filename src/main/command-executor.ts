@@ -12,8 +12,9 @@ import {
   commandTimeoutMinSeconds,
 } from '../shared/types'
 import { isAuditModelAllowed } from './command-execution-config'
+import { log } from './logger'
 import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-detect'
-import type { CommandInterpreter } from '../shared/types'
+import { dockerBashImage, dockerPwshImage, type CommandInterpreter } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
 const AUDIT_TIMEOUT_MS = 60_000
@@ -147,8 +148,23 @@ async function requestAuditVerdict(
   signal?.addEventListener('abort', onAbort, { once: true })
   let attempt = 0
   try {
-    while (attempt < 2) {
+    while (attempt < 3) {
       attempt += 1
+      // Third attempt is a rescue for truncated (finish_reason=length) replies:
+      // demand the JSON alone with a much larger budget.
+      const rescue = attempt === 3
+      const prompt = rescue
+        ? `Output ONLY the JSON verdict now, nothing else: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}`
+        : [
+            `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
+            `Workspace: ${workspacePath}`,
+            `Environment: ${environment}`,
+            `Command: ${command}`,
+            // Verdict first, analysis after: chatty models must not burn the
+            // token budget on prose before emitting the JSON (observed
+            // finish_reason=length truncations with a leading-analysis style).
+            `Reply with the JSON verdict on the very first line, then optionally one short line of reasoning. Format: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"} followed by at most one brief sentence.`,
+          ].join('\n')
       try {
         const response = await fetch(`${auditModel.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
@@ -161,16 +177,10 @@ async function requestAuditVerdict(
             messages: [
               {
                 role: 'user',
-                content: [
-                  `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
-                  `Workspace: ${workspacePath}`,
-                  `Environment: ${environment}`,
-                  `Command: ${command}`,
-                  `Reply with exactly one JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"} and nothing else.`,
-                ].join('\n'),
+                content: prompt,
               },
             ],
-            max_tokens: 200,
+            max_tokens: rescue ? 2_000 : 500,
             temperature: 0,
           }),
           signal: controller.signal,
@@ -178,12 +188,23 @@ async function requestAuditVerdict(
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
         const content = payload.choices?.[0]?.message?.content ?? ''
+        const finishReason = (payload.choices?.[0] as { finish_reason?: string } | undefined)?.finish_reason ?? 'unknown'
         const verdict = parseAuditVerdict(content)
         if (verdict) return { allow: verdict.verdict === 'allow', reason: verdict.reason }
+        // Diagnostic: capture the raw audit reply so unparseable responses can
+        // be analyzed in main.log instead of guessing at the parser.
+        log.warn('command.audit.unparseable', {
+          command: command.slice(0, 200),
+          content: content.slice(0, 500),
+          finishReason,
+          attempt,
+        })
+        // A truncated reply is not a model failure — retry instead of denying.
+        if (finishReason === 'length' && attempt < 3) continue
         throw new Error('unparseable audit response')
       } catch (error) {
         if (signal?.aborted) return { allow: false, reason: 'aborted' }
-        if (attempt >= 2) {
+        if (attempt >= 3) {
           return { allow: false, reason: `audit model unavailable (${error instanceof Error ? error.message : String(error)})` }
         }
       }
@@ -262,6 +283,52 @@ async function runBare(
   )
 }
 
+/** WSL accepts Windows paths and translates them itself; quoting guards
+ *  paths with spaces. The 8-second grace handles a distro being started. */
+async function runWsl2(
+  command: string,
+  windowsWorkspacePath: string,
+  timeoutSeconds: number,
+  signal?: AbortSignal,
+): Promise<RawRunResult> {
+  return runProcess('wsl.exe', ['--', 'bash', '-c', command], windowsWorkspacePath, Math.max(timeoutSeconds, 8), signal)
+}
+
+/** Docker: mounts the workspace at /work inside a disposable container.
+ *  The mount source must be a project-registered folder — never anything
+ *  else on the host. */
+async function runDocker(
+  interpreter: CommandInterpreter,
+  command: string,
+  windowsWorkspacePath: string,
+  timeoutSeconds: number,
+  signal?: AbortSignal,
+): Promise<RawRunResult> {
+  const isPwsh = interpreter === 'pwsh7' || interpreter === 'pwsh51'
+  const image = isPwsh ? dockerPwshImage : dockerBashImage
+  const containerCommand = isPwsh
+    ? ['pwsh', '-NoProfile', '-NonInteractive', '-Command', command]
+    : ['sh', '-c', command]
+  return runProcess(
+    'docker',
+    ['run', '--rm', '-v', `${windowsWorkspacePath}:/work`, '-w', '/work', image, ...containerCommand],
+    windowsWorkspacePath,
+    Math.max(timeoutSeconds, 8),
+    signal,
+  )
+}
+
+/** Resolves the workspace for sandboxed runs and enforces the mount policy:
+ *  only folders registered under the project may be mounted. */
+function assertMountableWorkspace(workspacePath: string, allowedFolderPaths: string[]): string {
+  const normalized = workspacePath.replace(/[\\/]+$/, '').toLowerCase()
+  const allowed = allowedFolderPaths.some((folder) => folder.replace(/[\\/]+$/, '').toLowerCase() === normalized)
+  if (!allowed) {
+    throw new Error('The command workspace is not a folder registered under this project. Sandboxed execution is limited to project folders.')
+  }
+  return workspacePath
+}
+
 export type RunCommandOutcome = {
   ok: boolean
   output: string
@@ -287,6 +354,15 @@ export async function executeCommand(options: {
   const trimmed = command.trim()
   if (!trimmed) {
     return { ok: false, output: 'The command is empty.', audit }
+  }
+  // Mount policy: sandboxed environments may only mount project folders.
+  const allowedFolderPaths = options.project.folders.map((folder) => folder.path)
+  if (config.environment === 'docker' || config.environment === 'wsl2') {
+    try {
+      assertMountableWorkspace(options.workspacePath, allowedFolderPaths)
+    } catch (error) {
+      return { ok: false, output: error instanceof Error ? error.message : 'Workspace rejected', audit }
+    }
   }
 
   return enqueue(options.conversationId, async () => {
@@ -348,7 +424,22 @@ export async function executeCommand(options: {
     }
 
     const startedAt = Date.now()
-    const result = await runBare(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+    let result: RawRunResult
+    try {
+      if (config.environment === 'wsl2') {
+        result = await runWsl2(trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      } else if (config.environment === 'docker') {
+        result = await runDocker(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      } else {
+        result = await runBare(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : 'Command execution failed to start.',
+        audit,
+      }
+    }
     const durationMs = Date.now() - startedAt
     audit.push({
       description: `executed (${config.interpreter}/${config.environment}) exit=${result.exitCode ?? 'n/a'} timeout=${timeoutSeconds}s duration=${Math.round(durationMs / 100) / 10}s`,

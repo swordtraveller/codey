@@ -330,7 +330,15 @@ export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; en
   { interpreter: 'bash', environment: 'bare' },
   { interpreter: 'pwsh7', environment: 'bare' },
   { interpreter: 'pwsh51', environment: 'bare' },
+  { interpreter: 'bash', environment: 'wsl2' },
+  { interpreter: 'bash', environment: 'docker' },
+  { interpreter: 'pwsh51', environment: 'docker' },
+  { interpreter: 'pwsh7', environment: 'docker' },
 ]
+
+/** Docker images used for sandboxed command execution. */
+export const dockerBashImage = 'alpine:latest'
+export const dockerPwshImage = 'mcr.microsoft.com/powershell:latest'
 
 export function commandExecutionSupported(interpreter: CommandInterpreter, environment: CommandEnvironment): boolean {
   return supportedCommandCombos.some((combo) => combo.interpreter === interpreter && combo.environment === environment)

@@ -1,5 +1,12 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
+
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getPath: () => '.',
+  },
+}))
 import {
   defaultCommandExecutionConfig,
   defaultModelConfig,
@@ -50,8 +57,12 @@ describe('command execution config', () => {
   })
 
   it('rejects combos outside the support matrix', () => {
-    expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'docker' }))).toBe(false)
-    expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'wsl2' }))).toBe(false)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'wsl2' }))).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'docker' }))).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh51', environment: 'docker' }))).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh7', environment: 'docker' }))).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh51', environment: 'wsl2' }))).toBe(false)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh7', environment: 'wsl2' }))).toBe(false)
     expect(isValidCommandExecutionConfig(config())).toBe(true)
     expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh7', environment: 'bare' }))).toBe(true)
     expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh51', environment: 'bare' }))).toBe(true)
@@ -224,9 +235,82 @@ describe('executeCommand', () => {
   ).status === 0
   const bashIt = bashAvailable ? it : it.skip
   const pwshIt = pwshAvailable ? it : it.skip
+  const dockerAvailable = (() => {
+    try {
+      return spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { windowsHide: true, timeout: 15_000 }).status === 0
+    } catch {
+      return false
+    }
+  })()
+  const dockerIt = dockerAvailable ? it : it.skip
+  const wslBashAvailable = (() => {
+    try {
+      return spawnSync('wsl.exe', ['--', 'bash', '-c', 'echo ok'], { windowsHide: true, timeout: 15_000 }).status === 0
+    } catch {
+      return false
+    }
+  })()
+  const wslIt = wslBashAvailable ? it : it.skip
 
   beforeEach(() => {
     shellDetectTestHooks.setBashOverride(bashAvailable ? 'bash' : null)
+  })
+
+  it('refuses sandboxed execution when the workspace is not a project folder', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [{ id: 'f', path: 'D:/registered-folder' }] },
+      conversationId: 'mount-guard',
+      config: config({ enabled: true, interpreter: 'bash', environment: 'docker' }),
+      command: 'echo hi',
+      workspaceFolderId: 'f',
+      workspacePath: 'D:/somewhere-else',
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(outcome.output).toContain('not a folder registered under this project')
+  })
+
+  dockerIt('runs bash in a disposable docker container with the workspace at /work', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [{ id: 'f', path: process.cwd() }] },
+      conversationId: `docker-${Math.random()}`,
+      config: config({ enabled: true, interpreter: 'bash', environment: 'docker' }),
+      command: 'pwd && ls package.json',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.output).toContain('/work')
+    expect(outcome.output).toContain('package.json')
+  })
+
+  dockerIt('runs pwsh in a disposable docker container', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [{ id: 'f', path: process.cwd() }] },
+      conversationId: `docker-pwsh-${Math.random()}`,
+      config: config({ enabled: true, interpreter: 'pwsh51', environment: 'docker' }),
+      command: 'Write-Output docker-pwsh-ok; Get-Location',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.output).toContain('docker-pwsh-ok')
+  })
+
+  wslIt('runs bash inside wsl2', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [{ id: 'f', path: process.cwd() }] },
+      conversationId: `wsl-${Math.random()}`,
+      config: config({ enabled: true, interpreter: 'bash', environment: 'wsl2' }),
+      command: 'echo wsl-ok && uname -s',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.output).toContain('wsl-ok')
   })
 
   it('refuses to run when disabled', async () => {

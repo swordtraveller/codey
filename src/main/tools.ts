@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { commandExecutionSupported, type CommandExecutionConfig, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
+import { commandExecutionSupported, supportedCommandCombos, type CommandExecutionConfig, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
 import { executeCommand, type CommandExecutorRuntime } from './command-executor'
 import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
@@ -950,25 +950,43 @@ export async function runAgentTool(
 function buildRunCommandTool(project: Project, config: CommandExecutionConfig, shellDetection: ShellDetectionResult | null): object {
   const folderIds = project.folders.map((folder) => folder.id)
   const interpreters = shellDetection?.interpreters ?? []
-  const availableCombos = (['bash', 'pwsh7', 'pwsh51'] as const)
-    .filter((kind) => interpreters.some((entry) => entry.kind === kind && entry.available))
-    .filter((kind) => commandExecutionSupported(kind, 'bare'))
-    .map((kind) => `${kind} (bare)`)
+  const environments = shellDetection?.environments ?? []
+  const availableCombos: string[] = []
+  for (const combo of supportedCommandCombos) {
+    const interpreterOk = interpreters.some((entry) => entry.kind === combo.interpreter && entry.available)
+    // Docker provides bash/pwsh inside containers; the host interpreter is irrelevant there.
+    const interpreterRelevant = combo.environment !== 'docker'
+      || combo.interpreter === 'bash'
+      || interpreters.length > 0
+    const environmentOk = environments.some((entry) => entry.kind === combo.environment && entry.available)
+    if (interpreterOk && environmentOk && interpreterRelevant) {
+      availableCombos.push(`${combo.interpreter} (${combo.environment})`)
+    }
+  }
   const comboLine = availableCombos.length
     ? `Available interpreter/environment combos on this machine: ${availableCombos.join(', ')}.`
     : 'Available interpreter/environment combos: unknown (run environment detection in settings).'
   const notes: string[] = []
   const interpreter = config.interpreter
+  const environment = config.environment
+  const environmentNote = environment === 'docker'
+    ? 'The command runs inside a disposable Linux container (the project folder is mounted read-write at /work and /work is the working directory; nothing else on the host is mounted).'
+    : environment === 'wsl2'
+      ? 'The command runs inside WSL2 (the project folder is the working directory; access host paths under /mnt/<drive>/).'
+      : 'The command runs directly on the host (bare environment).'
   if (interpreter === 'bash') {
-    notes.push('You are writing bash (Git Bash / MSYS on Windows): prefer relative paths; when a Windows path is unavoidable use forward slashes (D:/path) or single quotes, never raw backslashes (bash treats them as escapes). MSYS rewrites arguments that look like paths — prefix Windows-native tools taking /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Linux-style tools and pipelines (ls, grep, |) are available.')
+    notes.push(environment === 'bare'
+      ? 'You are writing bash (Git Bash / MSYS on Windows): prefer relative paths; when a Windows path is unavoidable use forward slashes (D:/path) or single quotes, never raw backslashes (bash treats them as escapes). MSYS rewrites arguments that look like paths — prefix Windows-native tools taking /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Linux-style tools and pipelines (ls, grep, |) are available.'
+      : 'You are writing bash in a Linux environment: standard POSIX paths and tools (ls, grep, awk, |). Use relative paths from the working directory.')
   } else {
-    notes.push(`You are writing ${interpreter === 'pwsh7' ? 'PowerShell 7' : 'Windows PowerShell 5.1'}: use PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Paths use backslashes or forward slashes; quote paths with spaces. Avoid bash-isms (ls -la flags differ, no $(...) command substitution — use $(...) PowerShell subexpressions or backticks carefully). PowerShell 5.1 lacks some pwsh 7 features (e.g. ?? operator, ternary); prefer simple, version-safe syntax.`)
+    notes.push(`You are writing ${interpreter === 'pwsh7' ? 'PowerShell 7' : 'Windows PowerShell 5.1'}${environment === 'docker' ? ' (Linux container image)' : ''}: use PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. Avoid bash-isms (ls -la flags differ). PowerShell 5.1 lacks some pwsh 7 features (e.g. ?? operator, ternary); prefer simple, version-safe syntax.`)
   }
   notes.push('Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.')
   notes.push('Timeout rules: most commands need only a small timeout (30s is typical); requesting more than 60 seconds requires user approval per command; when manual confirmation is disabled, any request is capped at 600 seconds.')
   const description = [
     'Run a shell command in the configured project workspace (developer mode).',
-    `The command runs with the ${interpreter} interpreter in the bare environment, using the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.`,
+    `The command runs with the ${interpreter} interpreter in the ${environment === 'bare' ? 'bare environment' : environment === 'wsl2' ? 'wsl2 environment' : 'docker environment'}, using the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.`,
+    environmentNote,
     comboLine,
     ...notes,
   ].join(' ')
