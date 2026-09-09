@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createAgentTools, runAgentTool, type ToolCall } from '../src/main/tools'
-import type { Project } from '../src/shared/types'
+import { defaultCommandExecutionConfig, type Project } from '../src/shared/types'
 import { createTemporaryDirectory, removeTemporaryDirectory } from './helpers'
 
 function toolCall(name: string, args: unknown): ToolCall {
@@ -25,6 +25,7 @@ describe('agent tools', () => {
       archived: false,
       defaultModelConfigId: null,
       contextConfigOverride: null,
+      commandExecutionDefault: { ...defaultCommandExecutionConfig },
       folders: [{ id: 'root', path: root }],
       pythonEnvironmentFolderId: 'root',
       conversations: [],

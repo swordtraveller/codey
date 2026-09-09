@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { access } from 'node:fs/promises'
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -6,6 +7,7 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
+  CommandExecutionConfig,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
@@ -20,6 +22,7 @@ import type {
   Conversation,
   Project,
 } from '../shared/types'
+import { defaultCommandExecutionConfig } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
 import {
   applyDevelopmentProgressUpdate,
@@ -29,6 +32,7 @@ import {
 import { buildAgentContext, develop } from './agent'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
+import type { CommandExecutorRuntime } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
   buildContextDebugSnapshot,
@@ -85,14 +89,19 @@ import {
   saveConversationContext,
   setConversationAgentLimits,
   setConversationArchived,
+  setConversationCommandExecution,
   setConversationContextConfig,
   setConversationModelConfig,
+  setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
   setProjectModelConfig,
   updateConversationAgentMessages,
   updateConversationTurn,
 } from './workspace'
+import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { commandDialogTerms, formatDuration } from './i18n-terms'
+import { commandComboUsable, detectShells, getCachedShellDetection, setManualBashPath, translateGitBashLauncher } from './shell-detect'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
@@ -242,6 +251,56 @@ async function validateModelConfigId(modelConfigId: string | null): Promise<void
   }
 }
 
+/** Validates an enabled command-execution config: the combo must be usable and
+ *  the audit model (when enabled) must resolve and differ from the session
+ *  model. Enforced again at execution time. */
+async function validateCommandExecution(config: CommandExecutionConfig): Promise<void> {
+  if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
+    throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
+  }
+  if (config.modelAuditEnabled) {
+    if (!config.auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
+    const appConfig = await readConfig()
+    const auditModel = appConfig.modelConfigs.find((model) => model.id === config.auditModelConfigId)
+    if (!auditModel) throw new Error('The audit model configuration was not found')
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Native confirmation for run_command; resolves denied after the timeout. */
+async function requestCommandConfirmation(request: {
+  command: string
+  timeoutSeconds: number
+  editable: boolean
+  checks: string[]
+}): Promise<{ approved: boolean; timeoutSeconds: number }> {
+  if (!mainWindow || mainWindow.isDestroyed()) return { approved: false, timeoutSeconds: request.timeoutSeconds }
+  const appConfig = await readConfig()
+  const language = appConfig.language === 'system' ? 'en' : appConfig.language
+  const terms = commandDialogTerms(appConfig.language, app.getLocale())
+  const duration = formatDuration(request.timeoutSeconds, language)
+  const checks = request.checks.join(', ') || terms.checksNone
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: terms.title,
+    message: terms.message(duration),
+    detail: terms.detail(request.command, checks),
+    buttons: [terms.approve, terms.deny],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  })
+  return { approved: result.response === 0, timeoutSeconds: request.timeoutSeconds }
+}
+
 function normalizeContextMessage(
   message: Awaited<ReturnType<typeof getProject>>['conversations'][number]['agentMessages'][number],
   now: string,
@@ -301,6 +360,18 @@ async function developProject(
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
+  const commandExecution = appConfig.developerMode
+    ? structuredClone(resolveCommandExecutionConfig(project, conversation))
+    : { ...defaultCommandExecutionConfig }
+  const commandRuntime: CommandExecutorRuntime | undefined = appConfig.developerMode
+    ? {
+        conversationId,
+        signal,
+        sessionModelName: modelConfig.modelName,
+        resolveAuditModel: async (configId) => appConfig.modelConfigs.find((model) => model.id === configId),
+        requestConfirmation: (request) => requestCommandConfirmation(request),
+      }
+    : undefined
   if (contextConfig.maxInputTokens > modelConfig.modelMaxContext) {
     return { project, writtenFiles: [], error: 'Max input tokens must not exceed the model context window' }
   }
@@ -388,6 +459,8 @@ async function developProject(
       allowCustomStrategy,
       roundId,
       roundCount,
+      commandExecution,
+      commandRuntime,
     },
     appConfig.networkAccessEnabled,
   )
@@ -795,6 +868,34 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
+  })
+  ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig) => {
+    ensureIdle(projectId, conversationId)
+    if (commandExecution.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setConversationCommandExecution(projectId, conversationId, commandExecution)
+  })
+  ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig) => {
+    ensureProjectIdle(projectId)
+    if (commandExecution.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setProjectCommandExecutionDefault(projectId, commandExecution)
+  })
+  ipcMain.handle('shells:detect', () => detectShells())
+  ipcMain.handle('shells:cached', () => getCachedShellDetection())
+  ipcMain.handle('shells:pick-bash', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'bash executable', extensions: ['exe'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    // git-bash.exe is a mintty launcher; translate it to the real bash.exe.
+    const translated = translateGitBashLauncher(result.filePaths[0])
+    const effective = await fileExists(translated) ? translated : result.filePaths[0]
+    setManualBashPath(effective)
+    return effective
   })
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)

@@ -8,6 +8,8 @@ import type {
   DevelopmentProgressState,
   ImageAttachment,
   ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ShellDetectionResult,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -88,6 +90,27 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
+    setConversationCommandExecution: (
+      projectId: string,
+      conversationId: string,
+      commandExecution: CommandExecutionConfig,
+    ) => ipcRenderer.invoke(
+      'conversations:set-command-execution',
+      projectId,
+      conversationId,
+      commandExecution,
+    ),
+    setProjectCommandExecutionDefault: (
+      projectId: string,
+      commandExecution: CommandExecutionConfig,
+    ) => ipcRenderer.invoke(
+      'projects:set-command-execution-default',
+      projectId,
+      commandExecution,
+    ),
+    detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
+    getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
+    pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>

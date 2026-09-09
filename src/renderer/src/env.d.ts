@@ -12,6 +12,8 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ShellDetectionResult,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -72,6 +74,18 @@ declare global {
         conversationId: string,
         agentLimits: AgentLimitsConfig,
       ): Promise<Project>
+      setConversationCommandExecution(
+        projectId: string,
+        conversationId: string,
+        commandExecution: CommandExecutionConfig,
+      ): Promise<Project>
+      setProjectCommandExecutionDefault(
+        projectId: string,
+        commandExecution: CommandExecutionConfig,
+      ): Promise<Project>
+      detectShells(): Promise<ShellDetectionResult>
+      getCachedShellDetection(): Promise<ShellDetectionResult | null>
+      pickBashExecutable(): Promise<string | null>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       develop(
         projectId: string,

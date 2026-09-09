@@ -7,6 +7,7 @@ import {
 import { createModelConfigSnapshot, resolveModelConfig } from '../src/main/model-config'
 import {
   defaultAgentLimitsConfig,
+  defaultCommandExecutionConfig,
   defaultContextManagementConfig,
   type AppConfig,
   type ContextManagementConfig,
@@ -48,6 +49,7 @@ const project: Project = {
   archived: false,
   defaultModelConfigId: 'project',
   contextConfigOverride: null,
+  commandExecutionDefault: { ...defaultCommandExecutionConfig },
   folders: [],
   pythonEnvironmentFolderId: null,
   conversations: [],
@@ -59,6 +61,7 @@ const conversation: Conversation = {
   modelConfigId: null,
   contextConfigOverride: null,
   agentLimits: defaultAgentLimitsConfig,
+  commandExecution: { ...defaultCommandExecutionConfig },
   messages: [],
   agentMessages: [],
 }

@@ -4,10 +4,12 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import {
   defaultAgentLimitsConfig,
+  defaultCommandExecutionConfig,
   type AgentContextMessage,
   type AgentLimitsConfig,
   type AssistantMessageBlock,
   type ChatMessage,
+  type CommandExecutionConfig,
   type ContextCompressionNotice,
   type ContextManagementConfig,
   type ConversationTurnRecord,
@@ -18,6 +20,7 @@ import {
   type ProjectFolder,
 } from '../shared/types'
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
+import { isValidCommandExecutionConfig, normalizeCommandExecutionConfig } from './command-execution-config'
 import { log } from './logger'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 import {
@@ -33,12 +36,13 @@ type PersistedChatMessage = Omit<ChatMessage, 'images'> & {
 type PersistedAgentMessage = Omit<AgentContextMessage, 'images'> & {
   images?: ImageAttachment[] | StoredImageReference[]
 }
-type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits'> & {
+type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits' | 'commandExecution'> & {
   messages: PersistedChatMessage[]
   agentMessages?: PersistedAgentMessage[]
   modelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
   agentLimits?: Partial<AgentLimitsConfig>
+  commandExecution?: Partial<CommandExecutionConfig> | null
 }
 type LegacyStoredProject = Omit<
   Project,
@@ -50,9 +54,10 @@ type LegacyStoredProject = Omit<
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
 }
-type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId'> & {
+type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault'> & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
+  commandExecutionDefault?: Partial<CommandExecutionConfig> | null
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversationIds: string[]
@@ -193,6 +198,15 @@ function normalizeStoredAgentLimits(
     : { ...defaultAgentLimitsConfig }
 }
 
+function normalizeStoredCommandExecution(
+  value: Partial<CommandExecutionConfig> | null | undefined,
+): CommandExecutionConfig {
+  const normalized = normalizeCommandExecutionConfig(value)
+  return isValidCommandExecutionConfig(normalized)
+    ? normalized
+    : { ...defaultCommandExecutionConfig }
+}
+
 function validateOverride(contextConfig: ContextManagementConfig | null): ContextManagementConfig | null {
   if (!contextConfig) return null
   const normalized = normalizeContextManagementConfig(contextConfig)
@@ -216,6 +230,9 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     modelConfigId: value.modelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
+    commandExecution: value.commandExecution === null
+      ? { ...defaultCommandExecutionConfig }
+      : normalizeStoredCommandExecution(value.commandExecution),
     messages,
     agentMessages,
   }
@@ -235,6 +252,9 @@ async function normalizeProjectMetadata(
     archived: value.archived === true,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
+    commandExecutionDefault: value.commandExecutionDefault === null || value.commandExecutionDefault === undefined
+      ? { ...defaultCommandExecutionConfig }
+      : normalizeStoredCommandExecution(value.commandExecutionDefault),
     folders,
     conversations,
     pythonEnvironmentFolderId: configuredFolder
@@ -433,6 +453,7 @@ function createConversationRecord(index: number): Conversation {
     modelConfigId: null,
     contextConfigOverride: null,
     agentLimits: { ...defaultAgentLimitsConfig },
+    commandExecution: { ...defaultCommandExecutionConfig },
     messages: [],
     agentMessages: [],
   }
@@ -487,6 +508,7 @@ export function createProject(name: string, defaultModelConfigId: string | null 
       archived: false,
       defaultModelConfigId,
       contextConfigOverride: null,
+      commandExecutionDefault: { ...defaultCommandExecutionConfig },
       folders: [],
       pythonEnvironmentFolderId: null,
       conversations: [createConversationRecord(1)],
@@ -590,6 +612,29 @@ export function setConversationAgentLimits(projectId: string, conversationId: st
     const conversation = findConversation(project, conversationId)
     conversation.agentLimits = normalized
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setConversationCommandExecution(projectId: string, conversationId: string, commandExecution: CommandExecutionConfig): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const normalized = normalizeCommandExecutionConfig(commandExecution)
+    if (!isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.commandExecution = normalized
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setProjectCommandExecutionDefault(projectId: string, commandExecution: CommandExecutionConfig): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalized = normalizeCommandExecutionConfig(commandExecution)
+    if (!isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const project = await findProject(projectId)
+    project.commandExecutionDefault = normalized
+    await persistProjectMetadata(project)
     return project
   })
 }

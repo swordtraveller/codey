@@ -286,6 +286,70 @@ export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
   role: AgentContextMessage['role'] | 'system'
 }
 
+export type CommandInterpreter = 'pwsh51' | 'pwsh7' | 'bash'
+export type CommandEnvironment = 'bare' | 'wsl2' | 'docker' | 'windows-sandbox'
+
+/** Developer-mode command-execution settings. The interpreter/environment
+ *  matrix is constrained: v1 implements bare+bash; the remaining combos are
+ *  reserved architecture openings. */
+export type CommandExecutionConfig = {
+  enabled: boolean
+  interpreter: CommandInterpreter
+  environment: CommandEnvironment
+  /** Rule interception is always active; this flag mirrors the UI switch that
+   *  cannot be turned off (kept for forward compatibility). */
+  ruleInterception: true
+  modelAuditEnabled: boolean
+  /** Model configuration id used for auditing; must resolve to a model whose
+   *  modelName differs from the session model (case-insensitive). */
+  auditModelConfigId: string | null
+  manualConfirmationEnabled: boolean
+  /** Extra deny rules (regex source) on top of the built-in blocklist. */
+  denyRules: string[]
+}
+
+export const defaultCommandExecutionConfig: CommandExecutionConfig = {
+  enabled: false,
+  interpreter: 'bash',
+  environment: 'bare',
+  ruleInterception: true,
+  modelAuditEnabled: false,
+  auditModelConfigId: null,
+  manualConfirmationEnabled: false,
+  denyRules: [],
+}
+
+/** Commands may request their own timeout (seconds); the hard bounds. */
+export const commandTimeoutMinSeconds = 1
+export const commandTimeoutMaxSeconds = 86_400
+/** Without manual confirmation, requested timeouts are clamped to this. */
+export const commandTimeoutClampSeconds = 600
+/** Requests above this require manual confirmation when it is enabled. */
+export const commandConfirmationThresholdSeconds = 60
+export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; environment: CommandEnvironment }> = [
+  { interpreter: 'bash', environment: 'bare' },
+]
+
+export function commandExecutionSupported(interpreter: CommandInterpreter, environment: CommandEnvironment): boolean {
+  return supportedCommandCombos.some((combo) => combo.interpreter === interpreter && combo.environment === environment)
+}
+
+export type ShellDetectionResult = {
+  interpreters: Array<{
+    kind: CommandInterpreter
+    available: boolean
+    /** For git-bash under the bare environment: the resolved bash.exe path. */
+    executablePath?: string
+    detail: string
+  }>
+  environments: Array<{
+    kind: CommandEnvironment
+    available: boolean
+    detail: string
+  }>
+  detectedAt: string
+}
+
 export type Conversation = {
   id: string
   title: string
@@ -293,6 +357,7 @@ export type Conversation = {
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
   agentLimits: AgentLimitsConfig
+  commandExecution: CommandExecutionConfig
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
@@ -309,6 +374,7 @@ export type Project = {
   archived: boolean
   defaultModelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  commandExecutionDefault: CommandExecutionConfig
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

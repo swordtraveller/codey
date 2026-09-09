@@ -51,12 +51,16 @@ import {
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
+  defaultCommandExecutionConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
+  commandExecutionSupported,
   deriveContextBudgets,
   maximumAgentLimit,
+  type CommandExecutionConfig,
   type ModelConfig,
   type Project,
+  type ShellDetectionResult,
 } from '../../shared/types'
 
 const markdownPlugins = [remarkGfm]
@@ -125,6 +129,19 @@ function isValidContextConfig(value: ContextManagementConfig): boolean {
     Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
     Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
     Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
+}
+
+const interpreterLabels: Record<string, string> = {
+  bash: 'bash',
+  pwsh7: 'pwsh 7',
+  pwsh51: 'pwsh 5.1',
+}
+
+const environmentLabels: Record<string, string> = {
+  bare: 'bare',
+  wsl2: 'wsl2',
+  docker: 'docker',
+  'windows-sandbox': 'Windows Sandbox',
 }
 function isValidAgentLimits(value: AgentLimitsConfig): boolean {
   return Number.isInteger(value.modelRequestsPerRound) &&
@@ -1276,6 +1293,12 @@ export function App(): React.JSX.Element {
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [commandDialogOpen, setCommandDialogOpen] = useState(false)
+  const [commandProjectId, setCommandProjectId] = useState('')
+  const [commandConversationId, setCommandConversationId] = useState('')
+  const [commandDraft, setCommandDraft] = useState(defaultCommandExecutionConfig)
+  const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
+  const [shellDetectBusy, setShellDetectBusy] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
@@ -1535,6 +1558,9 @@ export function App(): React.JSX.Element {
   function openSettings(): void {
     setConfigDraft(createSettingsDraft())
     setSettingsError('')
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) setShellDetection(cached)
+    }).catch(() => undefined)
     setSettingsOpen(true)
   }
 
@@ -1778,6 +1804,80 @@ export function App(): React.JSX.Element {
       setSettingsError(t('unableChangeAgentLimits'))
     } finally {
       setSaving(false)
+    }
+  }
+
+  function openCommandExecutionSettings(): void {
+    if (!activeProject || !activeConversation || interactionLocked) {
+      return
+    }
+    setCommandProjectId(activeProject.id)
+    setCommandConversationId(activeConversation.id)
+    setCommandDraft({ ...(activeConversation.commandExecution ?? activeProject.commandExecutionDefault) })
+    setSettingsError('')
+    setCommandDialogOpen(true)
+  }
+
+  async function saveCommandExecutionSettings(): Promise<void> {
+    if (interactionLocked || !isValidCommandExecutionDraft()) {
+      return
+    }
+    setSaving(true)
+    setSettingsError('')
+    try {
+      const updated = await window.codey.setConversationCommandExecution(
+        commandProjectId,
+        commandConversationId,
+        commandDraft,
+      )
+      replaceProject(updated)
+      setCommandDialogOpen(false)
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function isValidCommandExecutionDraft(): boolean {
+    if (!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment)) return false
+    if (commandDraft.modelAuditEnabled && !commandDraft.auditModelConfigId) return false
+    if (commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId) {
+      const auditModel = config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)
+      const sessionModel = effectiveModelConfig
+      if (!auditModel || !sessionModel) return false
+      if (auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) return false
+    }
+    try {
+      for (const rule of commandDraft.denyRules) new RegExp(rule, 'i')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function runShellDetection(): Promise<void> {
+    if (shellDetectBusy) {
+      return
+    }
+    setShellDetectBusy(true)
+    try {
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      setShellDetection(null)
+    } finally {
+      setShellDetectBusy(false)
+    }
+  }
+
+  async function pickBashExecutable(): Promise<void> {
+    try {
+      const picked = await window.codey.pickBashExecutable()
+      if (picked) {
+        setShellDetection(await window.codey.detectShells())
+      }
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
     }
   }
 
@@ -2282,6 +2382,11 @@ export function App(): React.JSX.Element {
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
+                  {config.developerMode && activeProject && (
+                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
+                      {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
+                    </Button>
+                  )}
                 </div>
               )}
               {activeConversation && (
@@ -2661,6 +2766,33 @@ export function App(): React.JSX.Element {
                   }))}
                 />
                 <p className="settings-description">{t('developerModeDescription')}</p>
+                {configDraft.developerMode && (
+                  <div className="shell-detection-group">
+                    <h3>{t('environmentDetection')}</h3>
+                    <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
+                      {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
+                    </Button>
+                    {shellDetection && (
+                      <div className="shell-detection-results">
+                        {shellDetection.interpreters.map((entry) => (
+                          <p key={entry.kind} className="shell-detection-item">
+                            <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
+                            <span className="shell-detection-detail">{entry.detail}</span>
+                          </p>
+                        ))}
+                        {shellDetection.environments.map((entry) => (
+                          <p key={entry.kind} className="shell-detection-item">
+                            <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
+                            <span className="shell-detection-detail">{entry.detail}</span>
+                          </p>
+                        ))}
+                        <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
+                          {t('pickBashExecutable')}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </section>
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
@@ -2819,6 +2951,116 @@ export function App(): React.JSX.Element {
                 appearance="primary"
                 disabled={interactionLocked || saving || !isValidAgentLimits(agentLimitsDraft)}
                 onClick={() => void saveAgentLimitsSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={commandDialogOpen} onOpenChange={(_, data) => setCommandDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('commandExecutionSettings')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Switch
+                checked={commandDraft.enabled}
+                disabled={interactionLocked}
+                label={t('commandExecutionEnabled')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, enabled: data.checked }))}
+              />
+              <p className="settings-description">{t('commandExecutionDescription')}</p>
+              <Field label={t('commandInterpreter')}>
+                <Select
+                  disabled={interactionLocked || !commandDraft.enabled}
+                  value={commandDraft.interpreter}
+                  onChange={(_, data) => setCommandDraft((current) => ({
+                    ...current,
+                    interpreter: data.value as CommandExecutionConfig['interpreter'],
+                  }))}
+                >
+                  <option value="bash">bash</option>
+                  <option value="pwsh7">pwsh 7</option>
+                  <option value="pwsh51">pwsh 5.1</option>
+                </Select>
+              </Field>
+              <Field label={t('commandEnvironment')}>
+                <Select
+                  disabled={interactionLocked || !commandDraft.enabled}
+                  value={commandDraft.environment}
+                  onChange={(_, data) => setCommandDraft((current) => ({
+                    ...current,
+                    environment: data.value as CommandExecutionConfig['environment'],
+                  }))}
+                >
+                  <option value="bare">{t('commandEnvBare')}</option>
+                  <option value="wsl2">wsl2</option>
+                  <option value="docker">docker</option>
+                  <option value="windows-sandbox">Windows Sandbox</option>
+                </Select>
+              </Field>
+              {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
+                <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+              )}
+              <Switch
+                checked={commandDraft.modelAuditEnabled}
+                disabled={interactionLocked || !commandDraft.enabled}
+                label={t('commandModelAudit')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, modelAuditEnabled: data.checked }))}
+              />
+              {commandDraft.modelAuditEnabled && (
+                <>
+                  <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
+                    <Select
+                      disabled={interactionLocked}
+                      value={commandDraft.auditModelConfigId ?? ''}
+                      onChange={(_, data) => setCommandDraft((current) => ({
+                        ...current,
+                        auditModelConfigId: data.value || null,
+                      }))}
+                    >
+                      <option value="">{t('notConfigured')}</option>
+                      {config.modelConfigs
+                        .filter((model) => model.id !== effectiveModelConfig?.id)
+                        .map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name || model.modelName || t('unnamedModel')}
+                          </option>
+                        ))}
+                    </Select>
+                  </Field>
+                  {effectiveModelConfig && (
+                    <p className="settings-description">
+                      {t('commandSessionModelInfo', {
+                        config: effectiveModelConfig.name || effectiveModelConfig.modelName,
+                        model: effectiveModelConfig.modelName,
+                      })}
+                    </p>
+                  )}
+                </>
+              )}
+              {commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId && effectiveModelConfig &&
+                config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)?.modelName.trim().toLowerCase() === effectiveModelConfig.modelName.trim().toLowerCase() && (
+                <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+              )}
+              <Switch
+                checked={commandDraft.manualConfirmationEnabled}
+                disabled={interactionLocked || !commandDraft.enabled}
+                label={t('commandManualConfirmation')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, manualConfirmationEnabled: data.checked }))}
+              />
+              <p className="settings-description">{t('commandRuleInterceptionNote')}</p>
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setCommandDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !isValidCommandExecutionDraft()}
+                onClick={() => void saveCommandExecutionSettings()}
               >
                 {saving ? t('saving') : t('save')}
               </Button>

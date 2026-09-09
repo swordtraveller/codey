@@ -4,6 +4,7 @@ import type {
   AgentContextMessage,
   AgentLimitsConfig,
   AssistantMessageBlock,
+  CommandExecutionConfig,
   ContextManagementConfig,
   ContextMetrics,
   DevelopmentProgressUpdate,
@@ -18,6 +19,7 @@ import { toProviderMessages } from './model-messages'
 import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
+import type { CommandExecutorRuntime } from './command-executor'
 
 type ResponseMessage = {
   content?: string | null
@@ -604,6 +606,8 @@ export async function develop(
     allowCustomStrategy?: boolean
     roundId?: string
     roundCount?: number
+    commandExecution?: CommandExecutionConfig
+    commandRuntime?: CommandExecutorRuntime
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -618,7 +622,7 @@ export async function develop(
   }
 
   const writtenFiles: string[] = []
-  const tools = createAgentTools(project, networkAccessEnabled)
+  const tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution)
   const projectDetections = await detectProjectFolders(project.folders)
   const systemMessage = createAgentSystemMessage(project, networkAccessEnabled)
   const history = toApiMessages(agentMessages)
@@ -789,7 +793,7 @@ export async function develop(
         let isError = false
         try {
           throwIfAborted(runtime?.signal)
-          content = await runAgentTool(project, toolCall, writtenFiles, runtime, networkAccessEnabled)
+          content = await runAgentTool(project, toolCall, writtenFiles, runtime, networkAccessEnabled, runtime?.commandExecution, runtime?.commandRuntime)
           completedToolCalls += 1
           isError = toolResultHasFailure(content)
         } catch (error) {

@@ -315,6 +315,34 @@ body {
   margin-top: 4px;
 }
 
+.shell-detection-group {
+  margin-top: 8px;
+}
+
+.shell-detection-group h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.shell-detection-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.shell-detection-item {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  font-size: 13px;
+}
+
+.shell-detection-detail {
+  color: #616161;
+  font-size: 12px;
+}
+
 .multimodal-switches {
   display: flex;
   flex-wrap: wrap;
