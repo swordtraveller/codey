@@ -328,6 +328,8 @@ export const commandTimeoutClampSeconds = 600
 export const commandConfirmationThresholdSeconds = 60
 export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; environment: CommandEnvironment }> = [
   { interpreter: 'bash', environment: 'bare' },
+  { interpreter: 'pwsh7', environment: 'bare' },
+  { interpreter: 'pwsh51', environment: 'bare' },
 ]
 
 export function commandExecutionSupported(interpreter: CommandInterpreter, environment: CommandEnvironment): boolean {

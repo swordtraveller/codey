@@ -461,6 +461,7 @@ async function developProject(
       roundCount,
       commandExecution,
       commandRuntime,
+      shellDetection: getCachedShellDetection(),
     },
     appConfig.networkAccessEnabled,
   )

@@ -12,7 +12,8 @@ import {
   commandTimeoutMinSeconds,
 } from '../shared/types'
 import { isAuditModelAllowed } from './command-execution-config'
-import { resolveBareBashExecutable } from './shell-detect'
+import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-detect'
+import type { CommandInterpreter } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
 const AUDIT_TIMEOUT_MS = 60_000
@@ -194,10 +195,17 @@ async function requestAuditVerdict(
   }
 }
 
-async function runBareBash(command: string, workspacePath: string, timeoutSeconds: number, signal?: AbortSignal): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
-  const bash = await resolveBareBashExecutable()
+type RawRunResult = { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }
+
+function runProcess(
+  executable: string,
+  args: string[],
+  workspacePath: string,
+  timeoutSeconds: number,
+  signal?: AbortSignal,
+): Promise<RawRunResult> {
   return new Promise((resolve) => {
-    const child = spawn(bash, ['-c', command], {
+    const child = spawn(executable, args, {
       cwd: workspacePath,
       windowsHide: true,
       shell: false,
@@ -231,6 +239,27 @@ async function runBareBash(command: string, workspacePath: string, timeoutSecond
       resolve({ stdout: clip(stdout), stderr: clip(stderr), exitCode: code, timedOut })
     })
   })
+}
+
+async function runBare(
+  interpreter: CommandInterpreter,
+  command: string,
+  workspacePath: string,
+  timeoutSeconds: number,
+  signal?: AbortSignal,
+): Promise<RawRunResult> {
+  if (interpreter === 'bash') {
+    const bash = await resolveBareBashExecutable()
+    return runProcess(bash, ['-c', command], workspacePath, timeoutSeconds, signal)
+  }
+  const pwsh = await resolveBarePwshExecutable(interpreter)
+  return runProcess(
+    pwsh,
+    ['-NoProfile', '-NonInteractive', '-Command', command],
+    workspacePath,
+    timeoutSeconds,
+    signal,
+  )
 }
 
 export type RunCommandOutcome = {
@@ -319,7 +348,7 @@ export async function executeCommand(options: {
     }
 
     const startedAt = Date.now()
-    const result = await runBareBash(trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+    const result = await runBare(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
     const durationMs = Date.now() - startedAt
     audit.push({
       description: `executed (${config.interpreter}/${config.environment}) exit=${result.exitCode ?? 'n/a'} timeout=${timeoutSeconds}s duration=${Math.round(durationMs / 100) / 10}s`,

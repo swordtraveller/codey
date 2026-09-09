@@ -11,6 +11,7 @@ import type {
   DevelopmentTimelineItem,
   ModelConfig,
   Project,
+  ShellDetectionResult,
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
 import { log } from './logger'
@@ -608,6 +609,7 @@ export async function develop(
     roundCount?: number
     commandExecution?: CommandExecutionConfig
     commandRuntime?: CommandExecutorRuntime
+    shellDetection?: ShellDetectionResult | null
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -622,7 +624,7 @@ export async function develop(
   }
 
   const writtenFiles: string[] = []
-  const tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution)
+  const tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection)
   const projectDetections = await detectProjectFolders(project.folders)
   const systemMessage = createAgentSystemMessage(project, networkAccessEnabled)
   const history = toApiMessages(agentMessages)

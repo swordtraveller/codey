@@ -49,10 +49,12 @@ describe('command execution config', () => {
     expect(normalized.ruleInterception).toBe(true)
   })
 
-  it('rejects combos outside the v1 support matrix', () => {
-    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh7', environment: 'bare' }))).toBe(false)
+  it('rejects combos outside the support matrix', () => {
     expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'docker' }))).toBe(false)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'bash', environment: 'wsl2' }))).toBe(false)
     expect(isValidCommandExecutionConfig(config())).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh7', environment: 'bare' }))).toBe(true)
+    expect(isValidCommandExecutionConfig(config({ interpreter: 'pwsh51', environment: 'bare' }))).toBe(true)
   })
 
   it('requires an audit model when model audit is enabled', () => {
@@ -122,6 +124,48 @@ describe('git bash launcher translation', () => {
   })
 })
 
+describe('tool description guidance', () => {
+  it('lists only detected combos and carries interpreter-specific notes', async () => {
+    const { createAgentTools } = await import('../src/main/tools')
+    const { defaultCommandExecutionConfig: defaults } = await import('../src/shared/types')
+    const project = {
+      id: 'p',
+      name: 'P',
+      archived: false,
+      defaultModelConfigId: null,
+      contextConfigOverride: null,
+      commandExecutionDefault: { ...defaults },
+      folders: [{ id: 'f1', path: 'C:/tmp' }],
+      pythonEnvironmentFolderId: null,
+      conversations: [],
+    } as never
+    const detection = {
+      interpreters: [
+        { kind: 'bash' as const, available: true, detail: 'ok' },
+        { kind: 'pwsh7' as const, available: true, detail: 'PowerShell 7.6.6 (Microsoft Store)' },
+        { kind: 'pwsh51' as const, available: false, detail: 'missing' },
+      ],
+      environments: [
+        { kind: 'bare' as const, available: true, detail: 'host' },
+        { kind: 'wsl2' as const, available: false, detail: 'no' },
+        { kind: 'docker' as const, available: false, detail: 'no' },
+        { kind: 'windows-sandbox' as const, available: false, detail: 'no' },
+      ],
+      detectedAt: new Date().toISOString(),
+    }
+    const tools = createAgentTools(project, false, { ...defaults, enabled: true, interpreter: 'bash' }, detection) as Array<{ function: { name: string; description: string } }>
+    const runCommand = tools.find((tool) => tool.function.name === 'run_command')!
+    expect(runCommand.function.description).toContain('bash (bare), pwsh7 (bare)')
+    expect(runCommand.function.description).not.toContain('pwsh51 (bare)')
+    expect(runCommand.function.description).toContain('MSYS_NO_PATHCONV=1')
+
+    const pwshTools = createAgentTools(project, false, { ...defaults, enabled: true, interpreter: 'pwsh51' }, detection) as Array<{ function: { name: string; description: string } }>
+    const pwshRunCommand = pwshTools.find((tool) => tool.function.name === 'run_command')!
+    expect(pwshRunCommand.function.description).toContain('You are writing Windows PowerShell 5.1')
+    expect(pwshRunCommand.function.description).toContain('Get-ChildItem')
+  })
+})
+
 describe('audit verdict parsing', () => {
   it('parses a plain JSON verdict', () => {
     expect(parseAuditVerdict('{"verdict":"allow"}')).toEqual({ verdict: 'allow', reason: '' })
@@ -173,7 +217,13 @@ describe('executeCommand', () => {
       return false
     }
   })()
+  const pwshAvailable = process.platform === 'win32' && spawnSync(
+    `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+    ['-NoProfile', '-NonInteractive', '-Command', 'echo ok'],
+    { windowsHide: true },
+  ).status === 0
   const bashIt = bashAvailable ? it : it.skip
+  const pwshIt = pwshAvailable ? it : it.skip
 
   beforeEach(() => {
     shellDetectTestHooks.setBashOverride(bashAvailable ? 'bash' : null)
@@ -257,6 +307,20 @@ describe('executeCommand', () => {
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('command-execution-ok')
     expect(outcome.audit.some((entry) => entry.description.startsWith('executed'))).toBe(true)
+  })
+
+  pwshIt('runs a benign command through pwsh 5.1', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: `pwsh-${Math.random()}`,
+      config: config({ enabled: true, interpreter: 'pwsh51' }),
+      command: 'Write-Output pwsh-execution-ok',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.output).toContain('pwsh-execution-ok')
   })
 
   bashIt('clamps long timeouts to 600s when manual confirmation is disabled', async () => {

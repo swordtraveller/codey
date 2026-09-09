@@ -116,9 +116,25 @@ async function detectBash(): Promise<{ available: boolean; path: string | null; 
   return { available: false, path: null, detail: 'bash not found on PATH, the registry, or common Git Bash locations; choose git-bash.exe manually' }
 }
 
-async function detectPwsh7(): Promise<{ available: boolean; detail: string }> {
+async function detectPwsh7(): Promise<{ available: boolean; path: string | null; detail: string }> {
   const version = await probe('pwsh', ['--version'])
-  return { available: Boolean(version), detail: version ?? 'pwsh not found on PATH' }
+  if (version) {
+    return { available: true, path: 'pwsh', detail: version.split('\n')[0] ?? 'pwsh on PATH' }
+  }
+  // Store installs register an execution alias under WindowsApps that some
+  // Node/spawn configurations fail to resolve through PATH.
+  const storeAlias = join(homedir(), 'AppData', 'Local', 'Microsoft', 'WindowsApps', 'pwsh.exe')
+  if (await executableExists(storeAlias)) {
+    const aliasVersion = await probe(storeAlias, ['--version'])
+    if (aliasVersion) {
+      return { available: true, path: storeAlias, detail: `${aliasVersion.split('\n')[0]} (Microsoft Store)` }
+    }
+  }
+  return { available: false, path: null, detail: 'pwsh not found on PATH or in WindowsApps' }
+}
+
+function pwsh51Path(): string {
+  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
 async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
@@ -142,6 +158,7 @@ async function detectDocker(): Promise<{ available: boolean; detail: string }> {
  *  room for more interpreters and environments. */
 export async function detectShells(): Promise<ShellDetectionResult> {
   const [bash, pwsh7, wsl2, docker] = await Promise.all([detectBash(), detectPwsh7(), detectWsl2(), detectDocker()])
+  const pwsh51Available = process.platform === 'win32' && await executableExists(pwsh51Path())
   const result: ShellDetectionResult = {
     interpreters: [
       {
@@ -150,9 +167,18 @@ export async function detectShells(): Promise<ShellDetectionResult> {
         executablePath: bash.path ?? undefined,
         detail: bash.detail,
       },
-      { kind: 'pwsh7' satisfies CommandInterpreter, available: pwsh7.available, detail: pwsh7.detail },
-      // Windows PowerShell 5.1 ships with every Windows install.
-      { kind: 'pwsh51' satisfies CommandInterpreter, available: process.platform === 'win32', detail: process.platform === 'win32' ? 'Windows PowerShell 5.1 (built in)' : 'not available on this platform' },
+      {
+        kind: 'pwsh7' satisfies CommandInterpreter,
+        available: pwsh7.available,
+        executablePath: pwsh7.path ?? undefined,
+        detail: pwsh7.detail,
+      },
+      {
+        kind: 'pwsh51' satisfies CommandInterpreter,
+        available: pwsh51Available,
+        executablePath: pwsh51Available ? pwsh51Path() : undefined,
+        detail: pwsh51Available ? `Windows PowerShell 5.1 at ${pwsh51Path()}` : 'not available on this platform',
+      },
     ],
     environments: [
       { kind: 'bare' satisfies CommandEnvironment, available: true, detail: 'commands run directly on the host' },
@@ -174,6 +200,15 @@ export async function resolveBareBashExecutable(): Promise<string> {
   const bash = cached.interpreters.find((entry) => entry.kind === 'bash')
   if (bash?.available && bash.executablePath) return bash.executablePath
   throw new Error('bash is unavailable. Run environment detection in settings and configure git-bash.exe if needed.')
+}
+
+/** The pwsh executable for the bare environment. Falls back to a fresh
+ *  detection when nothing is cached. */
+export async function resolveBarePwshExecutable(kind: 'pwsh7' | 'pwsh51'): Promise<string> {
+  const cached = cachedDetection ?? await detectShells()
+  const entry = cached.interpreters.find((item) => item.kind === kind)
+  if (entry?.available && entry.executablePath) return entry.executablePath
+  throw new Error(`${kind === 'pwsh7' ? 'pwsh 7' : 'Windows PowerShell 5.1'} is unavailable. Run environment detection in settings.`)
 }
 
 export function commandComboUsable(
