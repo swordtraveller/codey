@@ -1,5 +1,6 @@
 import type { ImageAttachment } from '../shared/image-attachments'
 import type { ContextAction, ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
+import { resolveMaxInputTokens } from '../shared/types'
 import type { ToolCall } from './tools'
 import { countContextMessageTokens, countContextTokens, createContextTokenCounter, normalizeToolCallSequence } from './context-utils'
 import { applyCustomRhaiStrategy } from './rhai-strategy'
@@ -251,22 +252,21 @@ function metrics(originalTokens: number, compressedTokens: number, modelConfig: 
     originalTokens,
     compressedTokens,
     modelMaxContext: modelConfig.modelMaxContext,
-    triggerThreshold: Math.max(1, modelConfig.modelMaxContext - contextConfig.safeOutputMargin),
+    maxInputTokens: resolveMaxInputTokens(contextConfig, modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens),
     compressionRatio: compressedTokens ? originalTokens / compressedTokens : 1,
     ...state,
   }
 }
 
 function manageSingleLayer(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig): ContextResult {
-  const effectiveOutputMargin = contextConfig.safeOutputMargin >= modelConfig.modelMaxContext ? 0 : Math.max(0, contextConfig.safeOutputMargin)
-  const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - effectiveOutputMargin)
+  const maxInputTokens = resolveMaxInputTokens(contextConfig, modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens)
   const counter = createContextTokenCounter(tools)
   const originalTokens = counter.request(messages)
   let managed = messages
   let filtered = false
   let rewritten = false
   let truncated = false
-  if (originalTokens >= triggerThreshold) {
+  if (originalTokens >= maxInputTokens) {
     const recentStart = getRecentStart(messages, contextConfig.recentKeepRounds)
     const system = messages.slice(0, 1)
     let older = messages.slice(1, recentStart)
@@ -285,7 +285,7 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
       managedMessageTokens = systemTokens + olderTokens + recentTokens
       filtered = olderTokens < before
     }
-    if (managedTokens() >= triggerThreshold && contextConfig.rewriteEnabled) {
+    if (managedTokens() >= maxInputTokens && contextConfig.rewriteEnabled) {
       const before = olderTokens
       older = older.map((message) => transformMessage(message, rewriteNaturalLanguage))
       managed = [...system, ...older, ...recent]
@@ -295,12 +295,31 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
     }
     if (contextConfig.truncateEnabled) {
       const rounds = splitRounds(older)
-      while (managedTokens() >= triggerThreshold && rounds.length > 0) {
+      while (managedTokens() >= maxInputTokens && rounds.length > 0) {
         const removed = rounds.shift() ?? []
         olderTokens -= counter.messages(removed)
         managedMessageTokens = systemTokens + olderTokens + recentTokens
         managed = [...system, ...rounds.flat(), ...recent]
         truncated = true
+      }
+    }
+    // Single-user-turn agent sessions never accumulate five user rounds, so the
+    // round boundary above leaves "older" empty and the budget unenforced. Fall
+    // back to closed tool-call units (the same units the layered path demotes):
+    // keep the most recent units intact and compress/drop the rest.
+    if (managedTokens() >= maxInputTokens) {
+      const fallback = compressAgentUnits(
+        { system, older, recent },
+        messages.slice(1),
+        maxInputTokens,
+        contextConfig,
+        counter,
+      )
+      if (fallback) {
+        managed = fallback.messages
+        filtered = filtered || fallback.filtered
+        rewritten = rewritten || fallback.rewritten
+        truncated = truncated || fallback.truncated
       }
     }
   }
@@ -316,12 +335,78 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
   }
 }
 
+/**
+ * Single-layer fallback for agent-shaped sessions: one user turn followed by a
+ * long tool-call chain. Keeps the most recent closed units (at least one)
+ * verbatim, filters and rewrites the older units, then drops whole units from
+ * the oldest end until the request fits the budget. Returns undefined when the
+ * unit split is unusable (open tail) or nothing improved.
+ */
+function compressAgentUnits(
+  parts: { system: ContextMessage[]; older: ContextMessage[]; recent: ContextMessage[] },
+  nonSystem: ContextMessage[],
+  maxInputTokens: number,
+  contextConfig: ContextManagementConfig,
+  counter: ReturnType<typeof createContextTokenCounter>,
+): { messages: ContextMessage[]; filtered: boolean; rewritten: boolean; truncated: boolean } | undefined {
+  const { units, hasOpenTail } = splitClosedUnits(nonSystem)
+  if (hasOpenTail || units.length < 2) return undefined
+
+  const keepUnits = Math.min(units.length - 1, Math.max(1, contextConfig.recentKeepRounds))
+  const protectedMessages = units.slice(-keepUnits).flat()
+  const protectedTokens = counter.messages(protectedMessages)
+  const systemTokens = counter.messages(parts.system)
+  const totalTokens = (candidate: ContextMessage[]) => counter.requestBaseTokens + systemTokens + counter.messages(candidate) + protectedTokens
+
+  let candidate = units.slice(0, units.length - keepUnits).flat()
+  const beforeTokens = totalTokens(candidate)
+
+  if (contextConfig.filterEnabled) {
+    candidate = candidate.map((message) => transformMessage(message, filterNaturalLanguage))
+  }
+  const afterFilter = totalTokens(candidate)
+  if (contextConfig.rewriteEnabled && afterFilter >= maxInputTokens) {
+    candidate = candidate.map((message) => transformMessage(message, rewriteNaturalLanguage))
+  }
+  const afterRewrite = totalTokens(candidate)
+
+  let droppedUnits = 0
+  // Only closed tool-call units are droppable; user and plain assistant
+  // messages always stay (they carry the task and the agent's reasoning).
+  const droppableUnits = units
+    .slice(0, units.length - keepUnits)
+    .map((unit) => unit.some((message) => message.role === 'assistant' && message.tool_calls?.length) ? unit : undefined)
+  while (totalTokens(candidate) >= maxInputTokens && droppedUnits < droppableUnits.length) {
+    const unit = droppableUnits[droppedUnits]
+    droppedUnits += 1
+    if (!unit) continue
+    const removedIds = new Set(unit.map((message) => message.id ?? ''))
+    candidate = candidate.filter((message) => message.id === undefined || !removedIds.has(message.id))
+  }
+
+  const rebuilt = normalizeToolCallSequence([
+    ...parts.system,
+    ...candidate,
+    ...protectedMessages,
+  ])
+  const originalRequest = counter.request(normalizeToolCallSequence([...parts.system, ...nonSystem]))
+  if (droppedUnits === 0 && afterRewrite >= beforeTokens) return undefined
+  if (counter.request(rebuilt) >= originalRequest) return undefined
+  return {
+    messages: rebuilt,
+    filtered: contextConfig.filterEnabled && afterFilter < beforeTokens,
+    rewritten: contextConfig.rewriteEnabled && afterRewrite < afterFilter,
+    truncated: droppedUnits > 0,
+  }
+}
+
 function manageLayered(messages: ContextMessage[], tools: object[], modelConfig: ModelConfig, contextConfig: ContextManagementConfig, runtime: ContextManagementRuntime): ContextResult {
-  const effectiveOutputMargin = contextConfig.safeOutputMargin >= modelConfig.modelMaxContext ? 0 : Math.max(0, contextConfig.safeOutputMargin)
-  const triggerThreshold = Math.max(1, modelConfig.modelMaxContext - effectiveOutputMargin)
+  const totalTokens = Math.max(1, Math.floor(modelConfig.modelMaxContext))
   const counter = createContextTokenCounter(tools)
   const toolDefinitionTokens = counter.toolDefinitionTokens
-  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, triggerThreshold - toolDefinitionTokens))
+  // The user-configured hot budget wins; the physical request cap is the model
+  // window itself (tool definitions must still fit or nothing can be sent).
+  const hotBudget = Math.max(1, Math.min(contextConfig.hotTokenBudget, totalTokens - toolDefinitionTokens))
   const highWatermark = Math.max(1, Math.floor(hotBudget * 0.9))
   const lowWatermark = Math.max(1, Math.floor(hotBudget * 0.8))
   const messageCount = (items: ContextMessage[]) => counter.messages(items)
@@ -379,7 +464,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   let hotMessageTokens = messageCount(system) + messageCount(hot)
   const hotTokens = () => counter.layerBaseTokens + hotMessageTokens
   const hotRequestTokens = () => counter.requestBaseTokens + hotMessageTokens
-  const fitsHardLimit = () => hotTokens() < hotBudget && hotRequestTokens() < triggerThreshold
+  const fitsHardLimit = () => hotTokens() < hotBudget && hotRequestTokens() < totalTokens
   const replacementSet = replaceableIds([...historicalHot, ...recalled, ...currentHot])
   const demote = (items: ContextMessage[]): void => {
     const selected = new Set(items)
@@ -425,10 +510,10 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const latestOnlyLayerTokens = counter.layerBaseTokens + latestOnlyMessageTokens
   const latestOnlyRequestTokens = counter.requestBaseTokens + latestOnlyMessageTokens
   let overflow: ContextResult['overflow']
-  if (latestUser && (latestOnlyLayerTokens >= hotBudget || latestOnlyRequestTokens >= triggerThreshold)) {
+  if (latestUser && (latestOnlyLayerTokens >= hotBudget || latestOnlyRequestTokens >= totalTokens)) {
     overflow = {
       reason: 'latest_user_too_large',
-      requiredReleaseTokens: Math.max(1, latestOnlyLayerTokens - hotBudget + 1, latestOnlyRequestTokens - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, latestOnlyLayerTokens - hotBudget + 1, latestOnlyRequestTokens - totalTokens + 1),
     }
   }
 
@@ -483,7 +568,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     const pinnedBlockers = hot.some((message) => message.pinnedToHot === true)
     overflow = {
       reason: pinnedBlockers ? 'pinned_hot_overflow' : current.length > 1 ? 'current_round_too_large' : 'hot_overflow',
-      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, hotRequestTokens() - triggerThreshold + 1),
+      requiredReleaseTokens: Math.max(1, hotTokens() - hotBudget + 1, hotRequestTokens() - totalTokens + 1),
     }
   }
 

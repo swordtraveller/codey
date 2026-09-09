@@ -27,7 +27,7 @@ function model(id: string): ModelConfig {
 }
 
 function context(layeredEnabled: boolean): ContextManagementConfig {
-  return { ...defaultContextManagementConfig, layeredEnabled }
+  return { ...defaultContextManagementConfig, layeredEnabled, maxInputTokens: 128_000 }
 }
 
 const models = [model('app'), model('project'), model('conversation')]
@@ -90,12 +90,10 @@ describe('configuration resolution', () => {
   })
 
   it('normalizes legacy context values without merging overrides with parent settings', () => {
-    expect(normalizeContextManagementConfig(undefined, {
-      safeOutputMargin: 8_000,
-      recentKeepRounds: 4,
-    })).toEqual({
+    expect(normalizeContextManagementConfig(undefined)).toEqual(defaultContextManagementConfig)
+    expect(normalizeContextManagementConfig({ maxInputTokens: 8_000, recentKeepRounds: 4 })).toEqual({
       ...defaultContextManagementConfig,
-      safeOutputMargin: 8_000,
+      maxInputTokens: 8_000,
       recentKeepRounds: 4,
     })
 

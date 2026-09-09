@@ -53,6 +53,7 @@ import {
   defaultAppConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
+  deriveContextBudgets,
   maximumAgentLimit,
   type ModelConfig,
   type Project,
@@ -119,7 +120,7 @@ function formatMessageTime(createdAt: string | undefined): string {
 }
 
 function isValidContextConfig(value: ContextManagementConfig): boolean {
-  return Number.isInteger(value.safeOutputMargin) && value.safeOutputMargin >= 1 &&
+  return Number.isInteger(value.maxInputTokens) && value.maxInputTokens >= 0 &&
     Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
     Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
     Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
@@ -785,16 +786,31 @@ function contextStrategyMode(value: ContextManagementConfig, customStrategyAvail
 function ContextSettingsFields({
   value,
   disabled = false,
+  modelDisabled,
   showCustomStrategy = false,
+  modelConfigs,
+  activeModelConfigId,
+  fallbackModelId,
+  emptyModelOptionLabel,
+  onModelConfigChange,
   onChange,
 }: {
   value: ContextManagementConfig
   disabled?: boolean
+  modelDisabled?: boolean
   showCustomStrategy?: boolean
+  modelConfigs?: ModelConfig[]
+  activeModelConfigId?: string | null
+  fallbackModelId?: string | null
+  emptyModelOptionLabel?: string
+  onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
+  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ??
+    modelConfigs?.find((model) => model.id === fallbackModelId) ??
+    modelConfigs?.[0]
 
   function setStrategyMode(mode: ContextStrategyMode): void {
     if (mode === 'custom') {
@@ -805,6 +821,13 @@ function ContextSettingsFields({
       layeredEnabled: mode === 'layered',
       customStrategyEnabled: false,
     })
+  }
+
+  function applyExperiencedBudgets(): void {
+    if (!referenceModel) {
+      return
+    }
+    onChange(deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens))
   }
 
   return (
@@ -847,16 +870,6 @@ function ContextSettingsFields({
               }}
             />
           </Field>
-          <Field label={t('outputTokenMargin')} required>
-            <Input
-              disabled={disabled}
-              min={1}
-              step={1000}
-              type="number"
-              value={String(value.safeOutputMargin)}
-              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-            />
-          </Field>
         </>
       ) : (
         <>
@@ -878,16 +891,6 @@ function ContextSettingsFields({
             label={t('contextTruncate')}
             onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
           />
-          <Field label={t('outputTokenMargin')} required>
-            <Input
-              disabled={disabled}
-              min={1}
-              step={1000}
-              type="number"
-              value={String(value.safeOutputMargin)}
-              onChange={(_, data) => onChange({ safeOutputMargin: Number(data.value) })}
-            />
-          </Field>
           <Field label={t('recentRounds')} required>
             <Input
               disabled={disabled}
@@ -898,6 +901,45 @@ function ContextSettingsFields({
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
             />
           </Field>
+          {modelConfigs !== undefined && modelConfigs.length > 0 && (
+            <Field label={t('modelConfiguration')}>
+              <Select
+                disabled={modelDisabled ?? disabled}
+                value={activeModelConfigId ?? referenceModel?.id ?? ''}
+                onChange={(_, data) => onModelConfigChange?.(data.value)}
+              >
+                {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
+                {modelConfigs.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name || model.modelName || t('unnamedModel')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+          <Button
+            appearance="secondary"
+            disabled={disabled || !referenceModel}
+            onClick={applyExperiencedBudgets}
+          >
+            {t('generateExperiencedConfig')}
+          </Button>
+          {strategyMode === 'default' && (
+            <Field label={t('maxInputTokens')} hint={t('maxInputTokensHint')}>
+              <Input
+                disabled={disabled}
+                min={0}
+                step={1000}
+                type="number"
+                value={value.maxInputTokens >= 1 ? String(value.maxInputTokens) : ''}
+                onChange={(_, data) => onChange({
+                  maxInputTokens: data.value === '' || !Number.isFinite(Number(data.value)) || Number(data.value) < 1
+                    ? 0
+                    : Number(data.value),
+                })}
+              />
+            </Field>
+          )}
           {strategyMode === 'layered' && (
             <div className="context-budgets">
               <Field label={t('hotTokenBudget')} required>
@@ -1247,6 +1289,8 @@ export function App(): React.JSX.Element {
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
+  const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
+  const [toast, setToast] = useState<{ message: string; tone: 'info' | 'error' } | null>(null)
   const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
   const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
@@ -1258,6 +1302,7 @@ export function App(): React.JSX.Element {
   const activeConversationKeyRef = useRef('')
   const activeTraceIdsRef = useRef<Record<string, string>>({})
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
+  const toastTimerRef = useRef<number | undefined>(undefined)
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -1276,10 +1321,10 @@ export function App(): React.JSX.Element {
   const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
-  const outputMarginError = effectiveModelConfig &&
-    effectiveContextConfig.safeOutputMargin >= effectiveModelConfig.modelMaxContext
-    ? t('outputMarginContextError', {
-        margin: effectiveContextConfig.safeOutputMargin.toLocaleString(),
+  const maxInputTokensError = effectiveModelConfig &&
+    effectiveContextConfig.maxInputTokens > effectiveModelConfig.modelMaxContext
+    ? t('maxInputTokensContextError', {
+        tokens: effectiveContextConfig.maxInputTokens.toLocaleString(),
         context: effectiveModelConfig.modelMaxContext.toLocaleString(),
         model: effectiveModelConfig.name,
       })
@@ -1293,7 +1338,7 @@ export function App(): React.JSX.Element {
   const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
-    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.triggerThreshold) * 100)}% input`
+    ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
     : ''
   const activeConversationKey = activeProject && activeConversation
     ? `${activeProject.id}:${activeConversation.id}`
@@ -1643,15 +1688,22 @@ export function App(): React.JSX.Element {
       setBridgeBusy(false)
     }
   }
-  function updateAppContextConfig(patch: Partial<ContextManagementConfig>): void {
-    setConfigDraft((current) => ({
-      ...current,
-      contextManagement: { ...current.contextManagement, ...patch },
-    }))
-  }
 
   function updateContextDraft(patch: Partial<ContextManagementConfig>): void {
     setContextDraft((current) => ({ ...current, ...patch }))
+  }
+
+  async function changeContextModelConfig(modelConfigId: string): Promise<void> {
+    if (interactionLocked) {
+      return
+    }
+    if (contextScope === 'conversation') {
+      await changeConversationModelConfig(modelConfigId)
+      return
+    }
+    if (contextProjectId) {
+      await changeProjectModelConfig(contextProjectId, modelConfigId)
+    }
   }
 
   function openContextSettings(scope: 'project' | 'conversation', project = activeProject): void {
@@ -1749,6 +1801,73 @@ export function App(): React.JSX.Element {
       modelConfigs: [...current.modelConfigs, model],
       activeModelConfigId: model.id,
     }))
+  }
+
+  function deleteSelectedModelConfig(): void {
+    const selectedId = configDraft.activeModelConfigId
+    if (!selectedId) {
+      return
+    }
+    const target = configDraft.modelConfigs.find((model) => model.id === selectedId)
+    if (!target) {
+      return
+    }
+    const label = target.name || target.modelName || t('unnamedModel')
+    if (!window.confirm(t('deleteModelConfigConfirm', { name: label }))) {
+      return
+    }
+    setConfigDraft((current) => {
+      const remaining = current.modelConfigs.filter((model) => model.id !== selectedId)
+      if (remaining.length === 0) {
+        const model = { ...defaultModelConfig, id: crypto.randomUUID() }
+        return { ...current, modelConfigs: [model], activeModelConfigId: model.id }
+      }
+      return {
+        ...current,
+        modelConfigs: remaining,
+        activeModelConfigId: remaining.some((model) => model.id === current.activeModelConfigId)
+          ? current.activeModelConfigId
+          : remaining[0].id,
+      }
+    })
+  }
+
+  function showToast(message: string, tone: 'info' | 'error'): void {
+    if (toastTimerRef.current !== undefined) window.clearTimeout(toastTimerRef.current)
+    setToast({ message, tone })
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 5_000)
+  }
+
+  async function fetchModelCapabilitiesForSelected(): Promise<void> {
+    const modelName = selectedModel?.modelName.trim() ?? ''
+    if (!modelName || capabilitiesBusy) {
+      return
+    }
+    setCapabilitiesBusy(true)
+    try {
+      const result = await window.codey.fetchModelCapabilities(modelName)
+      if (result.status === 'ok') {
+        updateSelectedModel({
+          ...(result.maxContextTokens !== undefined ? { modelMaxContext: result.maxContextTokens } : {}),
+          ...(result.maxOutputTokens !== undefined ? { modelMaxOutputTokens: result.maxOutputTokens } : {}),
+          supportsImageInput: result.image,
+          supportsPdfInput: result.pdf,
+          supportsVideoInput: result.video,
+          supportsAudioInput: result.audio,
+        })
+        showToast(t('modelCapabilitiesFetched'), 'info')
+        return
+      }
+      if (result.status === 'not-found') {
+        showToast(t('modelCapabilitiesNotFound', { model: modelName }), 'error')
+        return
+      }
+      showToast(t('modelCapabilitiesNetworkError'), 'error')
+    } catch {
+      showToast(t('modelCapabilitiesNetworkError'), 'error')
+    } finally {
+      setCapabilitiesBusy(false)
+    }
   }
 
   async function setNetworkAccess(enabled: boolean): Promise<void> {
@@ -2019,11 +2138,13 @@ export function App(): React.JSX.Element {
     !model.baseUrl.trim() ||
     !model.apiKey.trim() ||
     !model.modelName.trim() ||
-    model.modelMaxContext < 1_000,
+    model.modelMaxContext < 1_000 ||
+    (model.modelMaxOutputTokens !== undefined &&
+      (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
   )
   const minimumModelContext = Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement) ||
-    configDraft.contextManagement.safeOutputMargin >= minimumModelContext
+    configDraft.contextManagement.maxInputTokens > minimumModelContext
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
@@ -2287,8 +2408,8 @@ export function App(): React.JSX.Element {
             onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
             onStop={() => void stopMessage()}
             onSubmit={(content, images) => {
-              if (outputMarginError) {
-                setError(outputMarginError)
+              if (maxInputTokensError) {
+                setError(maxInputTokensError)
                 return false
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
@@ -2396,6 +2517,9 @@ export function App(): React.JSX.Element {
                   <Button appearance="secondary" onClick={addModelConfig}>
                     {t('addModelConfig')}
                   </Button>
+                  <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
+                    {t('deleteModelConfig')}
+                  </Button>
                 </div>
                 <Field label={t('modelConfigName')} required>
                   <Input
@@ -2424,6 +2548,13 @@ export function App(): React.JSX.Element {
                     placeholder="model-name"
                   />
                 </Field>
+                <Button
+                  appearance="secondary"
+                  disabled={!selectedModel?.modelName.trim() || capabilitiesBusy}
+                  onClick={() => void fetchModelCapabilitiesForSelected()}
+                >
+                  {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
+                </Button>
                 <Field label={t('maximumContextTokens')} required>
                   <Input
                     min={1000}
@@ -2433,14 +2564,44 @@ export function App(): React.JSX.Element {
                     onChange={(_, data) => updateSelectedModel({ modelMaxContext: Number(data.value) })}
                   />
                 </Field>
-              </section>
-              <section className="settings-group">
-                <h2>{t('contextSettings')}</h2>
-                <ContextSettingsFields
-                  disabled={interactionLocked}
-                  value={configDraft.contextManagement}
-                  onChange={updateAppContextConfig}
-                />
+                <Field label={t('maximumOutputTokens')} hint={t('maximumOutputTokensHint')}>
+                  <Input
+                    min={1}
+                    step={1000}
+                    type="number"
+                    value={selectedModel?.modelMaxOutputTokens === undefined ? '' : String(selectedModel.modelMaxOutputTokens)}
+                    onChange={(_, data) => updateSelectedModel({
+                      modelMaxOutputTokens: data.value === '' || !Number.isFinite(Number(data.value))
+                        ? undefined
+                        : Number(data.value),
+                    })}
+                  />
+                </Field>
+                <div className="multimodal-group">
+                  <p className="section-label">{t('multimodalCapabilities')}</p>
+                  <div className="multimodal-switches">
+                    <Switch
+                      checked={selectedModel?.supportsImageInput ?? false}
+                      label={t('modalityImage')}
+                      onChange={(_, data) => updateSelectedModel({ supportsImageInput: data.checked })}
+                    />
+                    <Switch
+                      checked={selectedModel?.supportsPdfInput ?? false}
+                      label={t('modalityPdf')}
+                      onChange={(_, data) => updateSelectedModel({ supportsPdfInput: data.checked })}
+                    />
+                    <Switch
+                      checked={selectedModel?.supportsVideoInput ?? false}
+                      label={t('modalityVideo')}
+                      onChange={(_, data) => updateSelectedModel({ supportsVideoInput: data.checked })}
+                    />
+                    <Switch
+                      checked={selectedModel?.supportsAudioInput ?? false}
+                      label={t('modalityAudio')}
+                      onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
+                    />
+                  </div>
+                </div>
               </section>
               <section className="settings-group">
                 <h2>{t('languageSettings')}</h2>
@@ -2681,7 +2842,17 @@ export function App(): React.JSX.Element {
               />
               <ContextSettingsFields
                 disabled={interactionLocked || !contextOverrideEnabled}
+                modelDisabled={interactionLocked}
                 showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
+                modelConfigs={config.modelConfigs}
+                activeModelConfigId={contextScope === 'conversation'
+                  ? activeConversation?.modelConfigId ?? ''
+                  : projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? ''}
+                fallbackModelId={contextScope === 'conversation'
+                  ? activeProject?.defaultModelConfigId ?? config.activeModelConfigId
+                  : config.activeModelConfigId}
+                emptyModelOptionLabel={t(contextScope === 'conversation' ? 'followProjectDefault' : 'applicationDefault')}
+                onModelConfigChange={(modelConfigId) => void changeContextModelConfig(modelConfigId)}
                 value={contextDraft}
                 onChange={updateContextDraft}
               />
@@ -2698,6 +2869,12 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {toast && (
+        <div className={`app-toast app-toast-${toast.tone}`} role="status">
+          {toast.message}
+        </div>
+      )}
     </FluentProvider>
   )
 }

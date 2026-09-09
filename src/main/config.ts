@@ -21,7 +21,7 @@ type StoredModelConfig = Partial<ModelConfig> & {
 type StoredAppConfig = {
   modelConfigs?: StoredModelConfig[]
   activeModelConfigId?: string | null
-  contextManagement?: Partial<ContextManagementConfig>
+  contextManagement?: Partial<ContextManagementConfig> & { safeOutputMargin?: number }
   language?: AppLanguage
   developerMode?: boolean
   keepAwakeEnabled?: boolean
@@ -42,6 +42,10 @@ function isAppLanguage(value: unknown): value is AppLanguage {
   return value === 'system' || value === 'en' || value === 'zh-CN'
 }
 
+function toOptionalTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined
+}
+
 function readModelConfig(stored: StoredModelConfig): ModelConfig {
   const apiKey = stored.encrypted
     ? safeStorage.decryptString(Buffer.from(stored.apiKey ?? '', 'base64'))
@@ -55,6 +59,11 @@ function readModelConfig(stored: StoredModelConfig): ModelConfig {
     apiKey: apiKey ?? '',
     modelName: stored.modelName ?? '',
     modelMaxContext: stored.modelMaxContext ?? defaultModelConfig.modelMaxContext,
+    modelMaxOutputTokens: toOptionalTokenCount(stored.modelMaxOutputTokens),
+    supportsImageInput: stored.supportsImageInput === true,
+    supportsPdfInput: stored.supportsPdfInput === true,
+    supportsVideoInput: stored.supportsVideoInput === true,
+    supportsAudioInput: stored.supportsAudioInput === true,
   }
 }
 
@@ -66,6 +75,11 @@ function normalizeModelConfig(config: ModelConfig): ModelConfig {
     apiKey: config.apiKey.trim(),
     modelName: config.modelName.trim(),
     modelMaxContext: Math.floor(config.modelMaxContext),
+    modelMaxOutputTokens: toOptionalTokenCount(config.modelMaxOutputTokens),
+    supportsImageInput: config.supportsImageInput === true,
+    supportsPdfInput: config.supportsPdfInput === true,
+    supportsVideoInput: config.supportsVideoInput === true,
+    supportsAudioInput: config.supportsAudioInput === true,
   }
 }
 
@@ -79,7 +93,9 @@ function isValidModelConfig(config: ModelConfig): boolean {
       config.apiKey &&
       config.modelName &&
       Number.isInteger(config.modelMaxContext) &&
-      config.modelMaxContext >= 1_000
+      config.modelMaxContext >= 1_000 &&
+      (config.modelMaxOutputTokens === undefined ||
+        (Number.isInteger(config.modelMaxOutputTokens) && config.modelMaxOutputTokens >= 1))
     )
   } catch {
     return false
@@ -115,8 +131,17 @@ export async function readConfig(): Promise<AppConfig> {
       const activeModelConfigId = modelConfigs.some((model) => model.id === stored.activeModelConfigId)
         ? (stored.activeModelConfigId ?? null)
         : (modelConfigs[0]?.id ?? null)
-      const legacyModel = stored.modelConfigs.find((model) => model.id === activeModelConfigId) ?? stored.modelConfigs[0]
-      const contextManagement = normalizeContextManagementConfig(stored.contextManagement, legacyModel)
+      // Legacy format stored an output margin; convert it to a max-input value
+      // relative to the active model's context window.
+      const legacyMargin = stored.contextManagement?.safeOutputMargin
+      const legacyModel = modelConfigs.find((model) => model.id === activeModelConfigId) ?? modelConfigs[0]
+      const storedContext = legacyMargin !== undefined && legacyModel
+        ? {
+            ...stored.contextManagement,
+            maxInputTokens: Math.max(1, legacyModel.modelMaxContext - legacyMargin),
+          }
+        : stored.contextManagement
+      const contextManagement = normalizeContextManagementConfig(storedContext)
       const developerMode = stored.developerMode === true
       const config: AppConfig = {
         modelConfigs,
@@ -134,6 +159,7 @@ export async function readConfig(): Promise<AppConfig> {
         stored.keepAwakeOnlyWhileWorking === undefined ||
         stored.networkAccessEnabled === undefined ||
         stored.performanceTracingEnabled === undefined ||
+        legacyMargin !== undefined ||
         !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
       ) || stored.activeModelConfigId !== activeModelConfigId
@@ -158,10 +184,17 @@ export async function readConfig(): Promise<AppConfig> {
     }
 
     const model = readModelConfig(stored)
+    const legacyMargin = stored.contextManagement?.safeOutputMargin ?? stored.safeOutputMargin
+    const storedContext = legacyMargin !== undefined
+      ? {
+          ...stored.contextManagement,
+          maxInputTokens: Math.max(1, model.modelMaxContext - legacyMargin),
+        }
+      : stored.contextManagement
     const migrated = {
       modelConfigs: [model],
       activeModelConfigId: model.id,
-      contextManagement: normalizeContextManagementConfig(stored.contextManagement, stored),
+      contextManagement: normalizeContextManagementConfig(storedContext),
       language,
       developerMode: stored.developerMode === true,
       performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
@@ -192,7 +225,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     !activeModelConfigId ||
     !ids.has(activeModelConfigId) ||
     !isValidContextManagementConfig(contextManagement) ||
-    contextManagement.safeOutputMargin >= Math.min(...modelConfigs.map((model) => model.modelMaxContext))
+    contextManagement.maxInputTokens > Math.min(...modelConfigs.map((model) => model.modelMaxContext))
   ) {
     throw new Error('Enter valid model and context settings')
   }

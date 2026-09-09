@@ -83,9 +83,9 @@ function contextConfig(options: LocaProxyOptions): ContextManagementConfig {
     customStrategyScript: options.rhaiScript ?? '',
     hotTokenBudget: Math.max(1_000, overrides.hotTokenBudget ?? defaultContextManagementConfig.hotTokenBudget),
     warmTokenBudget: Math.max(0, overrides.warmTokenBudget ?? defaultContextManagementConfig.warmTokenBudget),
-    safeOutputMargin: Math.min(
-      options.modelConfig.modelMaxContext - 1,
-      Math.max(0, overrides.safeOutputMargin ?? defaultContextManagementConfig.safeOutputMargin),
+    maxInputTokens: Math.min(
+      options.modelConfig.modelMaxContext,
+      Math.max(0, overrides.maxInputTokens || 0),
     ),
   }
 }

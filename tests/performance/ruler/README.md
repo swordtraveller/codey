@@ -58,7 +58,7 @@ The script accepts these optional environment variables:
 
 ```powershell
 $env:RULER_MODEL_MAX_CONTEXT = "1048576"
-$env:RULER_SAFE_OUTPUT_MARGIN = "131072"
+$env:RULER_MAX_INPUT_TOKENS = "0"
 $env:RULER_HOT_TOKEN_BUDGET = "64000"
 $env:RULER_WARM_TOKEN_BUDGET = "32000"
 $env:RULER_COLD_RECALL_TOKEN_BUDGET = "8000"
@@ -67,6 +67,8 @@ $env:RULER_MAX_OUTPUT_TOKENS = "1024"
 $env:RULER_LAYERED = "true"
 $env:RULER_TOKENIZER = "cl100k_base"
 ```
+
+`RULER_MAX_INPUT_TOKENS = 0` (the default) leaves the max input unset: the runtime derives it from the model windows (`floor(max((total - output) * 0.95, total * 0.618))`). Set a positive value to pin the compression trigger line explicitly.
 
 Set `RULER_LAYERED=false` to compare with the non-layered context path. To evaluate a user strategy, pass a Rhai file with `--rhai-script`; the script is loaded locally and is not sent as a remote code artifact.
 

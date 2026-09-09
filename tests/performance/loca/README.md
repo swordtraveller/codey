@@ -45,7 +45,7 @@ pnpm test:performance:loca:smoke -- `
 
 To exercise Codey context management rather than only the tool loop, add `--long-context` to the filesystem-only smoke run. The fixture injects a compact, deterministic background observation before the two-call write/claim task. `--fixture-context-tokens` controls the approximate number of filler tokens (one filler word ≈ one token).
 
-The safe output margin no longer needs an override: when `--max-tokens` is passed explicitly the margin binds to it (256 below), and otherwise it scales with the window (`window / 8`, capped at the 16k default). Do not set `LOCA_SAFE_OUTPUT_MARGIN` unless you really want a manual override.
+The max input budget needs no override by default: it derives from the model windows (`floor(max((total - output) * 0.95, total * 0.618))`). Set `LOCA_MAX_INPUT_TOKENS` only to pin the single-layer trigger line manually.
 
 ### Baseline (context management passes through, no compression)
 
@@ -203,11 +203,13 @@ pnpm test:performance:loca:smoke -- --max-context-size 8192
 This separation is important: an 8,192-token smoke workload is not evidence that the remote model itself has only an 8,192-token context. Context budgets use `LOCA_*` variables and fall back to their `RULER_*` equivalents where practical:
 
 ```powershell
-$env:LOCA_SAFE_OUTPUT_MARGIN = "1024"
+$env:LOCA_MAX_INPUT_TOKENS = "0"
 $env:LOCA_HOT_TOKEN_BUDGET = "4096"
 $env:LOCA_WARM_TOKEN_BUDGET = "2048"
 $env:LOCA_COLD_RECALL_TOKEN_BUDGET = "512"
 $env:LOCA_LAYERED = "true"
 ```
+
+`LOCA_MAX_INPUT_TOKENS = 0` (the default) leaves the max input unset: the runtime derives it from the model windows (`floor(max((total - output) * 0.95, total * 0.618))`). Set a positive value to pin the single-layer compression trigger line explicitly.
 
 Results and proxy traces are written under the ignored `tests/performance/results/` directory. The trace records timing and context metrics only, never API keys. Large configurations can consume substantial memory, remote-model quota, time, and disk space; million-token runs are developer-local experiments.

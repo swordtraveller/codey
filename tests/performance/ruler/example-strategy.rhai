@@ -1,8 +1,9 @@
 // Example only. Replace this with a user-owned Rhai strategy when comparing policies.
-fn manage(content) {
+// Available context constants: context::model_max_context, context::model_max_output ().
+fn manage(context) {
   let selected = [];
-  for message in content.messages {
-    if message.role == "system" || message.id == content.runtime.latestUserMessageId {
+  for message in context.messages {
+    if message.role == "system" || message.id == context.runtime.latestUserMessageId {
       selected.push(message);
     }
   }

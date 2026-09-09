@@ -706,8 +706,8 @@ export async function develop(
         } as const
         throw new Error(messages[managed.overflow.reason])
       }
-      if (managed.metrics.compressedTokens >= managed.metrics.triggerThreshold) {
-        throw new Error('The prepared model input exceeds the configured input budget. Reduce Hot content or increase the model context window.')
+      if (managed.metrics.compressedTokens >= managed.metrics.modelMaxContext) {
+        throw new Error('The prepared model input exceeds the model context window. Reduce Hot content or increase the model context window.')
       }
       if (methods.length > 0) {
         const compressionItem: DevelopmentTimelineItem = {

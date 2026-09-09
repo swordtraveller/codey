@@ -61,6 +61,7 @@ import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
+import { fetchModelCapabilities } from './model-capabilities'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -300,8 +301,8 @@ async function developProject(
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
-  if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
-    return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
+  if (contextConfig.maxInputTokens > modelConfig.modelMaxContext) {
+    return { project, writtenFiles: [], error: 'Max input tokens must not exceed the model context window' }
   }
 
   const userMessageId = randomUUID()
@@ -738,6 +739,7 @@ app.whenReady().then(() => {
     setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
+  ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))

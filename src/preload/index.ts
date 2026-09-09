@@ -7,6 +7,7 @@ import type {
   DevelopmentProgress,
   DevelopmentProgressState,
   ImageAttachment,
+  ModelCapabilitiesResult,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -34,6 +35,8 @@ contextBridge.exposeInMainWorld(
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
+      ipcRenderer.invoke('models:fetch-capabilities', modelName),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
