@@ -125,6 +125,59 @@ describe('manageContext', () => {
     expect(result.messages.slice(-2)).toEqual(messages.slice(-2))
   })
 
+  it('compresses single-turn agent sessions through closed tool-call units', () => {
+    const toolCall = (id: string): { id: string; type: 'function'; function: { name: string; arguments: string } } => ({
+      id,
+      type: 'function',
+      function: { name: 'read_file', arguments: '{}' },
+    })
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'user', role: 'user', content: 'Fix the bug.' },
+      { id: 'unit-1-call', role: 'assistant', content: null, tool_calls: [toolCall('call-1')] },
+      { id: 'unit-1-result', role: 'tool', tool_call_id: 'call-1', content: 'large file content '.repeat(120) },
+      { id: 'unit-2-call', role: 'assistant', content: null, tool_calls: [toolCall('call-2')] },
+      { id: 'unit-2-result', role: 'tool', tool_call_id: 'call-2', content: 'another large file content '.repeat(120) },
+      { id: 'unit-3-call', role: 'assistant', content: null, tool_calls: [toolCall('call-3')] },
+      { id: 'unit-3-result', role: 'tool', tool_call_id: 'call-3', content: 'latest file content '.repeat(40) },
+    ]
+    const totalTokens = countContextTokens({ messages, tools: [] })
+
+    const result = manageContext(
+      messages,
+      [],
+      model({ modelMaxContext: 1_000_000 }),
+      context({ maxInputTokens: Math.floor(totalTokens * 0.6), recentKeepRounds: 1, filterEnabled: false, rewriteEnabled: false }),
+    )
+
+    expect(result.metrics.layered).toBe(false)
+    expect(result.metrics.truncated).toBe(true)
+    expect(result.metrics.compressedTokens).toBeLessThan(totalTokens)
+    expect(result.messages[0]).toEqual(messages[0])
+    expect(result.messages.some((message) => message.id === 'unit-1-result')).toBe(false)
+    expect(result.messages.some((message) => message.id === 'unit-3-result')).toBe(true)
+    expect(result.messages.some((message) => message.id === 'user')).toBe(true)
+  })
+
+  it('keeps single-turn agent sessions intact below the budget', () => {
+    const toolCall = (id: string): { id: string; type: 'function'; function: { name: string; arguments: string } } => ({
+      id,
+      type: 'function',
+      function: { name: 'read_file', arguments: '{}' },
+    })
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' },
+      { id: 'user', role: 'user', content: 'Fix the bug.' },
+      { id: 'unit-1-call', role: 'assistant', content: null, tool_calls: [toolCall('call-1')] },
+      { id: 'unit-1-result', role: 'tool', tool_call_id: 'call-1', content: 'file content' },
+    ]
+
+    const result = manageContext(messages, [], model({ modelMaxContext: 1_000_000 }), context({ maxInputTokens: 1_000_000 }))
+
+    expect(result.messages).toBe(messages)
+    expect(result.metrics.compressionRatio).toBe(1)
+  })
+
   it('sends only Hot messages and keeps demoted Warm messages byte-for-byte original', () => {
     const oldContent = 'please inspect this exact text\n\nplease inspect this exact text'
     const messages: ContextMessage[] = [

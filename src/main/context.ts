@@ -303,6 +303,25 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
         truncated = true
       }
     }
+    // Single-user-turn agent sessions never accumulate five user rounds, so the
+    // round boundary above leaves "older" empty and the budget unenforced. Fall
+    // back to closed tool-call units (the same units the layered path demotes):
+    // keep the most recent units intact and compress/drop the rest.
+    if (managedTokens() >= maxInputTokens) {
+      const fallback = compressAgentUnits(
+        { system, older, recent },
+        messages.slice(1),
+        maxInputTokens,
+        contextConfig,
+        counter,
+      )
+      if (fallback) {
+        managed = fallback.messages
+        filtered = filtered || fallback.filtered
+        rewritten = rewritten || fallback.rewritten
+        truncated = truncated || fallback.truncated
+      }
+    }
   }
   const sendable = normalizeToolCallSequence(managed)
   const compressedTokens = counter.request(sendable)
@@ -313,6 +332,71 @@ function manageSingleLayer(messages: ContextMessage[], tools: object[], modelCon
     actions: [],
     metrics: metrics(originalTokens, compressedTokens, modelConfig, contextConfig, { layered: false, recalled: false, filtered, rewritten, truncated }),
     toolDefinitionTokens: counter.toolDefinitionTokens,
+  }
+}
+
+/**
+ * Single-layer fallback for agent-shaped sessions: one user turn followed by a
+ * long tool-call chain. Keeps the most recent closed units (at least one)
+ * verbatim, filters and rewrites the older units, then drops whole units from
+ * the oldest end until the request fits the budget. Returns undefined when the
+ * unit split is unusable (open tail) or nothing improved.
+ */
+function compressAgentUnits(
+  parts: { system: ContextMessage[]; older: ContextMessage[]; recent: ContextMessage[] },
+  nonSystem: ContextMessage[],
+  maxInputTokens: number,
+  contextConfig: ContextManagementConfig,
+  counter: ReturnType<typeof createContextTokenCounter>,
+): { messages: ContextMessage[]; filtered: boolean; rewritten: boolean; truncated: boolean } | undefined {
+  const { units, hasOpenTail } = splitClosedUnits(nonSystem)
+  if (hasOpenTail || units.length < 2) return undefined
+
+  const keepUnits = Math.min(units.length - 1, Math.max(1, contextConfig.recentKeepRounds))
+  const protectedMessages = units.slice(-keepUnits).flat()
+  const protectedTokens = counter.messages(protectedMessages)
+  const systemTokens = counter.messages(parts.system)
+  const totalTokens = (candidate: ContextMessage[]) => counter.requestBaseTokens + systemTokens + counter.messages(candidate) + protectedTokens
+
+  let candidate = units.slice(0, units.length - keepUnits).flat()
+  const beforeTokens = totalTokens(candidate)
+
+  if (contextConfig.filterEnabled) {
+    candidate = candidate.map((message) => transformMessage(message, filterNaturalLanguage))
+  }
+  const afterFilter = totalTokens(candidate)
+  if (contextConfig.rewriteEnabled && afterFilter >= maxInputTokens) {
+    candidate = candidate.map((message) => transformMessage(message, rewriteNaturalLanguage))
+  }
+  const afterRewrite = totalTokens(candidate)
+
+  let droppedUnits = 0
+  // Only closed tool-call units are droppable; user and plain assistant
+  // messages always stay (they carry the task and the agent's reasoning).
+  const droppableUnits = units
+    .slice(0, units.length - keepUnits)
+    .map((unit) => unit.some((message) => message.role === 'assistant' && message.tool_calls?.length) ? unit : undefined)
+  while (totalTokens(candidate) >= maxInputTokens && droppedUnits < droppableUnits.length) {
+    const unit = droppableUnits[droppedUnits]
+    droppedUnits += 1
+    if (!unit) continue
+    const removedIds = new Set(unit.map((message) => message.id ?? ''))
+    candidate = candidate.filter((message) => message.id === undefined || !removedIds.has(message.id))
+  }
+
+  const rebuilt = normalizeToolCallSequence([
+    ...parts.system,
+    ...candidate,
+    ...protectedMessages,
+  ])
+  const originalRequest = counter.request(normalizeToolCallSequence([...parts.system, ...nonSystem]))
+  if (droppedUnits === 0 && afterRewrite >= beforeTokens) return undefined
+  if (counter.request(rebuilt) >= originalRequest) return undefined
+  return {
+    messages: rebuilt,
+    filtered: contextConfig.filterEnabled && afterFilter < beforeTokens,
+    rewritten: contextConfig.rewriteEnabled && afterRewrite < afterFilter,
+    truncated: droppedUnits > 0,
   }
 }
 
