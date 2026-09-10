@@ -11,6 +11,8 @@ import {
   Switch,
   FluentProvider,
   Input,
+  Tab,
+  TabList,
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
@@ -1410,6 +1412,7 @@ export function App(): React.JSX.Element {
   const [settingsError, setSettingsError] = useState('')
   const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
   const [connectivityBusy, setConnectivityBusy] = useState(false)
+  const [connectivityStatus, setConnectivityStatus] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
   const [toast, setToast] = useState<{ message: string; tone: 'info' | 'error' } | null>(null)
   const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
@@ -1424,6 +1427,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
+  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer'>('models')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -2039,27 +2043,28 @@ export function App(): React.JSX.Element {
       return
     }
     setConnectivityBusy(true)
+    setConnectivityStatus(null)
     try {
       const result = await window.codey.testModelConnectivity(selected)
       if (result.status === 'ok') {
-        showToast(t('connectivityOk', { count: result.models }), 'info')
+        setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
       }
       if (result.status === 'network-error') {
-        showToast(t('connectivityNetworkError'), 'error')
+        setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
         return
       }
       if (result.status === 'auth-error') {
-        showToast(t('connectivityAuthError'), 'error')
+        setConnectivityStatus({ tone: 'error', text: t('connectivityAuthError') })
         return
       }
       if (result.status === 'model-not-found') {
-        showToast(t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }), 'error')
+        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }) })
         return
       }
-      showToast(t('connectivityEndpointError', { detail: result.detail }), 'error')
+      setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
     } catch {
-      showToast(t('connectivityNetworkError'), 'error')
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } finally {
       setConnectivityBusy(false)
     }
@@ -2763,8 +2768,18 @@ export function App(): React.JSX.Element {
           <DialogBody>
             <DialogTitle>{t('settings')}</DialogTitle>
             <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={settingsTab}
+                onTabSelect={(_, data) => setSettingsTab(data.value as typeof settingsTab)}
+              >
+                <Tab value="models">{t('modelSettings')}</Tab>
+                <Tab value="language">{t('languageSettings')}</Tab>
+                <Tab value="power">{t('powerSettings')}</Tab>
+                <Tab value="archive">{t('archivedItems')}</Tab>
+                <Tab value="developer">{t('developerSettings')}</Tab>
+              </TabList>
+              {settingsTab === 'models' && (
               <section className="settings-group">
-                <h2>{t('modelSettings')}</h2>
                 <div className="model-config-toolbar">
                   <Select
                     aria-label={t('modelSettings')}
@@ -2804,8 +2819,13 @@ export function App(): React.JSX.Element {
                     {saving ? t('saving') : t('save')}
                   </Button>
                 </div>
-                <p className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`} role="status">
-                  {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
+                <p className="model-config-status-line" role="status">
+                  <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
+                    {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
+                  </span>
+                  {connectivityStatus && (
+                    <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
+                  )}
                 </p>
                 <Field label={t('modelConfigName')} required>
                   <Input
@@ -2896,9 +2916,10 @@ export function App(): React.JSX.Element {
                     })}
                   </p>
                 )}
-               </section>
+              </section>
+              )}
+              {settingsTab === 'language' && (
               <section className="settings-group">
-                <h2>{t('languageSettings')}</h2>
                 <Field label={t('language')}>
                   <Select
                     value={configDraft.language}
@@ -2911,12 +2932,13 @@ export function App(): React.JSX.Element {
                     <option value="en">{t('english')}</option>
                     <option value="zh-CN">{t('simplifiedChinese')}</option>
                   </Select>
-                </Field>
-              </section>
-              <section className="settings-group">
-                <h2>{t('powerSettings')}</h2>
-                <Switch
-                  checked={configDraft.keepAwakeEnabled}
+                 </Field>
+               </section>
+              )}
+              {settingsTab === 'power' && (
+               <section className="settings-group">
+                 <Switch
+                   checked={configDraft.keepAwakeEnabled}
                   label={t('keepAwakeComputer')}
                   onChange={(_, data) => setConfigDraft((current) => ({
                     ...current,
@@ -2935,19 +2957,21 @@ export function App(): React.JSX.Element {
                     ...current,
                     keepAwakeOnlyWhileWorking: data.checked,
                   }))}
-                />
-              </section>
-              <section className="settings-group">
-                <h2>{t('archivedItems')}</h2>
-                <p className="settings-description">{t('archivedItemsDescription')}</p>
-                <Button appearance="secondary" onClick={openArchiveList}>
-                  {t('openArchivedItems')}
-                </Button>
-              </section>
-              <section className="settings-group">
-                <h2>{t('developerSettings')}</h2>
-                <Switch
-                  checked={configDraft.developerMode}
+                 />
+               </section>
+              )}
+              {settingsTab === 'archive' && (
+               <section className="settings-group">
+                 <p className="settings-description">{t('archivedItemsDescription')}</p>
+                 <Button appearance="secondary" onClick={openArchiveList}>
+                   {t('openArchivedItems')}
+                 </Button>
+               </section>
+              )}
+              {settingsTab === 'developer' && (
+               <section className="settings-group">
+                 <Switch
+                   checked={configDraft.developerMode}
                   label={t('developerMode')}
                   onChange={(_, data) => setConfigDraft((current) => ({
                     ...current,
@@ -2980,9 +3004,10 @@ export function App(): React.JSX.Element {
                         </Button>
                       </div>
                     )}
-                  </div>
-                )}
-              </section>
+                   </div>
+                 )}
+               </section>
+              )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>

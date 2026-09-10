@@ -313,13 +313,24 @@ body {
   min-width: 120px;
 }
 
-.model-config-save-state {
+.model-config-status-line {
   margin: 2px 0 0;
   font-size: 12px;
+}
+
+.model-config-save-state {
   color: #616161;
 }
 
 .model-config-save-state.dirty {
+  color: #a4262c;
+}
+
+.connectivity-status.ok {
+  color: #0f7b0f;
+}
+
+.connectivity-status.error {
   color: #a4262c;
 }
 
@@ -872,6 +883,7 @@ h1 {
   border-radius: 8px;
   padding: 16px;
   background: #fafafa;
+  margin-top: 12px;
 }
 
 .settings-group h2 {
