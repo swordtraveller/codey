@@ -12,6 +12,7 @@ import type {
   ModelConfig,
   ModelConnectivityResult,
   ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -115,6 +116,9 @@ contextBridge.exposeInMainWorld(
     detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
     getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
     pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),
+    listWslDistros: (): Promise<string[]> => ipcRenderer.invoke('shells:list-wsl-distros'),
+    getWsl2ManualConfig: (): Promise<Wsl2ManualConfig | null> => ipcRenderer.invoke('shells:get-wsl2-config'),
+    setWsl2ManualConfig: (config: Wsl2ManualConfig | null): Promise<void> => ipcRenderer.invoke('shells:set-wsl2-config', config),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>

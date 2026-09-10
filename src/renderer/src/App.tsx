@@ -64,6 +64,7 @@ import {
   type ModelConfig,
   type Project,
   type ShellDetectionResult,
+  type Wsl2ManualConfig,
 } from '../../shared/types'
 
 const markdownPlugins = [remarkGfm]
@@ -1397,6 +1398,10 @@ export function App(): React.JSX.Element {
   const [commandDraft, setCommandDraft] = useState(defaultCommandExecutionConfig)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
+  const [wslDistros, setWslDistros] = useState<string[]>([])
+  const [wsl2Draft, setWsl2Draft] = useState<Wsl2ManualConfig>({ distro: '', sandboxUser: '' })
+  const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
+  const [wsl2ConfigOpen, setWsl2ConfigOpen] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
@@ -1995,6 +2000,53 @@ export function App(): React.JSX.Element {
       }
     } catch {
       showToast(t('unableChangeCommandExecution'), 'error')
+    }
+  }
+
+  async function openWsl2Config(): Promise<void> {
+    if (wsl2ConfigBusy) {
+      return
+    }
+    setWsl2ConfigOpen(true)
+    setWsl2ConfigBusy(true)
+    try {
+      const [distros, current] = await Promise.all([
+        window.codey.listWslDistros(),
+        window.codey.getWsl2ManualConfig(),
+      ])
+      setWslDistros(distros)
+      setWsl2Draft(current ?? { distro: distros[0] ?? '', sandboxUser: '' })
+    } catch {
+      setWslDistros([])
+    } finally {
+      setWsl2ConfigBusy(false)
+    }
+  }
+
+  async function saveWsl2Config(): Promise<void> {
+    if (!wsl2Draft.distro.trim() || !wsl2Draft.sandboxUser.trim()) {
+      return
+    }
+    setWsl2ConfigBusy(true)
+    try {
+      await window.codey.setWsl2ManualConfig({ distro: wsl2Draft.distro.trim(), sandboxUser: wsl2Draft.sandboxUser.trim() })
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
+    } finally {
+      setWsl2ConfigBusy(false)
+    }
+  }
+
+  async function clearWsl2Config(): Promise<void> {
+    setWsl2ConfigBusy(true)
+    try {
+      await window.codey.setWsl2ManualConfig(null)
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
+    } finally {
+      setWsl2ConfigBusy(false)
     }
   }
 
@@ -3002,6 +3054,70 @@ export function App(): React.JSX.Element {
                         <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
                           {t('pickBashExecutable')}
                         </Button>
+                        <div className="wsl2-config-group">
+                          <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
+                            {t('configureWsl2')}
+                          </Button>
+                          {wsl2ConfigOpen && (
+                            <div className="wsl2-config-form">
+                              {wslDistros.length > 0 ? (
+                                <Field label={t('wsl2Distro')}>
+                                  <Select
+                                    disabled={wsl2ConfigBusy}
+                                    value={wsl2Draft.distro}
+                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
+                                  >
+                                    {wslDistros.map((distro) => (
+                                      <option key={distro} value={distro}>{distro}</option>
+                                    ))}
+                                  </Select>
+                                </Field>
+                              ) : (
+                                <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
+                              )}
+                              <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
+                                <Input
+                                  disabled={wsl2ConfigBusy || wslDistros.length === 0}
+                                  value={wsl2Draft.sandboxUser}
+                                  onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
+                                />
+                              </Field>
+                              <div className="wsl2-config-actions">
+                                <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
+                                  {t('save')}
+                                </Button>
+                                <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
+                                  {t('wsl2ClearConfig')}
+                                </Button>
+                                <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
+                                  {t('close')}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        {shellDetection.wsl2Sandbox && (
+                          <div className="wsl2-sandbox-probe">
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
+                            </p>
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
+                            </p>
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
+                            </p>
+                            {shellDetection.wsl2Sandbox.interopEnabled && (
+                              <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
+                            )}
+                            {!shellDetection.wsl2Sandbox.socatAvailable && (
+                              <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                    </div>

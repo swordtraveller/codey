@@ -16,6 +16,7 @@ import type {
   ModelConfig,
   ModelConnectivityResult,
   ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -89,6 +90,9 @@ declare global {
       detectShells(): Promise<ShellDetectionResult>
       getCachedShellDetection(): Promise<ShellDetectionResult | null>
       pickBashExecutable(): Promise<string | null>
+      listWslDistros(): Promise<string[]>
+      getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
+      setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       develop(
         projectId: string,

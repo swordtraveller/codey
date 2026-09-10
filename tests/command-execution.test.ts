@@ -14,7 +14,7 @@ import {
   commandTimeoutMaxSeconds,
   commandConfirmationThresholdSeconds,
 } from '../src/shared/types'
-import { parseWslDistros, shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
+import { decodeWslOutput, parseWslConfInterop, parseWslDistros, shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
 import { parseAuditVerdict } from '../src/main/command-executor'
 import { commandDialogTerms, formatDuration } from '../src/main/i18n-terms'
 import {
@@ -220,6 +220,25 @@ describe('approval dialog i18n', () => {
   })
 })
 
+describe('wsl.conf interop parsing', () => {
+  it('treats missing config or missing section as enabled-but-implicit', () => {
+    expect(parseWslConfInterop(null)).toEqual({ enabled: true, explicit: false })
+    expect(parseWslConfInterop('')).toEqual({ enabled: true, explicit: false })
+    expect(parseWslConfInterop('[boot]\nsystemd=true\n')).toEqual({ enabled: true, explicit: false })
+  })
+
+  it('honors an explicit enabled=false', () => {
+    const conf = '[boot]\nsystemd=true\n\n[interop]\nenabled=false\n\n[user]\ndefault=alice\n'
+    expect(parseWslConfInterop(conf)).toEqual({ enabled: false, explicit: true })
+  })
+
+  it('treats enabled variants as enabled', () => {
+    expect(parseWslConfInterop('[interop]\nenabled=true\n')).toEqual({ enabled: true, explicit: true })
+    expect(parseWslConfInterop('[interop]\nenabled = 1\n')).toEqual({ enabled: true, explicit: true })
+    expect(parseWslConfInterop('[interop]\nappendWindowsPath=false\nenabled=false\n')).toEqual({ enabled: false, explicit: true })
+  })
+})
+
 describe('wsl distro parsing', () => {
   it('parses the wsl --list --verbose table with the default marker', () => {
     const output = '  NAME              STATE           VERSION\r\n* Ubuntu-22.04       Running         2\r\n  debian            Stopped         2\r\n'
@@ -227,6 +246,14 @@ describe('wsl distro parsing', () => {
     expect(distros).toEqual([
       { name: 'Ubuntu-22.04', running: true, default: true },
       { name: 'debian', running: false, default: false },
+    ])
+  })
+
+  it('parses BOM-less UTF-16LE output after probeWsl decodes it', () => {
+    const output = '  NAME              STATE           VERSION\r\n* Ubuntu-26.04       Running         2\r\n'
+    const decoded = decodeWslOutput(Buffer.from(output, 'utf16le'))
+    expect(parseWslDistros(decoded)).toEqual([
+      { name: 'Ubuntu-26.04', running: true, default: true },
     ])
   })
 

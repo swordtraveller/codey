@@ -351,6 +351,26 @@ export function commandExecutionSupported(interpreter: CommandInterpreter, envir
   return supportedCommandCombos.some((combo) => combo.interpreter === interpreter && combo.environment === environment)
 }
 
+/** Manual wsl2 sandbox configuration (distro + sandbox user, no password). */
+export type Wsl2ManualConfig = {
+  distro: string
+  sandboxUser: string
+}
+
+export type Wsl2SandboxProbe = {
+  configured: boolean
+  distro?: string
+  sandboxUser?: string
+  /** bwrap (bubblewrap) presence: gates the wsl2+bwrap combo. */
+  bwrapAvailable: boolean
+  /** socat presence: missing means the sandbox cannot proxy network work. */
+  socatAvailable: boolean
+  /** /etc/wsl.conf [interop] enabled; true is a sandbox-escape risk. */
+  interopEnabled: boolean
+  /** True when wsl.conf had no explicit [interop] enabled=false (defaults on). */
+  interopExplicit: boolean
+}
+
 export type ShellDetectionResult = {
   interpreters: Array<{
     kind: CommandInterpreter
@@ -364,6 +384,8 @@ export type ShellDetectionResult = {
     available: boolean
     detail: string
   }>
+  /** wsl2 sandbox details (bwrap/socat/interop) when a manual config exists. */
+  wsl2Sandbox?: Wsl2SandboxProbe
   detectedAt: string
 }
 

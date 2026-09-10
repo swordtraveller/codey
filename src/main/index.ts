@@ -20,6 +20,7 @@ import type {
   ModelConfig,
   ScreenshotSelection,
   ScreenshotSource,
+  Wsl2ManualConfig,
   Conversation,
   Project,
 } from '../shared/types'
@@ -103,7 +104,7 @@ import {
 } from './workspace'
 import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
 import { commandDialogTerms, formatDuration } from './i18n-terms'
-import { commandComboUsable, detectShells, getCachedShellDetection, setManualBashPath, translateGitBashLauncher } from './shell-detect'
+import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
@@ -901,6 +902,9 @@ app.whenReady().then(() => {
     setManualBashPath(effective)
     return effective
   })
+  ipcMain.handle('shells:list-wsl-distros', () => listUserWslDistros())
+  ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
+  ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)

@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { app } from 'electron'
 import {
   commandExecutionSupported,
   dockerBashImage,
@@ -9,6 +10,8 @@ import {
   type CommandEnvironment,
   type CommandInterpreter,
   type ShellDetectionResult,
+  type Wsl2ManualConfig,
+  type Wsl2SandboxProbe,
 } from '../shared/types'
 
 const GIT_BASH_CANDIDATES = (): string[] => [
@@ -67,6 +70,85 @@ export function setManualBashPath(path: string | null): void {
   cachedDetection = null
 }
 
+/** ---- Manual wsl2 sandbox configuration (persisted in userData) ---- */
+
+function wsl2ConfigPath(): string {
+  return join(app.getPath('userData'), 'wsl2-sandbox.json')
+}
+
+let wsl2ConfigCache: Wsl2ManualConfig | null | undefined
+
+export async function getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null> {
+  if (wsl2ConfigCache !== undefined) return wsl2ConfigCache
+  try {
+    const raw = JSON.parse(await readFile(wsl2ConfigPath(), 'utf8')) as Partial<Wsl2ManualConfig>
+    wsl2ConfigCache = typeof raw.distro === 'string' && typeof raw.sandboxUser === 'string' && raw.distro && raw.sandboxUser
+      ? { distro: raw.distro, sandboxUser: raw.sandboxUser }
+      : null
+  } catch {
+    wsl2ConfigCache = null
+  }
+  return wsl2ConfigCache
+}
+
+export async function setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void> {
+  wsl2ConfigCache = config
+  cachedDetection = null
+  await mkdir(dirname(wsl2ConfigPath()), { recursive: true })
+  await writeFile(wsl2ConfigPath(), JSON.stringify(config ?? null), 'utf8')
+}
+
+/** User-visible distros for the manual config picker (system distros excluded). */
+export async function listUserWslDistros(): Promise<string[]> {
+  const list = await probeWsl(['--list', '--verbose'])
+  if (list === null) return []
+  return parseWslDistros(list)
+    .filter((distro) => !WSL_SYSTEM_DISTROS.has(distro.name))
+    .map((distro) => distro.name)
+}
+
+/** Parses [interop] enabled from /etc/wsl.conf content. WSL defaults
+ *  interop to enabled, so only an explicit false disables it. */
+export function parseWslConfInterop(conf: string | null): { enabled: boolean; explicit: boolean } {
+  if (!conf) return { enabled: true, explicit: false }
+  const lines = conf.split(/\r?\n/)
+  let inInterop = false
+  for (const line of lines) {
+    const section = line.match(/^\s*\[(.+?)\]\s*$/)
+    if (section) {
+      inInterop = section[1].trim().toLowerCase() === 'interop'
+      continue
+    }
+    if (!inInterop) continue
+    const enabledMatch = line.match(/^\s*enabled\s*=\s*(\S+)\s*$/i)
+    if (enabledMatch) {
+      const value = enabledMatch[1].toLowerCase()
+      return { enabled: value !== 'false' && value !== '0' && value !== 'no', explicit: true }
+    }
+  }
+  return { enabled: true, explicit: false }
+}
+
+async function probeWslSandbox(config: Wsl2ManualConfig): Promise<Wsl2SandboxProbe> {
+  const inDistro = async (command: string): Promise<string | null> =>
+    probeWsl(['-d', config.distro, '--', 'sh', '-c', command])
+  const [bwrap, socat, conf] = await Promise.all([
+    inDistro('command -v bwrap'),
+    inDistro('command -v socat'),
+    inDistro('cat /etc/wsl.conf 2>/dev/null'),
+  ])
+  const interop = parseWslConfInterop(conf)
+  return {
+    configured: true,
+    distro: config.distro,
+    sandboxUser: config.sandboxUser,
+    bwrapAvailable: Boolean(bwrap),
+    socatAvailable: Boolean(socat),
+    interopEnabled: interop.enabled,
+    interopExplicit: interop.explicit,
+  }
+}
+
 async function executableExists(path: string): Promise<boolean> {
   try {
     await access(path)
@@ -102,12 +184,22 @@ export function probeWsl(args: string[]): Promise<string | null> {
         return
       }
       const raw = Buffer.concat(chunks)
-      const text = raw[0] === 0xff && raw[1] === 0xfe
-        ? raw.subarray(2).toString('utf16le')
-        : raw.toString('utf8')
-      resolve(text.trim() || '')
+      resolve(decodeWslOutput(raw))
     })
   })
+}
+
+/** Decodes wsl.exe stdout, which is UTF-16LE on many Windows builds. */
+export function decodeWslOutput(raw: Buffer): string {
+      // wsl.exe sometimes emits UTF-16LE without a BOM (e.g. starts with
+      // 0x20,0x00 for a leading space). Detect the alternating NUL pattern
+      // as well as the normal BOM.
+      const utf16le = (raw[0] === 0xff && raw[1] === 0xfe) ||
+        (raw.length >= 4 && raw[1] === 0x00 && raw[3] === 0x00)
+      const hasBom = raw[0] === 0xff && raw[1] === 0xfe
+      return utf16le
+        ? raw.subarray(hasBom ? 2 : 0).toString('utf16le')
+        : raw.toString('utf8')
 }
 
 type WslDistro = { name: string; running: boolean; default: boolean }
@@ -190,18 +282,24 @@ async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
   if (userDistros.length === 0) {
     return { available: false, detail: 'wsl is installed but has no user distribution (only system distros)' }
   }
-  const bashCheck = await probeWsl(['--', 'bash', '-c', 'echo ok'])
+  const config = await getWsl2ManualConfig()
+  // If a manual config exists, check bash in that specific distro.
+  const bashCheck = config
+    ? await probeWsl(['-d', config.distro, '--', 'bash', '-c', 'echo ok'])
+    : await probeWsl(['--', 'bash', '-c', 'echo ok'])
   const describe = (distro: WslDistro): string =>
     `${distro.name} (${distro.running ? 'Running' : 'Stopped'}${distro.default ? ', default' : ''})`
   if (!bashCheck) {
+    const target = config ? `${config.distro} (manual config)` : `the default distribution`
     return {
       available: false,
-      detail: `user distributions exist but bash is unavailable in the default one: ${userDistros.map(describe).join(', ')}`,
+      detail: `bash is unavailable in ${target}. Available distros: ${userDistros.map(describe).join(', ')}`,
     }
   }
+  const target = config ? `${config.distro} (manual config)` : 'default distro'
   return {
     available: true,
-    detail: `bash available in the default distribution; distros: ${userDistros.map(describe).join(', ')}`,
+    detail: `bash available in ${target}. Distros: ${userDistros.map(describe).join(', ')}`,
   }
 }
 
@@ -228,7 +326,14 @@ async function detectDocker(): Promise<{ available: boolean; detail: string }> {
  *  detected and implemented are reported as usable; the architecture leaves
  *  room for more interpreters and environments. */
 export async function detectShells(): Promise<ShellDetectionResult> {
-  const [bash, pwsh7, wsl2, docker] = await Promise.all([detectBash(), detectPwsh7(), detectWsl2(), detectDocker()])
+  const [bash, pwsh7, wsl2, docker, wsl2Config] = await Promise.all([
+    detectBash(),
+    detectPwsh7(),
+    detectWsl2(),
+    detectDocker(),
+    getWsl2ManualConfig(),
+  ])
+  const wsl2Sandbox = wsl2Config ? await probeWslSandbox(wsl2Config) : undefined
   const pwsh51Available = process.platform === 'win32' && await executableExists(pwsh51Path())
   const result: ShellDetectionResult = {
     interpreters: [
@@ -257,6 +362,7 @@ export async function detectShells(): Promise<ShellDetectionResult> {
       { kind: 'docker' satisfies CommandEnvironment, available: docker.available, detail: docker.detail },
       { kind: 'windows-sandbox' satisfies CommandEnvironment, available: false, detail: 'not implemented yet' },
     ],
+    wsl2Sandbox,
     detectedAt: new Date().toISOString(),
   }
   cachedDetection = result

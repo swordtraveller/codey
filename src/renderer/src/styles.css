@@ -366,6 +366,30 @@ body {
   font-size: 12px;
 }
 
+.wsl2-config-group {
+  margin-top: 8px;
+}
+
+.wsl2-config-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.wsl2-config-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.wsl2-sandbox-probe {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e0e0e0;
+}
+
 .multimodal-switches {
   display: flex;
   flex-wrap: wrap;
