@@ -755,7 +755,7 @@ export async function develop(
 
       const toolCalls = message.tool_calls ?? []
       if (toolCalls.length > agentLimits.toolCallsPerRequest) {
-        throw new Error('The model exceeded the configured per-request tool-call limit')
+        throw new Error(`Single response tool calls exceeded the limit of ${agentLimits.toolCallsPerRequest}`)
       }
       if (toolCalls.length === 0) {
         const reply = message.content?.trim()
