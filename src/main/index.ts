@@ -18,6 +18,7 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   ModelConfig,
+  PromptSnapshot,
   ScreenshotSelection,
   ScreenshotSource,
   Wsl2ManualConfig,
@@ -31,7 +32,7 @@ import {
   compactDevelopmentProgressUpdate,
   createDevelopmentProgressState,
 } from '../shared/development-progress'
-import { buildAgentContext, develop } from './agent'
+import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
 import type { CommandExecutorRuntime } from './command-executor'
@@ -69,6 +70,8 @@ import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from '.
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
 import { testModelConnectivity } from './model-connectivity'
+import { buildAuditPromptTemplate } from './command-executor'
+import { buildRunCommandTool } from './tools'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -275,6 +278,59 @@ async function fileExists(path: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+/** Builds a read-only snapshot of the live prompts for the settings viewer.
+ *  Reads directly from the source functions so the display never drifts
+ *  from what the agent actually sends. */
+function buildPromptSnapshot(): PromptSnapshot {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const agentSystem = createAgentSystemMessage(sampleProject, true).content ?? ''
+  const agentSystemOffline = createAgentSystemMessage(sampleProject, false).content ?? ''
+  const networkLine = agentSystem.split('\n').find((line) => line.startsWith('Network access')) ?? ''
+  const agentSystemTemplate = agentSystem
+    .replace(/- folder-id: C:\/path\/to\/project/, '- <folder-id>: <folder path>')
+    .replace(networkLine, networkLine.startsWith('Network access is enabled')
+      ? 'Network access is enabled only for the read-only web_search and web_open tools. … (or: Network access is disabled. Do not call web_search or web_open.)'
+      : networkLine)
+  void agentSystemOffline
+  const commandTool = buildRunCommandTool(
+    sampleProject,
+    { ...defaultCommandExecutionConfig, enabled: true },
+    null,
+  ) as { function: { description?: string } }
+  return {
+    entries: [
+      {
+        id: 'agent-system',
+        title: 'Agent system prompt',
+        scene: 'Sent as the system message on every model request. Defines the coding-agent identity, sandbox rules, tool selection guidance, network policy, and Hot/Warm/Cold context semantics.',
+        content: agentSystemTemplate,
+      },
+      {
+        id: 'audit-prompt',
+        title: 'Command audit prompt',
+        scene: 'Sent to the separately configured audit model before each run_command executes (when model audit is enabled). The placeholders are filled with the workspace path, interpreter/environment, and the command.',
+        content: buildAuditPromptTemplate(),
+      },
+      {
+        id: 'run-command-tool',
+        title: 'run_command tool description',
+        scene: 'Included in the tool list when command execution is enabled. Reflects the configured interpreter/environment and lists the combos available on this machine (the sample below uses the bare environment with no detection cached).',
+        content: commandTool.function.description ?? '',
+      },
+    ],
   }
 }
 
@@ -905,6 +961,7 @@ app.whenReady().then(() => {
   ipcMain.handle('shells:list-wsl-distros', () => listUserWslDistros())
   ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
   ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
+  ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)

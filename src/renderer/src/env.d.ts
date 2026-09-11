@@ -15,6 +15,7 @@ import type {
   CommandExecutionConfig,
   ModelConfig,
   ModelConnectivityResult,
+  PromptSnapshot,
   ShellDetectionResult,
   Wsl2ManualConfig,
   Project,
@@ -93,6 +94,7 @@ declare global {
       listWslDistros(): Promise<string[]>
       getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
       setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
+      getPromptSnapshot(): Promise<PromptSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       develop(
         projectId: string,

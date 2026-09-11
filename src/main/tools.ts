@@ -947,7 +947,7 @@ export async function runAgentTool(
 
 /** Builds the run_command tool with a description that reflects the locally
  *  available interpreter/environment combos and per-interpreter pitfalls. */
-function buildRunCommandTool(project: Project, config: CommandExecutionConfig, shellDetection: ShellDetectionResult | null): object {
+export function buildRunCommandTool(project: Project, config: CommandExecutionConfig, shellDetection: ShellDetectionResult | null): object {
   const folderIds = project.folders.map((folder) => folder.id)
   const interpreters = shellDetection?.interpreters ?? []
   const environments = shellDetection?.environments ?? []

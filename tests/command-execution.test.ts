@@ -286,7 +286,8 @@ describe('executeCommand', () => {
   const pwshIt = pwshAvailable ? it : it.skip
   const dockerAvailable = (() => {
     try {
-      return spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { windowsHide: true, timeout: 15_000 }).status === 0
+      const probe = spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { windowsHide: true, timeout: 15_000, encoding: 'utf8' })
+      return probe.status === 0 && /^\d/.test((probe.stdout ?? '').trim())
     } catch {
       return false
     }

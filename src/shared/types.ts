@@ -389,6 +389,17 @@ export type ShellDetectionResult = {
   detectedAt: string
 }
 
+export type PromptSnapshotEntry = {
+  id: string
+  title: string
+  scene: string
+  content: string
+}
+
+export type PromptSnapshot = {
+  entries: PromptSnapshotEntry[]
+}
+
 export type Conversation = {
   id: string
   title: string

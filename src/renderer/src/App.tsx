@@ -63,6 +63,7 @@ import {
   type CommandExecutionConfig,
   type ModelConfig,
   type Project,
+  type PromptSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
@@ -1401,6 +1402,7 @@ export function App(): React.JSX.Element {
   const [wslDistros, setWslDistros] = useState<string[]>([])
   const [wsl2Draft, setWsl2Draft] = useState<Wsl2ManualConfig>({ distro: '', sandboxUser: '' })
   const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
+  const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
   const [wsl2ConfigOpen, setWsl2ConfigOpen] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
@@ -1432,7 +1434,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer' | 'prompts'>('models')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -2822,13 +2824,20 @@ export function App(): React.JSX.Element {
             <DialogContent className="dialog-fields">
               <TabList
                 selectedValue={settingsTab}
-                onTabSelect={(_, data) => setSettingsTab(data.value as typeof settingsTab)}
+                onTabSelect={(_, data) => {
+                  const next = data.value as typeof settingsTab
+                  setSettingsTab(next)
+                  if (next === 'prompts' && !promptSnapshot) {
+                    void window.codey.getPromptSnapshot().then(setPromptSnapshot).catch(() => setPromptSnapshot(null))
+                  }
+                }}
               >
-                <Tab value="models">{t('modelSettings')}</Tab>
-                <Tab value="language">{t('languageSettings')}</Tab>
+                <Tab value="models">{t('models')}</Tab>
+                <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
                 <Tab value="archive">{t('archivedItems')}</Tab>
-                <Tab value="developer">{t('developerSettings')}</Tab>
+                <Tab value="developer">{t('developerMode')}</Tab>
+                <Tab value="prompts">{t('prompts')}</Tab>
               </TabList>
               {settingsTab === 'models' && (
               <section className="settings-group">
@@ -3122,7 +3131,20 @@ export function App(): React.JSX.Element {
                     )}
                    </div>
                  )}
-               </section>
+                </section>
+              )}
+              {settingsTab === 'prompts' && (
+                <section className="settings-group prompt-viewer-group">
+                  <p className="settings-description">{t('promptsDescription')}</p>
+                  {!promptSnapshot && <p className="settings-description">{t('loadingPrompts')}</p>}
+                  {promptSnapshot?.entries.map((entry) => (
+                    <div className="prompt-entry" key={entry.id}>
+                      <h3>{entry.title}</h3>
+                      <p className="settings-description">{entry.scene}</p>
+                      <pre className="prompt-content">{entry.content}</pre>
+                    </div>
+                  ))}
+                </section>
               )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>

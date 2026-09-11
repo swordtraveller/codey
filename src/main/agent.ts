@@ -537,7 +537,7 @@ async function requestCompletion(
   throw new Error('Model request failed')
 }
 
-function createAgentSystemMessage(project: Project, networkAccessEnabled = false): ContextMessage {
+export function createAgentSystemMessage(project: Project, networkAccessEnabled = false): ContextMessage {
   return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),

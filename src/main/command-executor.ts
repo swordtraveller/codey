@@ -135,6 +135,17 @@ export function parseAuditVerdict(content: string): { verdict: 'allow' | 'deny';
   return null
 }
 
+/** The audit prompt template; exposed for the settings prompt viewer. */
+export function buildAuditPromptTemplate(): string {
+  return [
+    `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
+    `Workspace: <workspace path>`,
+    `Environment: <interpreter>/<environment>`,
+    `Command: <the command>`,
+    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+  ].join('\n')
+}
+
 async function requestAuditVerdict(
   command: string,
   workspacePath: string,

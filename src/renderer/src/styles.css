@@ -390,6 +390,35 @@ body {
   border-top: 1px dashed #e0e0e0;
 }
 
+.prompt-viewer-group {
+  gap: 16px;
+}
+
+.prompt-entry h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.prompt-entry .settings-description {
+  margin: 0 0 8px;
+}
+
+.prompt-content {
+  margin: 0;
+  padding: 12px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #ffffff;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
 .multimodal-switches {
   display: flex;
   flex-wrap: wrap;
