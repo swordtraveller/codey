@@ -25,7 +25,7 @@ import type {
   Conversation,
   Project,
 } from '../shared/types'
-import { defaultCommandExecutionConfig } from '../shared/types'
+import { defaultCommandExecutionConfig, defaultStrategyPrompt, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
 import {
   applyDevelopmentProgressUpdate,
@@ -329,6 +329,18 @@ function buildPromptSnapshot(): PromptSnapshot {
         title: 'run_command tool description',
         scene: 'Included in the tool list when command execution is enabled. Reflects the configured interpreter/environment and lists the combos available on this machine (the sample below uses the bare environment with no detection cached).',
         content: commandTool.function.description ?? '',
+      },
+      {
+        id: 'default-strategy-prompt',
+        title: 'Default context strategy prompt',
+        scene: 'Injected into the system message when the default (filter/rewrite/truncate) context strategy is active, telling the model that older history may be compressed.',
+        content: defaultStrategyPrompt,
+      },
+      {
+        id: 'layered-strategy-prompt',
+        title: 'Layered context strategy prompt',
+        scene: 'Injected into the system message when the layered (Hot/Warm/Cold) strategy is active, describing summary labeling and the context_search/context_read tools.',
+        content: layeredStrategyPrompt,
       },
     ],
   }

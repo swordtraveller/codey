@@ -29,6 +29,7 @@ export function normalizeContextManagementConfig(
     coldRecallTokenBudget: Math.floor(merged.coldRecallTokenBudget),
     customStrategyEnabled: Boolean(merged.customStrategyEnabled),
     customStrategyScript: typeof merged.customStrategyScript === 'string' ? merged.customStrategyScript : '',
+    customStrategyPrompt: typeof merged.customStrategyPrompt === 'string' ? merged.customStrategyPrompt : '',
   }
 }
 

@@ -987,6 +987,16 @@ function ContextSettingsFields({
               }}
             />
           </Field>
+          <Field label={t('customContextStrategyPrompt')} hint={t('customContextStrategyPromptHint')}>
+            <Textarea
+              disabled={disabled}
+              resize="vertical"
+              value={value.customStrategyPrompt ?? ''}
+              onChange={(_, data) => onChange({ customStrategyPrompt: data.value })}
+              placeholder={t('customContextStrategyPromptPlaceholder')}
+              rows={4}
+            />
+          </Field>
         </>
       ) : (
         <>

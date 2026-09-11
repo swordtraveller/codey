@@ -66,7 +66,23 @@ export type ContextManagementConfig = {
   /** Developer-only conversation override for a custom Rhai strategy. */
   customStrategyEnabled?: boolean
   customStrategyScript?: string
+  /** User-authored prompt describing the custom strategy; injected into the
+   *  system message when the custom strategy is active. May be empty. */
+  customStrategyPrompt?: string
 }
+
+export const defaultStrategyPrompt = [
+  'Older conversation history may be filtered, rewritten, or truncated to fit the input budget.',
+  'Treat the retained messages as the conversation record; missing older exchanges were compressed away by the context policy.',
+].join('\n')
+
+export const layeredStrategyPrompt = [
+  'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
+  'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+  'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
+  'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
+  'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
+].join('\n')
 
 export const defaultContextManagementConfig: ContextManagementConfig = {
   layeredEnabled: false,
@@ -80,6 +96,7 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   coldRecallTokenBudget: 8_000,
   customStrategyEnabled: false,
   customStrategyScript: '',
+  customStrategyPrompt: '',
 }
 
 export const maximumAgentLimit = 100
