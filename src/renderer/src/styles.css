@@ -334,6 +334,11 @@ body {
   color: #a4262c;
 }
 
+.context-config-invalid {
+  color: #a4262c;
+  font-size: 12px;
+}
+
 .multimodal-group {
   margin-top: 4px;
 }

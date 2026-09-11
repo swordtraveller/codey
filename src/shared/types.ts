@@ -423,6 +423,9 @@ export type Conversation = {
   archived: boolean
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  /** Last context config saved per model config id; restored when the
+   *  conversation switches back to that model. */
+  perModelContextConfigs?: Record<string, ContextManagementConfig>
   agentLimits: AgentLimitsConfig
   commandExecution: CommandExecutionConfig
   messages: ChatMessage[]

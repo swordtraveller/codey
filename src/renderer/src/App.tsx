@@ -22,6 +22,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
+import { isContextConfigValidForModel, isValidContextManagementConfig } from '../../shared/context-validation'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type {
   AgentLimitsConfig,
@@ -128,13 +129,7 @@ function formatMessageTime(createdAt: string | undefined): string {
   })
 }
 
-function isValidContextConfig(value: ContextManagementConfig): boolean {
-  return Number.isInteger(value.maxInputTokens) && value.maxInputTokens >= 0 &&
-    Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
-    Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
-    Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
-    Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
-}
+const isValidContextConfig = isValidContextManagementConfig
 
 const interpreterLabels: Record<string, string> = {
   bash: 'bash',
@@ -1492,7 +1487,12 @@ export function App(): React.JSX.Element {
   const conversationWorking = activeConversationState === 'running'
   const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
   const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
-  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
+  const conversationContextConfigInvalid = Boolean(activeConversation && activeConversation.modelConfigId && effectiveModelConfig &&
+    !isContextConfigValidForModel(
+      activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
+      effectiveModelConfig.modelMaxContext,
+    ))
+  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
 
   useEffect(() => {
@@ -2650,6 +2650,13 @@ export function App(): React.JSX.Element {
                   </span>
                 </div>
               )}
+              {conversationContextConfigInvalid && (
+                <div className="topbar-row">
+                  <span className="context-config-invalid" role="alert">
+                    {t('conversationContextConfigInvalid', { model: effectiveModelConfig?.name || effectiveModelConfig?.modelName })}
+                  </span>
+                </div>
+              )}
             </div>
           </header>
 
@@ -2979,14 +2986,6 @@ export function App(): React.JSX.Element {
                      />
                    </div>
                  </div>
-                {configDraft.contextManagement.maxInputTokens > 0 && configDraft.contextManagement.maxInputTokens > Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext)) && (
-                  <p className="settings-warning" role="alert">
-                    {t('maxInputTokensExceedsModelWarning', {
-                      tokens: configDraft.contextManagement.maxInputTokens.toLocaleString(),
-                      context: Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext)).toLocaleString(),
-                    })}
-                  </p>
-                )}
               </section>
               )}
               {settingsTab === 'language' && (

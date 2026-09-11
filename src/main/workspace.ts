@@ -578,7 +578,18 @@ export function setConversationModelConfig(projectId: string, conversationId: st
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    // Remember the current context config for the outgoing model.
+    if (conversation.modelConfigId && conversation.contextConfigOverride) {
+      conversation.perModelContextConfigs = {
+        ...conversation.perModelContextConfigs,
+        [conversation.modelConfigId]: conversation.contextConfigOverride,
+      }
+    }
     conversation.modelConfigId = modelConfigId
+    // Restore the remembered config for the incoming model when present.
+    conversation.contextConfigOverride = modelConfigId
+      ? conversation.perModelContextConfigs?.[modelConfigId] ?? conversation.contextConfigOverride
+      : conversation.contextConfigOverride
     await persistConversation(projectId, conversation)
     return project
   })

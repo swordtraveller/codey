@@ -106,6 +106,7 @@ import {
   updateConversationTurn,
 } from './workspace'
 import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { isContextConfigValidForModel } from './context-config'
 import { commandDialogTerms, formatDuration } from './i18n-terms'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
 
@@ -443,8 +444,14 @@ async function developProject(
         requestConfirmation: (request) => requestCommandConfirmation(request),
       }
     : undefined
-  if (contextConfig.maxInputTokens > modelConfig.modelMaxContext) {
-    return { project, writtenFiles: [], error: 'Max input tokens must not exceed the model context window' }
+  if (conversation.modelConfigId && !isContextConfigValidForModel(contextConfig, modelConfig.modelMaxContext)) {
+    return {
+      project,
+      writtenFiles: [],
+      error: conversation.contextConfigOverride
+        ? 'The conversation context settings are not valid for the selected model. Adjust them before sending.'
+        : 'Max input tokens must not exceed the model context window',
+    }
   }
 
   const userMessageId = randomUUID()
