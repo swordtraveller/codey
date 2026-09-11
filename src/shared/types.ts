@@ -417,6 +417,17 @@ export type PromptSnapshot = {
   entries: PromptSnapshotEntry[]
 }
 
+export type ToolHelpEntry = {
+  name: string
+  description: string
+  parameters: string
+  returns: string
+}
+
+export type ToolHelpSnapshot = {
+  entries: ToolHelpEntry[]
+}
+
 export type Conversation = {
   id: string
   title: string

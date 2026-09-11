@@ -12,6 +12,7 @@ import type {
   ModelConfig,
   ModelConnectivityResult,
   PromptSnapshot,
+  ToolHelpSnapshot,
   ShellDetectionResult,
   Wsl2ManualConfig,
   Project,
@@ -121,6 +122,7 @@ contextBridge.exposeInMainWorld(
     getWsl2ManualConfig: (): Promise<Wsl2ManualConfig | null> => ipcRenderer.invoke('shells:get-wsl2-config'),
     setWsl2ManualConfig: (config: Wsl2ManualConfig | null): Promise<void> => ipcRenderer.invoke('shells:set-wsl2-config', config),
     getPromptSnapshot: (): Promise<PromptSnapshot> => ipcRenderer.invoke('prompts:snapshot'),
+    getToolHelpSnapshot: (): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot'),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>

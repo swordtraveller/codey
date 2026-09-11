@@ -19,6 +19,7 @@ import type {
   ImageAttachment,
   ModelConfig,
   PromptSnapshot,
+  ToolHelpSnapshot,
   ScreenshotSelection,
   ScreenshotSource,
   Wsl2ManualConfig,
@@ -71,7 +72,7 @@ import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
 import { testModelConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
-import { buildRunCommandTool } from './tools'
+import { buildRunCommandTool, createAgentTools } from './tools'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -285,6 +286,70 @@ async function fileExists(path: string): Promise<boolean> {
 /** Builds a read-only snapshot of the live prompts for the settings viewer.
  *  Reads directly from the source functions so the display never drifts
  *  from what the agent actually sends. */
+/** Returns-tool descriptions for the help viewer; tools not in this map get a
+ *  generic note. Keys are tool function names. */
+const toolReturnsNotes: Record<string, string> = {
+  read_file: 'The UTF-8 text content of the file.',
+  write_file: 'Confirmation that the file was written.',
+  file_patch: 'Confirmation that the snippet was replaced.',
+  list_directory: 'JSON array of {name, type} entries.',
+  project_tree: 'A filtered directory tree as text.',
+  project_search_text: 'JSON array of matches with file, line, and preview.',
+  context_search: 'JSON array of matching context record metadata.',
+  context_read: 'JSON array of {id, role, content, representation, truthRefs, createdAt} records.',
+  web_search: 'JSON array of {title, url, snippet} results.',
+  web_open: 'The page text content.',
+  git_status: 'The concise working tree and staging status.',
+  git_diff: 'The unstaged or staged diff text.',
+  git_add: 'Confirmation with the staged paths.',
+  git_unstage: 'Confirmation with the unstaged paths.',
+  git_commit: 'The commit result with the new commit id.',
+  git_log: 'Recent commits with hash, author, date, and message.',
+  git_get_current_branch: 'The branch name or a detached-HEAD report.',
+  run_command: 'JSON {ok, output} with truncated stdout/stderr sections.',
+  python_execute: 'JSON {stdout, stderr, exit_code, duration_ms} from the sandboxed snippet.',
+  python_run_script: 'The script output with execution info.',
+  python_install_package: 'Installation result summary.',
+  python_env_info: 'JSON describing the Python environment.',
+  python_list_symbols: 'JSON array of classes and functions with line numbers.',
+  node_package_command: 'JSON result of the package-manager operation.',
+  node_package_script: 'The script output with execution info.',
+  node_validate: 'JSON with per-check pass/failure, duration, and bounded logs.',
+  frontend_start_dev_server: 'JSON {server_id} for status and log queries.',
+  frontend_get_dev_server_status: 'JSON status and bounded output.',
+  frontend_get_dev_server_logs: 'JSON with bounded stdout and stderr.',
+  frontend_stop_dev_server: 'Confirmation that the server tree stopped.',
+}
+
+/** Builds the read-only tool help snapshot for the help viewer, from the live
+ *  tool definitions (network access on shows the full tool set). */
+function buildToolHelpSnapshot(): ToolHelpSnapshot {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const tools = createAgentTools(sampleProject, true) as Array<{
+    function: { name?: string; description?: string; parameters?: unknown }
+  }>
+  return {
+    entries: tools
+      .filter((tool) => typeof tool.function.name === 'string')
+      .map((tool) => ({
+        name: tool.function.name ?? '',
+        description: tool.function.description ?? '',
+        parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
+        returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+      })),
+  }
+}
+
 function buildPromptSnapshot(): PromptSnapshot {
   const sampleProject: Project = {
     id: 'sample',
@@ -981,6 +1046,7 @@ app.whenReady().then(() => {
   ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
   ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
   ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
+  ipcMain.handle('tools:help-snapshot', () => buildToolHelpSnapshot())
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)

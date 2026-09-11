@@ -65,6 +65,7 @@ import {
   type ModelConfig,
   type Project,
   type PromptSnapshot,
+  type ToolHelpSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
@@ -131,8 +132,24 @@ function formatMessageTime(createdAt: string | undefined): string {
 
 const isValidContextConfig = isValidContextManagementConfig
 
-const interpreterLabels: Record<string, string> = {
-  bash: 'bash',
+/** Renders text with <mark> highlights around case-insensitive keyword matches. */
+function HighlightedText({ text, keyword }: { text: string; keyword: string }): React.JSX.Element {
+  const trimmed = keyword.trim()
+  if (!trimmed) return <>{text}</>
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const parts = text.split(new RegExp(`(${escaped})`, 'ig'))
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.toLowerCase() === trimmed.toLowerCase()
+          ? <mark key={index}>{part}</mark>
+          : <span key={index}>{part}</span>,
+      )}
+    </>
+  )
+}
+
+const interpreterLabels: Record<string, string> = {  bash: 'bash',
   pwsh7: 'pwsh 7',
   pwsh51: 'pwsh 5.1',
 }
@@ -1408,6 +1425,12 @@ export function App(): React.JSX.Element {
   const [wsl2Draft, setWsl2Draft] = useState<Wsl2ManualConfig>({ distro: '', sandboxUser: '' })
   const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
   const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false)
+  const [helpTab, setHelpTab] = useState<'tools'>('tools')
+  const [toolHelp, setToolHelp] = useState<ToolHelpSnapshot | null>(null)
+  const [toolSearch, setToolSearch] = useState('')
+  const [toolMatchIndex, setToolMatchIndex] = useState(0)
+  const toolListRef = useRef<HTMLDivElement>(null)
   const [wsl2ConfigOpen, setWsl2ConfigOpen] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
@@ -1672,6 +1695,47 @@ export function App(): React.JSX.Element {
     }
     const model = { ...defaultModelConfig, id: crypto.randomUUID() }
     return { ...config, modelConfigs: [model], activeModelConfigId: model.id }
+  }
+
+  function openHelp(): void {
+    setHelpDialogOpen(true)
+    if (!toolHelp) {
+      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
+    }
+  }
+
+  const toolKeyword = toolSearch.trim().toLowerCase()
+  const toolMatches = useMemo(
+    () => (toolHelp && toolKeyword
+      ? toolHelp.entries.filter((entry) => entry.name.toLowerCase().includes(toolKeyword))
+      : []),
+    [toolHelp, toolKeyword],
+  )
+
+  // Keyword changes reset the jump position; the effect scrolls to it.
+  useEffect(() => {
+    setToolMatchIndex(0)
+  }, [toolKeyword])
+
+  useEffect(() => {
+    if (!helpDialogOpen || toolMatches.length === 0) return
+    const container = toolListRef.current
+    if (!container) return
+    const name = toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name ?? ''
+    const target = container.querySelector<HTMLElement>(`[data-tool-name="${CSS.escape(name)}"]`)
+    if (target) {
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [toolMatchIndex, toolMatches, helpDialogOpen])
+
+  function jumpToMatch(direction: 1 | -1): void {
+    if (toolMatches.length === 0) return
+    setToolMatchIndex((current) => (current + direction + toolMatches.length) % toolMatches.length)
+  }
+
+  function isCurrentMatch(name: string): boolean {
+    if (toolMatches.length === 0) return false
+    return toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name === name
   }
 
   function openSettings(): void {
@@ -2543,6 +2607,9 @@ export function App(): React.JSX.Element {
             </section>
           )}
 
+          <Button className="settings-button" appearance="subtle" onClick={openHelp}>
+            {t('help')}
+          </Button>
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
@@ -2829,6 +2896,74 @@ export function App(): React.JSX.Element {
               <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceTraces')}</Button>
               <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceTraces')}</Button>
               <Button appearance="secondary" onClick={() => setPerformanceDialogOpen(false)}>{t('close')}</Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={helpDialogOpen} onOpenChange={(_, data) => setHelpDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('help')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={helpTab}
+                onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
+              >
+                <Tab value="tools">{t('helpTools')}</Tab>
+              </TabList>
+              {helpTab === 'tools' && (
+                <section className="settings-group tool-help-group">
+                  <p className="settings-description">
+                    {toolHelp
+                      ? toolSearch.trim()
+                        ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
+                        : t('helpToolTotalCount', { count: toolHelp.entries.length })
+                      : ''}
+                  </p>
+                  <div className="tool-search-row">
+                    <div className="tool-search-field">
+                      <Field label={t('helpToolSearch')}>
+                        <Input
+                          value={toolSearch}
+                          onChange={(_, data) => setToolSearch(data.value)}
+                          placeholder={t('helpToolSearchPlaceholder')}
+                        />
+                      </Field>
+                    </div>
+                    {toolMatches.length > 1 && (
+                      <div className="tool-search-nav">
+                        <Button appearance="subtle" size="small" aria-label={t('helpToolPreviousMatch')} onClick={() => jumpToMatch(-1)}>
+                          ↑
+                        </Button>
+                        <span className="tool-match-position">{toolMatchIndex + 1} / {toolMatches.length}</span>
+                        <Button appearance="subtle" size="small" aria-label={t('helpToolNextMatch')} onClick={() => jumpToMatch(1)}>
+                          ↓
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="tool-help-list" ref={toolListRef}>
+                    {!toolHelp && <p className="settings-description">{t('loadingPrompts')}</p>}
+                    {toolHelp?.entries.map((entry) => (
+                      <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
+                        <h3><HighlightedText keyword={toolSearch} text={entry.name} /></h3>
+                        <p className="settings-description">{entry.description}</p>
+                        <details>
+                          <summary>{t('helpToolParameters')}</summary>
+                          <pre className="prompt-content">{entry.parameters}</pre>
+                        </details>
+                        <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setHelpDialogOpen(false)}>
+                {t('close')}
+              </Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>
