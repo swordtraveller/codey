@@ -11,14 +11,18 @@ import {
   Switch,
   FluentProvider,
   Input,
+  Tab,
+  TabList,
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
 import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
+import { isContextConfigValidForModel, isValidContextManagementConfig } from '../../shared/context-validation'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type {
   AgentLimitsConfig,
@@ -51,12 +55,19 @@ import {
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
+  defaultCommandExecutionConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
+  commandExecutionSupported,
   deriveContextBudgets,
   maximumAgentLimit,
+  type CommandExecutionConfig,
   type ModelConfig,
   type Project,
+  type PromptSnapshot,
+  type ToolHelpSnapshot,
+  type ShellDetectionResult,
+  type Wsl2ManualConfig,
 } from '../../shared/types'
 
 const markdownPlugins = [remarkGfm]
@@ -119,12 +130,35 @@ function formatMessageTime(createdAt: string | undefined): string {
   })
 }
 
-function isValidContextConfig(value: ContextManagementConfig): boolean {
-  return Number.isInteger(value.maxInputTokens) && value.maxInputTokens >= 0 &&
-    Number.isInteger(value.recentKeepRounds) && value.recentKeepRounds >= 1 && value.recentKeepRounds <= 20 &&
-    Number.isInteger(value.hotTokenBudget) && value.hotTokenBudget >= 1_000 &&
-    Number.isInteger(value.warmTokenBudget) && value.warmTokenBudget >= 0 &&
-    Number.isInteger(value.coldRecallTokenBudget) && value.coldRecallTokenBudget >= 0
+const isValidContextConfig = isValidContextManagementConfig
+
+/** Renders text with <mark> highlights around case-insensitive keyword matches. */
+function HighlightedText({ text, keyword }: { text: string; keyword: string }): React.JSX.Element {
+  const trimmed = keyword.trim()
+  if (!trimmed) return <>{text}</>
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const parts = text.split(new RegExp(`(${escaped})`, 'ig'))
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.toLowerCase() === trimmed.toLowerCase()
+          ? <mark key={index}>{part}</mark>
+          : <span key={index}>{part}</span>,
+      )}
+    </>
+  )
+}
+
+const interpreterLabels: Record<string, string> = {  bash: 'bash',
+  pwsh7: 'pwsh 7',
+  pwsh51: 'pwsh 5.1',
+}
+
+const environmentLabels: Record<string, string> = {
+  bare: 'bare',
+  wsl2: 'wsl2',
+  docker: 'docker',
+  'windows-sandbox': 'Windows Sandbox',
 }
 function isValidAgentLimits(value: AgentLimitsConfig): boolean {
   return Number.isInteger(value.modelRequestsPerRound) &&
@@ -137,6 +171,73 @@ type ConversationTurn = ConversationTurnRecord & {
   projectId: string
   conversationId: string
   userMessageId: string
+}
+
+/** Formats one completed conversation turn as a log-style event stream for
+ *  sharing with another model for evaluation. One event per line header
+ *  (timestamp + role), payload verbatim — no markdown nesting conflicts. */
+function formatTurnForCopy(
+  userMessage: ChatMessage,
+  turn: ConversationTurn,
+  messages: ChatMessage[],
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const startedIndex = messages.findIndex((message) => message.id === userMessage.id)
+  const turnMessages: ChatMessage[] = []
+  if (startedIndex >= 0) {
+    for (let index = startedIndex + 1; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (message.role !== 'assistant' && !message.compression) break
+      turnMessages.push(message)
+    }
+  }
+  const durationLabel = t('duration', {
+    hours: Math.floor(Math.max(0, (turn.endedAt ?? turn.startedAt) - turn.startedAt) / 3_600_000),
+    minutes: Math.floor(Math.max(0, (turn.endedAt ?? turn.startedAt) - turn.startedAt) / 60_000) % 60,
+  })
+  const resultLabel = turn.result === 'stopped'
+    ? t('stopped')
+    : turn.result === 'normal'
+      ? t('normal')
+      : turn.result === 'timeout'
+        ? t('timeout')
+        : t('otherError', { error: turn.error ?? 'Unknown' })
+  const lines: string[] = [
+    `# turn.duration: ${durationLabel}`,
+    `# turn.result: ${resultLabel}`,
+    '',
+    `# ${formatMessageTime(userMessage.createdAt)} [user]`,
+    userMessage.content || '',
+  ]
+  if (userMessage.images?.length) {
+    lines.push(t('copyTurnImages'))
+    for (const image of userMessage.images) {
+      lines.push(`[${image.name} (${image.mediaType})]`)
+    }
+  }
+  for (const message of turnMessages) {
+    if (message.compression) continue
+    const toolCalls = (message.blocks ?? []).filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> => block.type === 'function_call')
+    let toolIndex = 0
+    for (const block of message.blocks ?? []) {
+      if (block.type === 'function_call') {
+        toolIndex += 1
+        const toolLabel = toolCalls.length > 1 ? ` #${toolIndex}` : ''
+        lines.push('', `# ${formatMessageTime(message.createdAt)} [tool] ${block.name}${toolLabel}`, t('copyTurnToolParameters'), block.parameters)
+        if (block.result !== undefined) {
+          lines.push(block.resultError ? t('copyTurnToolError') : t('copyTurnToolResultLabel'), block.result)
+        }
+      }
+    }
+    if (blockHasContent(message)) {
+      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
+    }
+  }
+  return lines.join('\n')
+}
+
+function blockHasContent(message: ChatMessage): boolean {
+  return Boolean(message.content && message.content.trim())
 }
 
 function ConversationStopwatch({ turn }: { turn: ConversationTurnRecord }): React.JSX.Element {
@@ -360,11 +461,13 @@ const MemoFunctionCallMessage = memo(FunctionCallMessage)
 
 const ConversationMessage = memo(function ConversationMessage({
   message,
+  messages,
   projectId,
   conversationId,
   conversationTurn,
 }: {
   message: ChatMessage
+  messages: ChatMessage[]
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
@@ -375,6 +478,7 @@ const ConversationMessage = memo(function ConversationMessage({
       ? conversationTurn
       : undefined
   )
+  const turnCompleted = messageTurn !== undefined && messageTurn.endedAt !== undefined
 
   return (
     <>
@@ -400,6 +504,17 @@ const ConversationMessage = memo(function ConversationMessage({
           <div className="user-message-content">
             <div className="message-card-header">
               {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              {turnCompleted && messageTurn && (
+                <Button
+                  aria-label={t('copyTurn')}
+                  appearance="subtle"
+                  size="small"
+                  title={t('copyTurn')}
+                  onClick={() => copyText(formatTurnForCopy(message, messageTurn as ConversationTurn, messages, t))}
+                >
+                  {t('copyTurn')}
+                </Button>
+              )}
               <Button
                 aria-label={t('copyMessage')}
                 appearance="subtle"
@@ -586,8 +701,11 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const previousMessageCountRef = useRef(messages.length)
   useLayoutEffect(() => {
     if (previousMessageCountRef.current === messages.length) return
-    previousMessageCountRef.current = messages.length
+    // Do not consume the pending growth while the user is scrolled away:
+    // the effect re-runs when they return to the bottom (shouldStickToBottom
+    // is a dependency) and the window resyncs then.
     if (!shouldStickToBottom) return
+    previousMessageCountRef.current = messages.length
     const nextStart = historyExpandedRef.current
       ? visibleStartIndex
       : initialConversationWindowStart(messages)
@@ -597,6 +715,16 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       end: messages.length,
     })
   }, [messages.length, shouldStickToBottom, visibleStartIndex])
+
+  // Self-heal a degenerate virtual window (its end at or before the visible
+  // region start renders an empty slice — the conversation goes blank until
+  // the component remounts). Recompute from the current scroll position so
+  // content reappears in place, even when no scroll event can fire.
+  useLayoutEffect(() => {
+    if (visibleMessages.length === 0) return
+    if (virtualWindow.end > visibleStartIndex) return
+    updateWindow()
+  }, [virtualWindow.end, visibleStartIndex, visibleMessages.length, updateWindow])
 
   const loadOlderMessages = useCallback(() => {
     const container = scrollContainerRef.current
@@ -677,6 +805,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
         <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
           <ConversationMessage
             message={message}
+            messages={messages}
             projectId={projectId}
             conversationId={conversationId}
             conversationTurn={conversationTurn}
@@ -868,6 +997,16 @@ function ContextSettingsFields({
                   textarea.selectionEnd = start + 1
                 })
               }}
+            />
+          </Field>
+          <Field label={t('customContextStrategyPrompt')} hint={t('customContextStrategyPromptHint')}>
+            <Textarea
+              disabled={disabled}
+              resize="vertical"
+              value={value.customStrategyPrompt ?? ''}
+              onChange={(_, data) => onChange({ customStrategyPrompt: data.value })}
+              placeholder={t('customContextStrategyPromptPlaceholder')}
+              rows={4}
             />
           </Field>
         </>
@@ -1276,6 +1415,23 @@ export function App(): React.JSX.Element {
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [commandDialogOpen, setCommandDialogOpen] = useState(false)
+  const [commandProjectId, setCommandProjectId] = useState('')
+  const [commandConversationId, setCommandConversationId] = useState('')
+  const [commandDraft, setCommandDraft] = useState(defaultCommandExecutionConfig)
+  const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
+  const [shellDetectBusy, setShellDetectBusy] = useState(false)
+  const [wslDistros, setWslDistros] = useState<string[]>([])
+  const [wsl2Draft, setWsl2Draft] = useState<Wsl2ManualConfig>({ distro: '', sandboxUser: '' })
+  const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
+  const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
+  const [helpDialogOpen, setHelpDialogOpen] = useState(false)
+  const [helpTab, setHelpTab] = useState<'tools'>('tools')
+  const [toolHelp, setToolHelp] = useState<ToolHelpSnapshot | null>(null)
+  const [toolSearch, setToolSearch] = useState('')
+  const [toolMatchIndex, setToolMatchIndex] = useState(0)
+  const toolListRef = useRef<HTMLDivElement>(null)
+  const [wsl2ConfigOpen, setWsl2ConfigOpen] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
@@ -1290,6 +1446,8 @@ export function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [settingsError, setSettingsError] = useState('')
   const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
+  const [connectivityBusy, setConnectivityBusy] = useState(false)
+  const [connectivityStatus, setConnectivityStatus] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
   const [toast, setToast] = useState<{ message: string; tone: 'info' | 'error' } | null>(null)
   const [performanceDialogOpen, setPerformanceDialogOpen] = useState(false)
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
@@ -1303,6 +1461,8 @@ export function App(): React.JSX.Element {
   const activeTraceIdsRef = useRef<Record<string, string>>({})
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
+  const settingsOpenedOnceRef = useRef(false)
+  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer' | 'prompts'>('models')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -1350,7 +1510,12 @@ export function App(): React.JSX.Element {
   const conversationWorking = activeConversationState === 'running'
   const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
   const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
-  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked)
+  const conversationContextConfigInvalid = Boolean(activeConversation && activeConversation.modelConfigId && effectiveModelConfig &&
+    !isContextConfigValidForModel(
+      activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
+      effectiveModelConfig.modelMaxContext,
+    ))
+  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
 
   useEffect(() => {
@@ -1532,9 +1697,59 @@ export function App(): React.JSX.Element {
     return { ...config, modelConfigs: [model], activeModelConfigId: model.id }
   }
 
+  function openHelp(): void {
+    setHelpDialogOpen(true)
+    if (!toolHelp) {
+      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
+    }
+  }
+
+  const toolKeyword = toolSearch.trim().toLowerCase()
+  const toolMatches = useMemo(
+    () => (toolHelp && toolKeyword
+      ? toolHelp.entries.filter((entry) => entry.name.toLowerCase().includes(toolKeyword))
+      : []),
+    [toolHelp, toolKeyword],
+  )
+
+  // Keyword changes reset the jump position; the effect scrolls to it.
+  useEffect(() => {
+    setToolMatchIndex(0)
+  }, [toolKeyword])
+
+  useEffect(() => {
+    if (!helpDialogOpen || toolMatches.length === 0) return
+    const container = toolListRef.current
+    if (!container) return
+    const name = toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name ?? ''
+    const target = container.querySelector<HTMLElement>(`[data-tool-name="${CSS.escape(name)}"]`)
+    if (target) {
+      target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [toolMatchIndex, toolMatches, helpDialogOpen])
+
+  function jumpToMatch(direction: 1 | -1): void {
+    if (toolMatches.length === 0) return
+    setToolMatchIndex((current) => (current + direction + toolMatches.length) % toolMatches.length)
+  }
+
+  function isCurrentMatch(name: string): boolean {
+    if (toolMatches.length === 0) return false
+    return toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name === name
+  }
+
   function openSettings(): void {
-    setConfigDraft(createSettingsDraft())
+    // Keep unsaved drafts (e.g. a freshly added model configuration) across
+    // dialog close/reopen; only seed once when the dialog has never been
+    // opened or after a successful save replaced the draft.
+    if (!settingsOpenedOnceRef.current || configDraft === config) {
+      setConfigDraft(createSettingsDraft())
+      settingsOpenedOnceRef.current = true
+    }
     setSettingsError('')
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) setShellDetection(cached)
+    }).catch(() => undefined)
     setSettingsOpen(true)
   }
 
@@ -1781,6 +1996,136 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function openCommandExecutionSettings(): void {
+    if (!activeProject || !activeConversation || interactionLocked) {
+      return
+    }
+    setCommandProjectId(activeProject.id)
+    setCommandConversationId(activeConversation.id)
+    setCommandDraft({ ...(activeConversation.commandExecution ?? activeProject.commandExecutionDefault) })
+    setSettingsError('')
+    setCommandDialogOpen(true)
+    // Availability checks need a detection; run one if none is cached so the
+    // first save does not fail with "run environment detection".
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) {
+        setShellDetection(cached)
+        return
+      }
+      return runShellDetection()
+    }).catch(() => undefined)
+  }
+
+  async function saveCommandExecutionSettings(): Promise<void> {
+    if (interactionLocked || !isValidCommandExecutionDraft()) {
+      return
+    }
+    setSaving(true)
+    setSettingsError('')
+    try {
+      const updated = await window.codey.setConversationCommandExecution(
+        commandProjectId,
+        commandConversationId,
+        commandDraft,
+      )
+      replaceProject(updated)
+      setCommandDialogOpen(false)
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function isValidCommandExecutionDraft(): boolean {
+    if (!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment)) return false
+    if (commandDraft.modelAuditEnabled && !commandDraft.auditModelConfigId) return false
+    if (commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId) {
+      const auditModel = config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)
+      const sessionModel = effectiveModelConfig
+      if (!auditModel || !sessionModel) return false
+      if (auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) return false
+    }
+    try {
+      for (const rule of commandDraft.denyRules) new RegExp(rule, 'i')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function runShellDetection(): Promise<void> {
+    if (shellDetectBusy) {
+      return
+    }
+    setShellDetectBusy(true)
+    try {
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      setShellDetection(null)
+    } finally {
+      setShellDetectBusy(false)
+    }
+  }
+
+  async function pickBashExecutable(): Promise<void> {
+    try {
+      const picked = await window.codey.pickBashExecutable()
+      if (picked) {
+        setShellDetection(await window.codey.detectShells())
+      }
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
+    }
+  }
+
+  async function openWsl2Config(): Promise<void> {
+    if (wsl2ConfigBusy) {
+      return
+    }
+    setWsl2ConfigOpen(true)
+    setWsl2ConfigBusy(true)
+    try {
+      const [distros, current] = await Promise.all([
+        window.codey.listWslDistros(),
+        window.codey.getWsl2ManualConfig(),
+      ])
+      setWslDistros(distros)
+      setWsl2Draft(current ?? { distro: distros[0] ?? '', sandboxUser: '' })
+    } catch {
+      setWslDistros([])
+    } finally {
+      setWsl2ConfigBusy(false)
+    }
+  }
+
+  async function saveWsl2Config(): Promise<void> {
+    if (!wsl2Draft.distro.trim() || !wsl2Draft.sandboxUser.trim()) {
+      return
+    }
+    setWsl2ConfigBusy(true)
+    try {
+      await window.codey.setWsl2ManualConfig({ distro: wsl2Draft.distro.trim(), sandboxUser: wsl2Draft.sandboxUser.trim() })
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
+    } finally {
+      setWsl2ConfigBusy(false)
+    }
+  }
+
+  async function clearWsl2Config(): Promise<void> {
+    setWsl2ConfigBusy(true)
+    try {
+      await window.codey.setWsl2ManualConfig(null)
+      setShellDetection(await window.codey.detectShells())
+    } catch {
+      showToast(t('unableChangeCommandExecution'), 'error')
+    } finally {
+      setWsl2ConfigBusy(false)
+    }
+  }
+
   function updateSelectedModel(patch: Partial<ModelConfig>): void {
     const selectedId = configDraft.activeModelConfigId
     if (!selectedId) {
@@ -1801,6 +2146,56 @@ export function App(): React.JSX.Element {
       modelConfigs: [...current.modelConfigs, model],
       activeModelConfigId: model.id,
     }))
+  }
+
+  function duplicateSelectedModelConfig(): void {
+    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
+    if (!selected) {
+      return
+    }
+    const copy: ModelConfig = {
+      ...selected,
+      id: crypto.randomUUID(),
+      name: `${selected.name || selected.modelName || t('unnamedModel')} ${t('modelConfigCopySuffix')}`,
+    }
+    setConfigDraft((current) => ({
+      ...current,
+      modelConfigs: [...current.modelConfigs, copy],
+      activeModelConfigId: copy.id,
+    }))
+  }
+
+  async function testSelectedModelConnectivity(): Promise<void> {
+    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
+    if (!selected || connectivityBusy || !selected.baseUrl.trim() || !selected.modelName.trim()) {
+      return
+    }
+    setConnectivityBusy(true)
+    setConnectivityStatus(null)
+    try {
+      const result = await window.codey.testModelConnectivity(selected)
+      if (result.status === 'ok') {
+        setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
+        return
+      }
+      if (result.status === 'network-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+        return
+      }
+      if (result.status === 'auth-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityAuthError') })
+        return
+      }
+      if (result.status === 'model-not-found') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }) })
+        return
+      }
+      setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
+    } catch {
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+    } finally {
+      setConnectivityBusy(false)
+    }
   }
 
   function deleteSelectedModelConfig(): void {
@@ -2133,6 +2528,7 @@ export function App(): React.JSX.Element {
   const selectedModel = configDraft.modelConfigs.find(
     (model) => model.id === configDraft.activeModelConfigId,
   ) ?? configDraft.modelConfigs[0]
+  const settingsDirty = configDraft !== config
   const invalidModelConfig = configDraft.modelConfigs.length === 0 || configDraft.modelConfigs.some((model) =>
     !model.name.trim() ||
     !model.baseUrl.trim() ||
@@ -2142,9 +2538,7 @@ export function App(): React.JSX.Element {
     (model.modelMaxOutputTokens !== undefined &&
       (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
   )
-  const minimumModelContext = Math.min(...configDraft.modelConfigs.map((model) => model.modelMaxContext))
-  const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement) ||
-    configDraft.contextManagement.maxInputTokens > minimumModelContext
+  const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
@@ -2213,6 +2607,9 @@ export function App(): React.JSX.Element {
             </section>
           )}
 
+          <Button className="settings-button" appearance="subtle" onClick={openHelp}>
+            {t('help')}
+          </Button>
           <Button className="settings-button" appearance="subtle" onClick={openSettings}>
             {t('settings')}
           </Button>
@@ -2282,6 +2679,11 @@ export function App(): React.JSX.Element {
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
+                  {config.developerMode && activeProject && (
+                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
+                      {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
+                    </Button>
+                  )}
                 </div>
               )}
               {activeConversation && (
@@ -2312,6 +2714,13 @@ export function App(): React.JSX.Element {
                     title={t('peakInputTitle', { original: context.originalTokens, compressed: context.compressedTokens })}
                   >
                     {contextStatus}
+                  </span>
+                </div>
+              )}
+              {conversationContextConfigInvalid && (
+                <div className="topbar-row">
+                  <span className="context-config-invalid" role="alert">
+                    {t('conversationContextConfigInvalid', { model: effectiveModelConfig?.name || effectiveModelConfig?.modelName })}
                   </span>
                 </div>
               )}
@@ -2492,13 +2901,98 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog open={helpDialogOpen} onOpenChange={(_, data) => setHelpDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('help')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={helpTab}
+                onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
+              >
+                <Tab value="tools">{t('helpTools')}</Tab>
+              </TabList>
+              {helpTab === 'tools' && (
+                <section className="settings-group tool-help-group">
+                  <p className="settings-description">
+                    {toolHelp
+                      ? toolSearch.trim()
+                        ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
+                        : t('helpToolTotalCount', { count: toolHelp.entries.length })
+                      : ''}
+                  </p>
+                  <div className="tool-search-row">
+                    <div className="tool-search-field">
+                      <Field label={t('helpToolSearch')}>
+                        <Input
+                          value={toolSearch}
+                          onChange={(_, data) => setToolSearch(data.value)}
+                          placeholder={t('helpToolSearchPlaceholder')}
+                        />
+                      </Field>
+                    </div>
+                    {toolMatches.length > 1 && (
+                      <div className="tool-search-nav">
+                        <Button appearance="subtle" size="small" aria-label={t('helpToolPreviousMatch')} onClick={() => jumpToMatch(-1)}>
+                          ↑
+                        </Button>
+                        <span className="tool-match-position">{toolMatchIndex + 1} / {toolMatches.length}</span>
+                        <Button appearance="subtle" size="small" aria-label={t('helpToolNextMatch')} onClick={() => jumpToMatch(1)}>
+                          ↓
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="tool-help-list" ref={toolListRef}>
+                    {!toolHelp && <p className="settings-description">{t('loadingPrompts')}</p>}
+                    {toolHelp?.entries.map((entry) => (
+                      <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
+                        <h3><HighlightedText keyword={toolSearch} text={entry.name} /></h3>
+                        <p className="settings-description">{entry.description}</p>
+                        <details>
+                          <summary>{t('helpToolParameters')}</summary>
+                          <pre className="prompt-content">{entry.parameters}</pre>
+                        </details>
+                        <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setHelpDialogOpen(false)}>
+                {t('close')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
             <DialogTitle>{t('settings')}</DialogTitle>
             <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={settingsTab}
+                onTabSelect={(_, data) => {
+                  const next = data.value as typeof settingsTab
+                  setSettingsTab(next)
+                  if (next === 'prompts' && !promptSnapshot) {
+                    void window.codey.getPromptSnapshot().then(setPromptSnapshot).catch(() => setPromptSnapshot(null))
+                  }
+                }}
+              >
+                <Tab value="models">{t('models')}</Tab>
+                <Tab value="language">{t('language')}</Tab>
+                <Tab value="power">{t('powerSettings')}</Tab>
+                <Tab value="archive">{t('archivedItems')}</Tab>
+                <Tab value="developer">{t('developerMode')}</Tab>
+                <Tab value="prompts">{t('prompts')}</Tab>
+              </TabList>
+              {settingsTab === 'models' && (
               <section className="settings-group">
-                <h2>{t('modelSettings')}</h2>
                 <div className="model-config-toolbar">
                   <Select
                     aria-label={t('modelSettings')}
@@ -2517,10 +3011,35 @@ export function App(): React.JSX.Element {
                   <Button appearance="secondary" onClick={addModelConfig}>
                     {t('addModelConfig')}
                   </Button>
+                  <Button appearance="secondary" onClick={duplicateSelectedModelConfig}>
+                    {t('duplicateModelConfig')}
+                  </Button>
                   <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
                     {t('deleteModelConfig')}
                   </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedModel?.baseUrl.trim() || !selectedModel?.modelName.trim() || connectivityBusy}
+                    onClick={() => void testSelectedModelConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                  <Button
+                    appearance="primary"
+                    disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
+                    onClick={() => void saveSettings()}
+                  >
+                    {saving ? t('saving') : t('save')}
+                  </Button>
                 </div>
+                <p className="model-config-status-line" role="status">
+                  <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
+                    {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
+                  </span>
+                  {connectivityStatus && (
+                    <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
+                  )}
+                </p>
                 <Field label={t('modelConfigName')} required>
                   <Input
                     value={selectedModel?.name ?? ''}
@@ -2595,16 +3114,17 @@ export function App(): React.JSX.Element {
                       label={t('modalityVideo')}
                       onChange={(_, data) => updateSelectedModel({ supportsVideoInput: data.checked })}
                     />
-                    <Switch
-                      checked={selectedModel?.supportsAudioInput ?? false}
-                      label={t('modalityAudio')}
-                      onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
-                    />
-                  </div>
-                </div>
+                     <Switch
+                       checked={selectedModel?.supportsAudioInput ?? false}
+                       label={t('modalityAudio')}
+                       onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
+                     />
+                   </div>
+                 </div>
               </section>
+              )}
+              {settingsTab === 'language' && (
               <section className="settings-group">
-                <h2>{t('languageSettings')}</h2>
                 <Field label={t('language')}>
                   <Select
                     value={configDraft.language}
@@ -2617,12 +3137,13 @@ export function App(): React.JSX.Element {
                     <option value="en">{t('english')}</option>
                     <option value="zh-CN">{t('simplifiedChinese')}</option>
                   </Select>
-                </Field>
-              </section>
-              <section className="settings-group">
-                <h2>{t('powerSettings')}</h2>
-                <Switch
-                  checked={configDraft.keepAwakeEnabled}
+                 </Field>
+               </section>
+              )}
+              {settingsTab === 'power' && (
+               <section className="settings-group">
+                 <Switch
+                   checked={configDraft.keepAwakeEnabled}
                   label={t('keepAwakeComputer')}
                   onChange={(_, data) => setConfigDraft((current) => ({
                     ...current,
@@ -2641,19 +3162,21 @@ export function App(): React.JSX.Element {
                     ...current,
                     keepAwakeOnlyWhileWorking: data.checked,
                   }))}
-                />
-              </section>
-              <section className="settings-group">
-                <h2>{t('archivedItems')}</h2>
-                <p className="settings-description">{t('archivedItemsDescription')}</p>
-                <Button appearance="secondary" onClick={openArchiveList}>
-                  {t('openArchivedItems')}
-                </Button>
-              </section>
-              <section className="settings-group">
-                <h2>{t('developerSettings')}</h2>
-                <Switch
-                  checked={configDraft.developerMode}
+                 />
+               </section>
+              )}
+              {settingsTab === 'archive' && (
+               <section className="settings-group">
+                 <p className="settings-description">{t('archivedItemsDescription')}</p>
+                 <Button appearance="secondary" onClick={openArchiveList}>
+                   {t('openArchivedItems')}
+                 </Button>
+               </section>
+              )}
+              {settingsTab === 'developer' && (
+               <section className="settings-group">
+                 <Switch
+                   checked={configDraft.developerMode}
                   label={t('developerMode')}
                   onChange={(_, data) => setConfigDraft((current) => ({
                     ...current,
@@ -2661,7 +3184,112 @@ export function App(): React.JSX.Element {
                   }))}
                 />
                 <p className="settings-description">{t('developerModeDescription')}</p>
-              </section>
+                {configDraft.developerMode && (
+                  <div className="shell-detection-group">
+                    <h3>{t('environmentDetection')}</h3>
+                    <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
+                      {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
+                    </Button>
+                    {shellDetection && (
+                      <div className="shell-detection-results">
+                        {shellDetection.interpreters.map((entry) => (
+                          <p key={entry.kind} className="shell-detection-item">
+                            <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
+                            <span className="shell-detection-detail">{entry.detail}</span>
+                          </p>
+                        ))}
+                        {shellDetection.environments.map((entry) => (
+                          <p key={entry.kind} className="shell-detection-item">
+                            <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
+                            <span className="shell-detection-detail">{entry.detail}</span>
+                          </p>
+                        ))}
+                        <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
+                          {t('pickBashExecutable')}
+                        </Button>
+                        <div className="wsl2-config-group">
+                          <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
+                            {t('configureWsl2')}
+                          </Button>
+                          {wsl2ConfigOpen && (
+                            <div className="wsl2-config-form">
+                              {wslDistros.length > 0 ? (
+                                <Field label={t('wsl2Distro')}>
+                                  <Select
+                                    disabled={wsl2ConfigBusy}
+                                    value={wsl2Draft.distro}
+                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
+                                  >
+                                    {wslDistros.map((distro) => (
+                                      <option key={distro} value={distro}>{distro}</option>
+                                    ))}
+                                  </Select>
+                                </Field>
+                              ) : (
+                                <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
+                              )}
+                              <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
+                                <Input
+                                  disabled={wsl2ConfigBusy || wslDistros.length === 0}
+                                  value={wsl2Draft.sandboxUser}
+                                  onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
+                                />
+                              </Field>
+                              <div className="wsl2-config-actions">
+                                <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
+                                  {t('save')}
+                                </Button>
+                                <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
+                                  {t('wsl2ClearConfig')}
+                                </Button>
+                                <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
+                                  {t('close')}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        {shellDetection.wsl2Sandbox && (
+                          <div className="wsl2-sandbox-probe">
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
+                            </p>
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
+                            </p>
+                            <p className="shell-detection-item">
+                              <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
+                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
+                            </p>
+                            {shellDetection.wsl2Sandbox.interopEnabled && (
+                              <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
+                            )}
+                            {!shellDetection.wsl2Sandbox.socatAvailable && (
+                              <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                   </div>
+                 )}
+                </section>
+              )}
+              {settingsTab === 'prompts' && (
+                <section className="settings-group prompt-viewer-group">
+                  <p className="settings-description">{t('promptsDescription')}</p>
+                  {!promptSnapshot && <p className="settings-description">{t('loadingPrompts')}</p>}
+                  {promptSnapshot?.entries.map((entry) => (
+                    <div className="prompt-entry" key={entry.id}>
+                      <h3>{entry.title}</h3>
+                      <p className="settings-description">{entry.scene}</p>
+                      <pre className="prompt-content">{entry.content}</pre>
+                    </div>
+                  ))}
+                </section>
+              )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -2827,6 +3455,116 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog open={commandDialogOpen} onOpenChange={(_, data) => setCommandDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('commandExecutionSettings')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Switch
+                checked={commandDraft.enabled}
+                disabled={interactionLocked}
+                label={t('commandExecutionEnabled')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, enabled: data.checked }))}
+              />
+              <p className="settings-description">{t('commandExecutionDescription')}</p>
+              <Field label={t('commandInterpreter')}>
+                <Select
+                  disabled={interactionLocked || !commandDraft.enabled}
+                  value={commandDraft.interpreter}
+                  onChange={(_, data) => setCommandDraft((current) => ({
+                    ...current,
+                    interpreter: data.value as CommandExecutionConfig['interpreter'],
+                  }))}
+                >
+                  <option value="bash">bash</option>
+                  <option value="pwsh7">pwsh 7</option>
+                  <option value="pwsh51">pwsh 5.1</option>
+                </Select>
+              </Field>
+              <Field label={t('commandEnvironment')}>
+                <Select
+                  disabled={interactionLocked || !commandDraft.enabled}
+                  value={commandDraft.environment}
+                  onChange={(_, data) => setCommandDraft((current) => ({
+                    ...current,
+                    environment: data.value as CommandExecutionConfig['environment'],
+                  }))}
+                >
+                  <option value="bare">{t('commandEnvBare')}</option>
+                  <option value="wsl2">wsl2</option>
+                  <option value="docker">docker</option>
+                  <option value="windows-sandbox">Windows Sandbox</option>
+                </Select>
+              </Field>
+              {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
+                <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+              )}
+              <Switch
+                checked={commandDraft.modelAuditEnabled}
+                disabled={interactionLocked || !commandDraft.enabled}
+                label={t('commandModelAudit')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, modelAuditEnabled: data.checked }))}
+              />
+              {commandDraft.modelAuditEnabled && (
+                <>
+                  <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
+                    <Select
+                      disabled={interactionLocked}
+                      value={commandDraft.auditModelConfigId ?? ''}
+                      onChange={(_, data) => setCommandDraft((current) => ({
+                        ...current,
+                        auditModelConfigId: data.value || null,
+                      }))}
+                    >
+                      <option value="">{t('notConfigured')}</option>
+                      {config.modelConfigs
+                        .filter((model) => model.id !== effectiveModelConfig?.id)
+                        .map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name || model.modelName || t('unnamedModel')}
+                          </option>
+                        ))}
+                    </Select>
+                  </Field>
+                  {effectiveModelConfig && (
+                    <p className="settings-description">
+                      {t('commandSessionModelInfo', {
+                        config: effectiveModelConfig.name || effectiveModelConfig.modelName,
+                        model: effectiveModelConfig.modelName,
+                      })}
+                    </p>
+                  )}
+                </>
+              )}
+              {commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId && effectiveModelConfig &&
+                config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)?.modelName.trim().toLowerCase() === effectiveModelConfig.modelName.trim().toLowerCase() && (
+                <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+              )}
+              <Switch
+                checked={commandDraft.manualConfirmationEnabled}
+                disabled={interactionLocked || !commandDraft.enabled}
+                label={t('commandManualConfirmation')}
+                onChange={(_, data) => setCommandDraft((current) => ({ ...current, manualConfirmationEnabled: data.checked }))}
+              />
+              <p className="settings-description">{t('commandRuleInterceptionNote')}</p>
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setCommandDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !isValidCommandExecutionDraft()}
+                onClick={() => void saveCommandExecutionSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={contextDialogOpen} onOpenChange={(_, data) => setContextDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
@@ -2870,10 +3608,11 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
-      {toast && (
+      {toast && createPortal(
         <div className={`app-toast app-toast-${toast.tone}`} role="status">
           {toast.message}
-        </div>
+        </div>,
+        document.body,
       )}
     </FluentProvider>
   )

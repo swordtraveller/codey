@@ -305,14 +305,196 @@ body {
   display: flex;
   align-items: end;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .model-config-toolbar select {
   flex: 1;
+  min-width: 120px;
+}
+
+.model-config-status-line {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.model-config-save-state {
+  color: #616161;
+}
+
+.model-config-save-state.dirty {
+  color: #a4262c;
+}
+
+.connectivity-status.ok {
+  color: #0f7b0f;
+}
+
+.connectivity-status.error {
+  color: #a4262c;
+}
+
+.context-config-invalid {
+  color: #a4262c;
+  font-size: 12px;
+}
+
+.tool-help-group {
+  gap: 12px;
+}
+
+.tool-search-row {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.tool-search-field {
+  flex: 1;
+}
+
+.tool-search-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-bottom: 4px;
+}
+
+.tool-match-position {
+  font-size: 12px;
+  color: #616161;
+  min-width: 44px;
+  text-align: center;
+}
+
+.tool-help-entry.current-match {
+  border-color: #a4262c;
+  box-shadow: 0 0 0 1px #a4262c;
+}
+
+.tool-help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.tool-help-entry {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.tool-help-entry h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
+.tool-help-entry summary {
+  cursor: pointer;
+  font-size: 13px;
+  margin: 6px 0 4px;
+}
+
+.tool-help-returns {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #424242;
+}
+
+.tool-help-entry mark {
+  background: #fff4ce;
+  padding: 0 1px;
+  border-radius: 2px;
 }
 
 .multimodal-group {
   margin-top: 4px;
+}
+
+.shell-detection-group {
+  margin-top: 8px;
+}
+
+.shell-detection-group h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.shell-detection-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.shell-detection-item {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  font-size: 13px;
+}
+
+.shell-detection-detail {
+  color: #616161;
+  font-size: 12px;
+}
+
+.wsl2-config-group {
+  margin-top: 8px;
+}
+
+.wsl2-config-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.wsl2-config-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.wsl2-sandbox-probe {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e0e0e0;
+}
+
+.prompt-viewer-group {
+  gap: 16px;
+}
+
+.prompt-entry h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.prompt-entry .settings-description {
+  margin: 0 0 8px;
+}
+
+.prompt-content {
+  margin: 0;
+  padding: 12px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #ffffff;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }
 
 .multimodal-switches {
@@ -832,6 +1014,7 @@ h1 {
   border-radius: 8px;
   padding: 16px;
   background: #fafafa;
+  margin-top: 12px;
 }
 
 .settings-group h2 {

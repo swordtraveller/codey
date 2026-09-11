@@ -12,6 +12,13 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
+  PromptSnapshot,
+  ToolHelpSnapshot,
+  ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -40,6 +47,7 @@ declare global {
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
+      testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
@@ -72,6 +80,23 @@ declare global {
         conversationId: string,
         agentLimits: AgentLimitsConfig,
       ): Promise<Project>
+      setConversationCommandExecution(
+        projectId: string,
+        conversationId: string,
+        commandExecution: CommandExecutionConfig,
+      ): Promise<Project>
+      setProjectCommandExecutionDefault(
+        projectId: string,
+        commandExecution: CommandExecutionConfig,
+      ): Promise<Project>
+      detectShells(): Promise<ShellDetectionResult>
+      getCachedShellDetection(): Promise<ShellDetectionResult | null>
+      pickBashExecutable(): Promise<string | null>
+      listWslDistros(): Promise<string[]>
+      getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
+      setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
+      getPromptSnapshot(): Promise<PromptSnapshot>
+      getToolHelpSnapshot(): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       develop(
         projectId: string,

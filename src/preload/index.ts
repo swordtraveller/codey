@@ -8,6 +8,13 @@ import type {
   DevelopmentProgressState,
   ImageAttachment,
   ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
+  PromptSnapshot,
+  ToolHelpSnapshot,
+  ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
   PerformanceTraceEvent,
   PerformanceTraceFile,
@@ -37,6 +44,8 @@ contextBridge.exposeInMainWorld(
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
     fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
+    testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-connectivity', model),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
@@ -88,6 +97,32 @@ contextBridge.exposeInMainWorld(
       conversationId,
       agentLimits,
     ),
+    setConversationCommandExecution: (
+      projectId: string,
+      conversationId: string,
+      commandExecution: CommandExecutionConfig,
+    ) => ipcRenderer.invoke(
+      'conversations:set-command-execution',
+      projectId,
+      conversationId,
+      commandExecution,
+    ),
+    setProjectCommandExecutionDefault: (
+      projectId: string,
+      commandExecution: CommandExecutionConfig,
+    ) => ipcRenderer.invoke(
+      'projects:set-command-execution-default',
+      projectId,
+      commandExecution,
+    ),
+    detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
+    getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
+    pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),
+    listWslDistros: (): Promise<string[]> => ipcRenderer.invoke('shells:list-wsl-distros'),
+    getWsl2ManualConfig: (): Promise<Wsl2ManualConfig | null> => ipcRenderer.invoke('shells:get-wsl2-config'),
+    setWsl2ManualConfig: (config: Wsl2ManualConfig | null): Promise<void> => ipcRenderer.invoke('shells:set-wsl2-config', config),
+    getPromptSnapshot: (): Promise<PromptSnapshot> => ipcRenderer.invoke('prompts:snapshot'),
+    getToolHelpSnapshot: (): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot'),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>

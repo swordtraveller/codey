@@ -45,6 +45,13 @@ export type ModelCapabilitiesResult =
   | { status: 'not-found' }
   | { status: 'network-error' }
 
+export type ModelConnectivityResult =
+  | { status: 'ok'; models: number }
+  | { status: 'network-error'; detail: string }
+  | { status: 'auth-error'; detail: string }
+  | { status: 'model-not-found'; available: string[] }
+  | { status: 'endpoint-error'; detail: string }
+
 export type ContextManagementConfig = {
   layeredEnabled: boolean
   filterEnabled: boolean
@@ -59,7 +66,23 @@ export type ContextManagementConfig = {
   /** Developer-only conversation override for a custom Rhai strategy. */
   customStrategyEnabled?: boolean
   customStrategyScript?: string
+  /** User-authored prompt describing the custom strategy; injected into the
+   *  system message when the custom strategy is active. May be empty. */
+  customStrategyPrompt?: string
 }
+
+export const defaultStrategyPrompt = [
+  'Older conversation history may be filtered, rewritten, or truncated to fit the input budget.',
+  'Treat the retained messages as the conversation record; missing older exchanges were compressed away by the context policy.',
+].join('\n')
+
+export const layeredStrategyPrompt = [
+  'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
+  'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+  'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
+  'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
+  'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
+].join('\n')
 
 export const defaultContextManagementConfig: ContextManagementConfig = {
   layeredEnabled: false,
@@ -73,6 +96,7 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   coldRecallTokenBudget: 8_000,
   customStrategyEnabled: false,
   customStrategyScript: '',
+  customStrategyPrompt: '',
 }
 
 export const maximumAgentLimit = 100
@@ -286,13 +310,135 @@ export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
   role: AgentContextMessage['role'] | 'system'
 }
 
+export type CommandInterpreter = 'pwsh51' | 'pwsh7' | 'bash'
+export type CommandEnvironment = 'bare' | 'wsl2' | 'docker' | 'windows-sandbox'
+
+/** Developer-mode command-execution settings. The interpreter/environment
+ *  matrix is constrained: v1 implements bare+bash; the remaining combos are
+ *  reserved architecture openings. */
+export type CommandExecutionConfig = {
+  enabled: boolean
+  interpreter: CommandInterpreter
+  environment: CommandEnvironment
+  /** Rule interception is always active; this flag mirrors the UI switch that
+   *  cannot be turned off (kept for forward compatibility). */
+  ruleInterception: true
+  modelAuditEnabled: boolean
+  /** Model configuration id used for auditing; must resolve to a model whose
+   *  modelName differs from the session model (case-insensitive). */
+  auditModelConfigId: string | null
+  manualConfirmationEnabled: boolean
+  /** Extra deny rules (regex source) on top of the built-in blocklist. */
+  denyRules: string[]
+}
+
+export const defaultCommandExecutionConfig: CommandExecutionConfig = {
+  enabled: false,
+  interpreter: 'bash',
+  environment: 'bare',
+  ruleInterception: true,
+  modelAuditEnabled: false,
+  auditModelConfigId: null,
+  manualConfirmationEnabled: false,
+  denyRules: [],
+}
+
+/** Commands may request their own timeout (seconds); the hard bounds. */
+export const commandTimeoutMinSeconds = 1
+export const commandTimeoutMaxSeconds = 86_400
+/** Without manual confirmation, requested timeouts are clamped to this. */
+export const commandTimeoutClampSeconds = 600
+/** Requests above this require manual confirmation when it is enabled. */
+export const commandConfirmationThresholdSeconds = 60
+export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; environment: CommandEnvironment }> = [
+  { interpreter: 'bash', environment: 'bare' },
+  { interpreter: 'pwsh7', environment: 'bare' },
+  { interpreter: 'pwsh51', environment: 'bare' },
+  { interpreter: 'bash', environment: 'wsl2' },
+  { interpreter: 'bash', environment: 'docker' },
+  { interpreter: 'pwsh51', environment: 'docker' },
+  { interpreter: 'pwsh7', environment: 'docker' },
+]
+
+/** Docker images used for sandboxed command execution. */
+export const dockerBashImage = 'alpine:latest'
+export const dockerPwshImage = 'mcr.microsoft.com/powershell:latest'
+
+export function commandExecutionSupported(interpreter: CommandInterpreter, environment: CommandEnvironment): boolean {
+  return supportedCommandCombos.some((combo) => combo.interpreter === interpreter && combo.environment === environment)
+}
+
+/** Manual wsl2 sandbox configuration (distro + sandbox user, no password). */
+export type Wsl2ManualConfig = {
+  distro: string
+  sandboxUser: string
+}
+
+export type Wsl2SandboxProbe = {
+  configured: boolean
+  distro?: string
+  sandboxUser?: string
+  /** bwrap (bubblewrap) presence: gates the wsl2+bwrap combo. */
+  bwrapAvailable: boolean
+  /** socat presence: missing means the sandbox cannot proxy network work. */
+  socatAvailable: boolean
+  /** /etc/wsl.conf [interop] enabled; true is a sandbox-escape risk. */
+  interopEnabled: boolean
+  /** True when wsl.conf had no explicit [interop] enabled=false (defaults on). */
+  interopExplicit: boolean
+}
+
+export type ShellDetectionResult = {
+  interpreters: Array<{
+    kind: CommandInterpreter
+    available: boolean
+    /** For git-bash under the bare environment: the resolved bash.exe path. */
+    executablePath?: string
+    detail: string
+  }>
+  environments: Array<{
+    kind: CommandEnvironment
+    available: boolean
+    detail: string
+  }>
+  /** wsl2 sandbox details (bwrap/socat/interop) when a manual config exists. */
+  wsl2Sandbox?: Wsl2SandboxProbe
+  detectedAt: string
+}
+
+export type PromptSnapshotEntry = {
+  id: string
+  title: string
+  scene: string
+  content: string
+}
+
+export type PromptSnapshot = {
+  entries: PromptSnapshotEntry[]
+}
+
+export type ToolHelpEntry = {
+  name: string
+  description: string
+  parameters: string
+  returns: string
+}
+
+export type ToolHelpSnapshot = {
+  entries: ToolHelpEntry[]
+}
+
 export type Conversation = {
   id: string
   title: string
   archived: boolean
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  /** Last context config saved per model config id; restored when the
+   *  conversation switches back to that model. */
+  perModelContextConfigs?: Record<string, ContextManagementConfig>
   agentLimits: AgentLimitsConfig
+  commandExecution: CommandExecutionConfig
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
@@ -309,6 +455,7 @@ export type Project = {
   archived: boolean
   defaultModelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
+  commandExecutionDefault: CommandExecutionConfig
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { access } from 'node:fs/promises'
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -6,6 +7,7 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
+  CommandExecutionConfig,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
@@ -15,20 +17,26 @@ import type {
   DevelopmentProgressUpdate,
   DevelopmentResult,
   ImageAttachment,
+  ModelConfig,
+  PromptSnapshot,
+  ToolHelpSnapshot,
   ScreenshotSelection,
   ScreenshotSource,
+  Wsl2ManualConfig,
   Conversation,
   Project,
 } from '../shared/types'
+import { defaultCommandExecutionConfig, defaultStrategyPrompt, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
 import {
   applyDevelopmentProgressUpdate,
   compactDevelopmentProgressUpdate,
   createDevelopmentProgressState,
 } from '../shared/development-progress'
-import { buildAgentContext, develop } from './agent'
+import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
+import type { CommandExecutorRuntime } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
   buildContextDebugSnapshot,
@@ -62,6 +70,9 @@ import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreen
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
+import { testModelConnectivity } from './model-connectivity'
+import { buildAuditPromptTemplate } from './command-executor'
+import { buildRunCommandTool, createAgentTools } from './tools'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -85,14 +96,20 @@ import {
   saveConversationContext,
   setConversationAgentLimits,
   setConversationArchived,
+  setConversationCommandExecution,
   setConversationContextConfig,
   setConversationModelConfig,
+  setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
   setProjectModelConfig,
   updateConversationAgentMessages,
   updateConversationTurn,
 } from './workspace'
+import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { isContextConfigValidForModel } from './context-config'
+import { commandDialogTerms, formatDuration } from './i18n-terms'
+import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
@@ -242,6 +259,185 @@ async function validateModelConfigId(modelConfigId: string | null): Promise<void
   }
 }
 
+/** Validates an enabled command-execution config: the combo must be usable and
+ *  the audit model (when enabled) must resolve and differ from the session
+ *  model. Enforced again at execution time. */
+async function validateCommandExecution(config: CommandExecutionConfig): Promise<void> {
+  if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
+    throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
+  }
+  if (config.modelAuditEnabled) {
+    if (!config.auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
+    const appConfig = await readConfig()
+    const auditModel = appConfig.modelConfigs.find((model) => model.id === config.auditModelConfigId)
+    if (!auditModel) throw new Error('The audit model configuration was not found')
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Builds a read-only snapshot of the live prompts for the settings viewer.
+ *  Reads directly from the source functions so the display never drifts
+ *  from what the agent actually sends. */
+/** Returns-tool descriptions for the help viewer; tools not in this map get a
+ *  generic note. Keys are tool function names. */
+const toolReturnsNotes: Record<string, string> = {
+  read_file: 'The UTF-8 text content of the file.',
+  write_file: 'Confirmation that the file was written.',
+  file_patch: 'Confirmation that the snippet was replaced.',
+  list_directory: 'JSON array of {name, type} entries.',
+  project_tree: 'A filtered directory tree as text.',
+  project_search_text: 'JSON array of matches with file, line, and preview.',
+  context_search: 'JSON array of matching context record metadata.',
+  context_read: 'JSON array of {id, role, content, representation, truthRefs, createdAt} records.',
+  web_search: 'JSON array of {title, url, snippet} results.',
+  web_open: 'The page text content.',
+  git_status: 'The concise working tree and staging status.',
+  git_diff: 'The unstaged or staged diff text.',
+  git_add: 'Confirmation with the staged paths.',
+  git_unstage: 'Confirmation with the unstaged paths.',
+  git_commit: 'The commit result with the new commit id.',
+  git_log: 'Recent commits with hash, author, date, and message.',
+  git_get_current_branch: 'The branch name or a detached-HEAD report.',
+  run_command: 'JSON {ok, output} with truncated stdout/stderr sections.',
+  python_execute: 'JSON {stdout, stderr, exit_code, duration_ms} from the sandboxed snippet.',
+  python_run_script: 'The script output with execution info.',
+  python_install_package: 'Installation result summary.',
+  python_env_info: 'JSON describing the Python environment.',
+  python_list_symbols: 'JSON array of classes and functions with line numbers.',
+  node_package_command: 'JSON result of the package-manager operation.',
+  node_package_script: 'The script output with execution info.',
+  node_validate: 'JSON with per-check pass/failure, duration, and bounded logs.',
+  frontend_start_dev_server: 'JSON {server_id} for status and log queries.',
+  frontend_get_dev_server_status: 'JSON status and bounded output.',
+  frontend_get_dev_server_logs: 'JSON with bounded stdout and stderr.',
+  frontend_stop_dev_server: 'Confirmation that the server tree stopped.',
+}
+
+/** Builds the read-only tool help snapshot for the help viewer, from the live
+ *  tool definitions (network access on shows the full tool set). */
+function buildToolHelpSnapshot(): ToolHelpSnapshot {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const tools = createAgentTools(sampleProject, true) as Array<{
+    function: { name?: string; description?: string; parameters?: unknown }
+  }>
+  return {
+    entries: tools
+      .filter((tool) => typeof tool.function.name === 'string')
+      .map((tool) => ({
+        name: tool.function.name ?? '',
+        description: tool.function.description ?? '',
+        parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
+        returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+      })),
+  }
+}
+
+function buildPromptSnapshot(): PromptSnapshot {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const agentSystem = createAgentSystemMessage(sampleProject, true).content ?? ''
+  const agentSystemOffline = createAgentSystemMessage(sampleProject, false).content ?? ''
+  const networkLine = agentSystem.split('\n').find((line) => line.startsWith('Network access')) ?? ''
+  const agentSystemTemplate = agentSystem
+    .replace(/- folder-id: C:\/path\/to\/project/, '- <folder-id>: <folder path>')
+    .replace(networkLine, networkLine.startsWith('Network access is enabled')
+      ? 'Network access is enabled only for the read-only web_search and web_open tools. … (or: Network access is disabled. Do not call web_search or web_open.)'
+      : networkLine)
+  void agentSystemOffline
+  const commandTool = buildRunCommandTool(
+    sampleProject,
+    { ...defaultCommandExecutionConfig, enabled: true },
+    null,
+  ) as { function: { description?: string } }
+  return {
+    entries: [
+      {
+        id: 'agent-system',
+        title: 'Agent system prompt',
+        scene: 'Sent as the system message on every model request. Defines the coding-agent identity, sandbox rules, tool selection guidance, network policy, and Hot/Warm/Cold context semantics.',
+        content: agentSystemTemplate,
+      },
+      {
+        id: 'audit-prompt',
+        title: 'Command audit prompt',
+        scene: 'Sent to the separately configured audit model before each run_command executes (when model audit is enabled). The placeholders are filled with the workspace path, interpreter/environment, and the command.',
+        content: buildAuditPromptTemplate(),
+      },
+      {
+        id: 'run-command-tool',
+        title: 'run_command tool description',
+        scene: 'Included in the tool list when command execution is enabled. Reflects the configured interpreter/environment and lists the combos available on this machine (the sample below uses the bare environment with no detection cached).',
+        content: commandTool.function.description ?? '',
+      },
+      {
+        id: 'default-strategy-prompt',
+        title: 'Default context strategy prompt',
+        scene: 'Injected into the system message when the default (filter/rewrite/truncate) context strategy is active, telling the model that older history may be compressed.',
+        content: defaultStrategyPrompt,
+      },
+      {
+        id: 'layered-strategy-prompt',
+        title: 'Layered context strategy prompt',
+        scene: 'Injected into the system message when the layered (Hot/Warm/Cold) strategy is active, describing summary labeling and the context_search/context_read tools.',
+        content: layeredStrategyPrompt,
+      },
+    ],
+  }
+}
+
+/** Native confirmation for run_command; resolves denied after the timeout. */
+async function requestCommandConfirmation(request: {
+  command: string
+  timeoutSeconds: number
+  editable: boolean
+  checks: string[]
+}): Promise<{ approved: boolean; timeoutSeconds: number }> {
+  if (!mainWindow || mainWindow.isDestroyed()) return { approved: false, timeoutSeconds: request.timeoutSeconds }
+  const appConfig = await readConfig()
+  const language = appConfig.language === 'system' ? 'en' : appConfig.language
+  const terms = commandDialogTerms(appConfig.language, app.getLocale())
+  const duration = formatDuration(request.timeoutSeconds, language)
+  const checks = request.checks.join(', ') || terms.checksNone
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: terms.title,
+    message: terms.message(duration),
+    detail: terms.detail(request.command, checks),
+    buttons: [terms.approve, terms.deny],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  })
+  return { approved: result.response === 0, timeoutSeconds: request.timeoutSeconds }
+}
+
 function normalizeContextMessage(
   message: Awaited<ReturnType<typeof getProject>>['conversations'][number]['agentMessages'][number],
   now: string,
@@ -301,8 +497,26 @@ async function developProject(
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
-  if (contextConfig.maxInputTokens > modelConfig.modelMaxContext) {
-    return { project, writtenFiles: [], error: 'Max input tokens must not exceed the model context window' }
+  const commandExecution = appConfig.developerMode
+    ? structuredClone(resolveCommandExecutionConfig(project, conversation))
+    : { ...defaultCommandExecutionConfig }
+  const commandRuntime: CommandExecutorRuntime | undefined = appConfig.developerMode
+    ? {
+        conversationId,
+        signal,
+        sessionModelName: modelConfig.modelName,
+        resolveAuditModel: async (configId) => appConfig.modelConfigs.find((model) => model.id === configId),
+        requestConfirmation: (request) => requestCommandConfirmation(request),
+      }
+    : undefined
+  if (conversation.modelConfigId && !isContextConfigValidForModel(contextConfig, modelConfig.modelMaxContext)) {
+    return {
+      project,
+      writtenFiles: [],
+      error: conversation.contextConfigOverride
+        ? 'The conversation context settings are not valid for the selected model. Adjust them before sending.'
+        : 'Max input tokens must not exceed the model context window',
+    }
   }
 
   const userMessageId = randomUUID()
@@ -388,6 +602,9 @@ async function developProject(
       allowCustomStrategy,
       roundId,
       roundCount,
+      commandExecution,
+      commandRuntime,
+      shellDetection: getCachedShellDetection(),
     },
     appConfig.networkAccessEnabled,
   )
@@ -740,6 +957,7 @@ app.whenReady().then(() => {
     return saved
   })
   ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
+  ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
@@ -796,6 +1014,39 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
+  ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig) => {
+    ensureIdle(projectId, conversationId)
+    if (commandExecution.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setConversationCommandExecution(projectId, conversationId, commandExecution)
+  })
+  ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig) => {
+    ensureProjectIdle(projectId)
+    if (commandExecution.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setProjectCommandExecutionDefault(projectId, commandExecution)
+  })
+  ipcMain.handle('shells:detect', () => detectShells())
+  ipcMain.handle('shells:cached', () => getCachedShellDetection())
+  ipcMain.handle('shells:pick-bash', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'bash executable', extensions: ['exe'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    // git-bash.exe is a mintty launcher; translate it to the real bash.exe.
+    const translated = translateGitBashLauncher(result.filePaths[0])
+    const effective = await fileExists(translated) ? translated : result.filePaths[0]
+    setManualBashPath(effective)
+    return effective
+  })
+  ipcMain.handle('shells:list-wsl-distros', () => listUserWslDistros())
+  ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
+  ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
+  ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
+  ipcMain.handle('tools:help-snapshot', () => buildToolHelpSnapshot())
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)
