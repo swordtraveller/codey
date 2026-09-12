@@ -543,7 +543,7 @@ const ConversationMessage = memo(function ConversationMessage({
 
 type VirtualWindow = { start: number; end: number }
 
-const conversationEstimatedRowHeight = 180
+const conversationEstimatedRowHeight = 480
 const conversationVirtualOverscan = 5
 
 function updateVirtualWindow(
@@ -624,9 +624,18 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       Math.max(0, container.scrollTop - historyFoldHeight),
       container.clientHeight,
     )
-    setVirtualWindow({
-      start: visibleStartIndex + next.start,
-      end: visibleStartIndex + next.end,
+    setVirtualWindow((current) => {
+      const start = visibleStartIndex + next.start
+      const end = visibleStartIndex + next.end
+      if (current.start === start && current.end === end) return current
+      // Monotonic expansion: a stale-offsets recompute (rows still at the
+      // estimated height) must never clip rows that are already rendered,
+      // otherwise fast scrolling blanks the region above until the heights
+      // settle. Shrinking back happens naturally once real heights land.
+      return {
+        start: Math.min(current.start, start),
+        end: Math.max(current.end, end),
+      }
     })
   }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
 
@@ -735,12 +744,29 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
     }
-    setStartIndex((current) => expandConversationWindowStart(
+    const nextStartIndex = expandConversationWindowStart(
       messages,
-      Math.min(current, initialConversationWindowStart(messages)),
+      Math.min(startIndex, initialConversationWindowStart(messages)),
       conversationHistoryBatchSize,
-    ))
-  }, [hasOlderMessages, messages, scrollContainerRef])
+    )
+    setStartIndex(nextStartIndex)
+    // Pre-expand the render window over the newly revealed rows: without
+    // this, virtualWindow keeps its old absolute start and the freshly
+    // exposed older messages stay outside the rendered slice until a later
+    // recompute, which can never fire when the estimated offsets already
+    // cover the viewport (the "blank above a threshold" symptom).
+    setVirtualWindow((current) => ({
+      start: Math.min(current.start, nextStartIndex),
+      end: current.end,
+    }))
+    // Release the in-flight guard once the state updates are queued: the
+    // anchoring effect resets it too, but when scrollTop stays at 0 the
+    // anchor restore never runs (scrollHeight keeps growing) and a stuck
+    // guard would reject every subsequent wheel-triggered batch.
+    window.requestAnimationFrame(() => {
+      loadingOlderRef.current = false
+    })
+  }, [hasOlderMessages, messages, scrollContainerRef, startIndex])
 
   useEffect(() => {
     const container = scrollContainerRef.current
@@ -779,9 +805,19 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     Math.max(0, virtualWindow.start - visibleStartIndex),
     visibleMessages.length,
   )
-  const renderedEnd = Math.min(
-    Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
-    visibleMessages.length,
+  // Rendered range hard floor: at least 16 rows or the full visible list.
+  // Estimated heights compress the virtual window math on first paint
+  // (a "screenful" of 180px rows is only ~2 real rows), and the self-heal
+  // loop cannot widen a window whose end already exceeds the visible start —
+  // fast upward scrolling then shows a long blank stretch until real heights
+  // trickle in. Forcing a wide initial slice trades one cheap paint of a
+  // dozen extra rows for never blanking above the fold.
+  const renderedEnd = Math.max(
+    Math.min(
+      Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
+      visibleMessages.length,
+    ),
+    Math.min(renderedStart + 16, visibleMessages.length),
   )
   const topHeight = layout.offsets[renderedStart] ?? 0
   const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
