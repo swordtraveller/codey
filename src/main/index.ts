@@ -335,7 +335,14 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
   }
-  const tools = createAgentTools(sampleProject, true) as Array<{
+  const tools = createAgentTools(
+    sampleProject,
+    true,
+    // Show run_command in the help viewer: an enabled sample config with no
+    // shell detection cached (the same convention as the prompts viewer).
+    { ...defaultCommandExecutionConfig, enabled: true },
+    null,
+  ) as Array<{
     function: { name?: string; description?: string; parameters?: unknown }
   }>
   return {

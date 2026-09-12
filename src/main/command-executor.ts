@@ -14,7 +14,7 @@ import {
 import { isAuditModelAllowed } from './command-execution-config'
 import { log } from './logger'
 import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-detect'
-import { dockerBashImage, dockerPwshImage, type CommandInterpreter } from '../shared/types'
+import { commandExecutionSupported, dockerBashImage, dockerPwshImage, type CommandEnvironment, type CommandInterpreter } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
 const AUDIT_TIMEOUT_MS = 120_000
@@ -362,6 +362,9 @@ export async function executeCommand(options: {
   conversationId: string
   config: CommandExecutionConfig
   command: string
+  /** Optional per-call overrides; must be within the enabled combos. */
+  overrideInterpreter?: CommandInterpreter
+  overrideEnvironment?: CommandEnvironment
   requestedTimeoutSeconds?: number
   workspaceFolderId: string
   workspacePath: string
@@ -377,9 +380,34 @@ export async function executeCommand(options: {
   if (!trimmed) {
     return { ok: false, output: 'The command is empty.', audit }
   }
+
+  // Resolve the effective interpreter/environment (model may override).
+  const effectiveInterpreter = options.overrideInterpreter ?? config.interpreter
+  const effectiveEnvironment = options.overrideEnvironment ?? config.environment
+
+  // Combo validation: the effective combo must be enabled and supported.
+  const enabledForInterpreter = config.enabledEnvironments[effectiveInterpreter] ?? []
+  if (!enabledForInterpreter.includes(effectiveEnvironment)) {
+    const available = Object.entries(config.enabledEnvironments)
+      .flatMap(([interpreter, envs]) => envs.map((env) => `${interpreter}/${env}`))
+      .join(', ')
+    return {
+      ok: false,
+      output: `Combo ${effectiveInterpreter}/${effectiveEnvironment} is not enabled. Available combos: ${available || 'none'}.`,
+      audit,
+    }
+  }
+  if (!commandExecutionSupported(effectiveInterpreter, effectiveEnvironment)) {
+    return {
+      ok: false,
+      output: `Combo ${effectiveInterpreter}/${effectiveEnvironment} is not supported in this version.`,
+      audit,
+    }
+  }
+
   // Mount policy: sandboxed environments may only mount project folders.
   const allowedFolderPaths = options.project.folders.map((folder) => folder.path)
-  if (config.environment === 'docker' || config.environment === 'wsl2') {
+  if (effectiveEnvironment === 'docker' || effectiveEnvironment === 'wsl2') {
     try {
       assertMountableWorkspace(options.workspacePath, allowedFolderPaths)
     } catch (error) {
@@ -420,7 +448,7 @@ export async function executeCommand(options: {
         audit.push({ description: 'model audit: audit model has the same name as the session model; denied', simulated: false })
         return { ok: false, output: 'Command denied: the audit model must differ from the session model.', audit }
       }
-      const verdict = await requestAuditVerdict(trimmed, options.workspacePath, `${config.interpreter}/${config.environment}`, auditModel, runtime.signal)
+      const verdict = await requestAuditVerdict(trimmed, options.workspacePath, `${effectiveInterpreter}/${effectiveEnvironment}`, auditModel, runtime.signal)
       audit.push({ description: `model audit: ${verdict.allow ? 'allowed' : `denied (${verdict.reason})`}`, simulated: false })
       if (!verdict.allow) {
         return { ok: false, output: `Command denied by the audit model: ${verdict.reason}`, audit }
@@ -448,12 +476,12 @@ export async function executeCommand(options: {
     const startedAt = Date.now()
     let result: RawRunResult
     try {
-      if (config.environment === 'wsl2') {
+      if (effectiveEnvironment === 'wsl2') {
         result = await runWsl2(trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
-      } else if (config.environment === 'docker') {
-        result = await runDocker(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      } else if (effectiveEnvironment === 'docker') {
+        result = await runDocker(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       } else {
-        result = await runBare(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+        result = await runBare(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       }
     } catch (error) {
       return {

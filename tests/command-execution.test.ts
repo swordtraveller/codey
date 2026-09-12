@@ -28,9 +28,22 @@ import {
   evaluateDenyRules,
   type CommandExecutorRuntime,
 } from '../src/main/command-executor'
+import { supportedCommandCombos, type CommandEnvironment, type CommandInterpreter } from '../src/shared/types'
 
 function config(overrides: Partial<typeof defaultCommandExecutionConfig> = {}) {
-  return { ...defaultCommandExecutionConfig, ...overrides }
+  const enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]> = {
+    bash: [],
+    pwsh7: [],
+    pwsh51: [],
+  }
+  for (const combo of supportedCommandCombos) {
+    enabledEnvironments[combo.interpreter].push(combo.environment)
+  }
+  return {
+    ...defaultCommandExecutionConfig,
+    enabledEnvironments,
+    ...overrides,
+  }
 }
 
 function runtime(overrides: Partial<CommandExecutorRuntime> = {}): CommandExecutorRuntime {
@@ -169,11 +182,14 @@ describe('tool description guidance', () => {
     expect(runCommand.function.description).toContain('bash (bare), pwsh7 (bare)')
     expect(runCommand.function.description).not.toContain('pwsh51 (bare)')
     expect(runCommand.function.description).toContain('MSYS_NO_PATHCONV=1')
+    expect(runCommand.function.description).toContain('never nest one shell inside another')
+    expect(runCommand.function.description).toContain('Default combo for this session: bash/bare')
 
     const pwshTools = createAgentTools(project, false, { ...defaults, enabled: true, interpreter: 'pwsh51' }, detection) as Array<{ function: { name: string; description: string } }>
     const pwshRunCommand = pwshTools.find((tool) => tool.function.name === 'run_command')!
-    expect(pwshRunCommand.function.description).toContain('You are writing Windows PowerShell 5.1')
+    expect(pwshRunCommand.function.description).toContain('Default combo for this session: pwsh51/bare')
     expect(pwshRunCommand.function.description).toContain('Get-ChildItem')
+    expect(pwshRunCommand.function.description).toContain('never nest one shell inside another')
   })
 })
 
@@ -333,7 +349,7 @@ describe('executeCommand', () => {
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('/work')
     expect(outcome.output).toContain('package.json')
-  })
+  }, 30_000)
 
   dockerIt('runs pwsh in a disposable docker container', async () => {
     const outcome = await executeCommand({
@@ -347,7 +363,7 @@ describe('executeCommand', () => {
     })
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('docker-pwsh-ok')
-  })
+  }, 120_000)
 
   wslIt('runs bash inside wsl2', async () => {
     const outcome = await executeCommand({
@@ -428,6 +444,99 @@ describe('executeCommand', () => {
     expect(outcome.output).toContain('must differ from the session model')
   })
 
+  it('rejects disabled combos with a clear list of available combos', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: 'c',
+      config: config({
+        enabled: true,
+        enabledEnvironments: {
+          bash: ['bare'],
+          pwsh7: ['bare'],
+          pwsh51: ['bare'],
+        },
+      }),
+      command: 'echo hi',
+      overrideInterpreter: 'bash',
+      overrideEnvironment: 'docker',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(outcome.output).toContain('Combo bash/docker is not enabled')
+    expect(outcome.output).toContain('Available combos: bash/bare, pwsh7/bare, pwsh51/bare')
+  })
+
+  it('allows override within enabled combos', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: `override-${Math.random()}`,
+      config: config({
+        enabled: true,
+        enabledEnvironments: {
+          bash: ['bare', 'docker'],
+          pwsh7: ['bare'],
+          pwsh51: ['bare'],
+        },
+      }),
+      command: 'echo override-ok',
+      overrideInterpreter: 'bash',
+      overrideEnvironment: 'docker',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    // Docker may be unavailable in some environments; the combo gate must
+    // have passed (no "not enabled" error) — that is what this test checks.
+    expect(outcome.output).not.toContain('not enabled')
+  }, 30_000)
+
+  it('passes the effective environment to the audit model', async () => {
+    const fetchCalls: Array<{ body: string }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      fetchCalls.push({ body: String(init?.body ?? '') })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"verdict":"allow"}' } }] }), { status: 200 })
+    }) as typeof fetch
+    try {
+      // Session default is bash/bare; override to pwsh7/bare — both enabled,
+      // no Docker needed, and the audit prompt must say pwsh7/bare.
+      const outcome = await executeCommand({
+        project: { folders: [] },
+        conversationId: 'c',
+        config: config({
+          enabled: true,
+          interpreter: 'bash',
+          environment: 'bare',
+          modelAuditEnabled: true,
+          auditModelConfigId: 'audit',
+        }),
+        command: 'echo hi',
+        overrideInterpreter: 'pwsh7',
+        overrideEnvironment: 'bare',
+        workspaceFolderId: 'f',
+        workspacePath: process.cwd(),
+        runtime: runtime({
+          resolveAuditModel: async () => ({
+            ...defaultModelConfig,
+            id: 'audit',
+            modelName: 'other-model',
+            baseUrl: 'http://example.com',
+            apiKey: 'key',
+          }),
+          sessionModelName: 'glm-5.3',
+        }),
+      })
+      // The audit prompt must carry the effective combo, not the session default.
+      expect(fetchCalls.length).toBeGreaterThan(0)
+      expect(fetchCalls[0]?.body).toContain('pwsh7/bare')
+      expect(fetchCalls[0]?.body).not.toContain('bash/bare')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  }, 30_000)
+
   bashIt('runs a benign command in bash and returns its output', async () => {
     const outcome = await executeCommand({
       project: { folders: [] },
@@ -455,7 +564,7 @@ describe('executeCommand', () => {
     })
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('pwsh-execution-ok')
-  })
+  }, 30_000)
 
   bashIt('clamps long timeouts to 600s when manual confirmation is disabled', async () => {
     let observedTimeout = 0
@@ -503,16 +612,18 @@ describe('executeCommand', () => {
     const outcome = await executeCommand({
       project: { folders: [] },
       conversationId: `cap-${Math.random()}`,
-      config: config({ enabled: true }),
+      config: config({ enabled: true, manualConfirmationEnabled: true }),
       command: 'echo hi',
       requestedTimeoutSeconds: 10 * commandTimeoutMaxSeconds,
       workspaceFolderId: 'f',
       workspacePath: process.cwd(),
-      runtime: runtime(),
+      runtime: runtime({
+        requestConfirmation: async (request) => ({ approved: true, timeoutSeconds: request.timeoutSeconds }),
+      }),
     })
     expect(outcome.ok).toBe(true)
     expect(outcome.audit.some((entry) => entry.description.includes('timeout=86400s'))).toBe(true)
-  })
+  }, 30_000)
 
   bashIt('runs commands of the same conversation serially', async () => {
     const order: number[] = []

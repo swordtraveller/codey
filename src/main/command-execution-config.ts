@@ -13,16 +13,31 @@ export function normalizeCommandExecutionConfig(
   const denyRules = Array.isArray(merged.denyRules)
     ? merged.denyRules.filter((rule): rule is string => typeof rule === 'string' && rule.trim().length > 0)
     : []
+  const enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]> = {
+    bash: normalizeEnvironmentList(merged.enabledEnvironments?.bash, defaultCommandExecutionConfig.enabledEnvironments.bash),
+    pwsh7: normalizeEnvironmentList(merged.enabledEnvironments?.pwsh7, defaultCommandExecutionConfig.enabledEnvironments.pwsh7),
+    pwsh51: normalizeEnvironmentList(merged.enabledEnvironments?.pwsh51, defaultCommandExecutionConfig.enabledEnvironments.pwsh51),
+  }
   return {
     enabled: merged.enabled === true,
     interpreter: isInterpreter(merged.interpreter) ? merged.interpreter : defaultCommandExecutionConfig.interpreter,
     environment: isEnvironment(merged.environment) ? merged.environment : defaultCommandExecutionConfig.environment,
+    enabledEnvironments,
     ruleInterception: true,
     modelAuditEnabled: merged.modelAuditEnabled === true,
     auditModelConfigId: typeof merged.auditModelConfigId === 'string' && merged.auditModelConfigId ? merged.auditModelConfigId : null,
     manualConfirmationEnabled: merged.manualConfirmationEnabled === true,
     denyRules,
   }
+}
+
+function normalizeEnvironmentList(
+  value: unknown,
+  fallback: CommandEnvironment[],
+): CommandEnvironment[] {
+  if (!Array.isArray(value)) return fallback
+  const valid = value.filter((env): env is CommandEnvironment => isEnvironment(env))
+  return valid.length > 0 ? valid : fallback
 }
 
 function isInterpreter(value: unknown): value is CommandInterpreter {
@@ -35,6 +50,12 @@ function isEnvironment(value: unknown): value is CommandEnvironment {
 
 export function isValidCommandExecutionConfig(config: CommandExecutionConfig): boolean {
   if (!commandExecutionSupported(config.interpreter, config.environment)) return false
+  // Every enabled combo must be supported.
+  for (const [interpreter, envs] of Object.entries(config.enabledEnvironments)) {
+    for (const env of envs) {
+      if (!commandExecutionSupported(interpreter as CommandInterpreter, env)) return false
+    }
+  }
   if (config.modelAuditEnabled && !config.auditModelConfigId) return false
   try {
     for (const rule of config.denyRules) {

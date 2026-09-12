@@ -2039,6 +2039,14 @@ export function App(): React.JSX.Element {
 
   function isValidCommandExecutionDraft(): boolean {
     if (!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment)) return false
+    // The session default combo must be within the enabled combos.
+    if (!(commandDraft.enabledEnvironments[commandDraft.interpreter] ?? []).includes(commandDraft.environment)) return false
+    // Every enabled combo must be supported.
+    for (const [interpreter, environments] of Object.entries(commandDraft.enabledEnvironments)) {
+      for (const environment of environments) {
+        if (!commandExecutionSupported(interpreter as CommandExecutionConfig['interpreter'], environment)) return false
+      }
+    }
     if (commandDraft.modelAuditEnabled && !commandDraft.auditModelConfigId) return false
     if (commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId) {
       const auditModel = config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)
@@ -3498,6 +3506,41 @@ export function App(): React.JSX.Element {
               </Field>
               {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
                 <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+              )}
+              {commandDraft.enabled && (
+                <div className="enabled-environments-group">
+                  <p className="section-label">{t('enabledEnvironments')}</p>
+                  <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
+                  {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
+                    <div className="enabled-environments-row" key={interpreter}>
+                      <span className="enabled-environments-label">
+                        {interpreterLabels[interpreter] ?? interpreter}
+                      </span>
+                      {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
+                        <label className="enabled-environments-check" key={environment}>
+                          <input
+                            type="checkbox"
+                            checked={commandDraft.enabledEnvironments[interpreter]?.includes(environment) ?? false}
+                            onChange={(event) => setCommandDraft((current) => {
+                              const current2 = current.enabledEnvironments[interpreter] ?? []
+                              const next = event.target.checked
+                                ? [...current2, environment]
+                                : current2.filter((entry) => entry !== environment)
+                              return {
+                                ...current,
+                                enabledEnvironments: {
+                                  ...current.enabledEnvironments,
+                                  [interpreter]: next,
+                                },
+                              }
+                            })}
+                          />
+                          {environmentLabels[environment] ?? environment}
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
               )}
               <Switch
                 checked={commandDraft.modelAuditEnabled}

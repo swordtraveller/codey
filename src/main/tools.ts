@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { commandExecutionSupported, supportedCommandCombos, type CommandExecutionConfig, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
+import { commandExecutionSupported, supportedCommandCombos, type CommandEnvironment, type CommandExecutionConfig, type CommandInterpreter, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
 import { executeCommand, type CommandExecutorRuntime } from './command-executor'
 import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
@@ -62,6 +62,8 @@ type ToolArguments = {
   package_manager?: 'npm' | 'pnpm'
   command?: 'install' | 'ci' | 'update' | 'list' | 'outdated'
   timeout_seconds?: number
+  interpreter?: string
+  environment?: string
   script?: string
   checks?: NodeValidationCheckInput[]
   server_id?: string
@@ -636,6 +638,12 @@ export async function runAgentTool(
     if (typeof args.folder_id !== 'string') {
       throw new Error('folder_id is required')
     }
+    if (args.interpreter !== undefined && !['bash', 'pwsh7', 'pwsh51'].includes(args.interpreter)) {
+      throw new Error(`interpreter must be one of: bash, pwsh7, pwsh51`)
+    }
+    if (args.environment !== undefined && !['bare', 'wsl2', 'docker'].includes(args.environment)) {
+      throw new Error(`environment must be one of: bare, wsl2, docker`)
+    }
     if (args.timeout_seconds !== undefined && (typeof args.timeout_seconds !== 'number' || !Number.isInteger(args.timeout_seconds))) {
       throw new Error('timeout_seconds must be an integer')
     }
@@ -648,6 +656,8 @@ export async function runAgentTool(
       conversationId: runtime?.conversationId ?? 'unknown',
       config: commandExecution,
       command: args.command,
+      overrideInterpreter: args.interpreter as CommandInterpreter | undefined,
+      overrideEnvironment: args.environment as CommandEnvironment | undefined,
       requestedTimeoutSeconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
       workspaceFolderId: folder.id,
       workspacePath: folder.path,
@@ -964,32 +974,40 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
     }
   }
   const comboLine = availableCombos.length
-    ? `Available interpreter/environment combos on this machine: ${availableCombos.join(', ')}.`
-    : 'Available interpreter/environment combos: unknown (run environment detection in settings).'
-  const notes: string[] = []
-  const interpreter = config.interpreter
-  const environment = config.environment
-  const environmentNote = environment === 'docker'
-    ? 'The command runs inside a disposable Linux container (the project folder is mounted read-write at /work and /work is the working directory; nothing else on the host is mounted).'
-    : environment === 'wsl2'
-      ? 'The command runs inside WSL2 (the project folder is the working directory; access host paths under /mnt/<drive>/).'
-      : 'The command runs directly on the host (bare environment).'
-  if (interpreter === 'bash') {
-    notes.push(environment === 'bare'
-      ? 'You are writing bash (Git Bash / MSYS on Windows): prefer relative paths; when a Windows path is unavoidable use forward slashes (D:/path) or single quotes, never raw backslashes (bash treats them as escapes). MSYS rewrites arguments that look like paths — prefix Windows-native tools taking /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Some Windows tools emit UTF-16 output that looks like garbage here (e.g. wsl.exe --list) — pipe through iconv -f UTF-16LE -t UTF-8 to read it. Linux-style tools and pipelines (ls, grep, |) are available.'
-      : 'You are writing bash in a Linux environment: standard POSIX paths and tools (ls, grep, awk, |). Use relative paths from the working directory.')
-  } else {
-    notes.push(`You are writing ${interpreter === 'pwsh7' ? 'PowerShell 7' : 'Windows PowerShell 5.1'}${environment === 'docker' ? ' (Linux container image)' : ''}: use PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. Avoid bash-isms (ls -la flags differ). PowerShell 5.1 lacks some pwsh 7 features (e.g. ?? operator, ternary); prefer simple, version-safe syntax.`)
+    ? `Enabled combos on this machine: ${availableCombos.join(', ')}.`
+    : 'Enabled combos on this machine: unknown (run environment detection in settings).'
+
+  const bashEnvNotes: string[] = []
+  if (availableCombos.includes('bash (bare)') || (interpreters.length === 0 && environments.length === 0)) {
+    bashEnvNotes.push('bash/bare (Git Bash on Windows): Windows paths use forward slashes (D:/path) or single quotes — raw backslashes are escapes. MSYS rewrites path-like arguments — prefix /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Windows tools may emit UTF-16 output (e.g. wsl.exe --list) — pipe through iconv -f UTF-16LE -t UTF-8, or tr -d \'\\0\' when iconv is unavailable.')
   }
-  notes.push('Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.')
-  notes.push('Timeout rules: most commands need only a small timeout (30s is typical); requesting more than 60 seconds requires user approval per command; when manual confirmation is disabled, any request is capped at 600 seconds.')
+  if (availableCombos.includes('bash (wsl2)')) {
+    bashEnvNotes.push('bash/wsl2: true Linux environment; host paths under /mnt/<drive>/. POSIX paths and tools.')
+  }
+  if (availableCombos.includes('bash (docker)')) {
+    bashEnvNotes.push('bash/docker: disposable Linux container; the project folder is mounted read-write at /work (nothing else on the host is mounted).')
+  }
+  const pwshEnvNotes: string[] = []
+  if (availableCombos.includes('pwsh7 (bare)') || availableCombos.includes('pwsh51 (bare)') || (interpreters.length === 0 && environments.length === 0)) {
+    pwshEnvNotes.push('pwsh7/bare, pwsh51/bare: runs on the host; Windows paths with backslashes or forward slashes both work.')
+  }
+  if (availableCombos.includes('pwsh7 (docker)') || availableCombos.includes('pwsh51 (docker)')) {
+    pwshEnvNotes.push('pwsh7/docker, pwsh51/docker: runs on the Linux container image (pwsh on Linux); the project folder is mounted read-write at /work.')
+  }
+
   const description = [
-    'Run a shell command in the configured project workspace (developer mode).',
-    `The command runs with the ${interpreter} interpreter in the ${environment === 'bare' ? 'bare environment' : environment === 'wsl2' ? 'wsl2 environment' : 'docker environment'}, using the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.`,
-    environmentNote,
+    'Run a shell command in the project workspace (developer mode).',
+    'The command runs in the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.',
+    `Default combo for this session: ${config.interpreter}/${config.environment}. You may override the interpreter and environment per call via the interpreter/environment parameters, but only within the enabled combos; other combos are rejected with the available list.`,
     comboLine,
-    ...notes,
-  ].join(' ')
+    'Writing rules per interpreter — write the command natively for the chosen interpreter; never nest one shell inside another (e.g. do NOT invoke pwsh from bash or bash from pwsh):',
+    '- bash: standard POSIX syntax (ls, grep, awk, |). Relative paths preferred.',
+    ...bashEnvNotes.map((note) => `  - ${note}`),
+    '- pwsh7 / pwsh51: PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. PowerShell 5.1 lacks some pwsh 7 features (?? operator, ternary) — prefer version-safe syntax.',
+    ...pwshEnvNotes.map((note) => `  - ${note}`),
+    'Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.',
+    'Timeout rules: most commands need only a small timeout (30s is typical); requesting more than 60 seconds requires user approval per command; when manual confirmation is disabled, any request is capped at 600 seconds.',
+  ].join('\n')
   return {
     type: 'function',
     function: {
@@ -999,7 +1017,9 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
         type: 'object',
         properties: {
           folder_id: { type: 'string', enum: folderIds, description: 'Project folder to use as the working directory.' },
-          command: { type: 'string', minLength: 1, maxLength: 10_000, description: 'The shell command to execute, written for the configured interpreter.' },
+          command: { type: 'string', minLength: 1, maxLength: 10_000, description: 'The shell command to execute, written natively for the chosen interpreter.' },
+          interpreter: { type: 'string', enum: ['bash', 'pwsh7', 'pwsh51'], description: 'Optional. Override the session interpreter for this call; must be one of the enabled combos.' },
+          environment: { type: 'string', enum: ['bare', 'wsl2', 'docker'], description: 'Optional. Override the session environment for this call; must be one of the enabled combos.' },
           timeout_seconds: { type: 'integer', minimum: 1, maximum: 86_400, description: 'Requested timeout in seconds; 30 is typical. Above 60 requires user approval (denied if the user rejects); capped at 600 when manual confirmation is disabled.' },
         },
         required: ['folder_id', 'command'],

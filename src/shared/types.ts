@@ -318,8 +318,13 @@ export type CommandEnvironment = 'bare' | 'wsl2' | 'docker' | 'windows-sandbox'
  *  reserved architecture openings. */
 export type CommandExecutionConfig = {
   enabled: boolean
+  /** Default interpreter/environment when the model does not override them. */
   interpreter: CommandInterpreter
   environment: CommandEnvironment
+  /** Which environments each interpreter may run in (per-interpreter allowlist).
+   *  The model may override interpreter/environment per call, but only within
+   *  these enabled combos. */
+  enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]>
   /** Rule interception is always active; this flag mirrors the UI switch that
    *  cannot be turned off (kept for forward compatibility). */
   ruleInterception: true
@@ -336,6 +341,11 @@ export const defaultCommandExecutionConfig: CommandExecutionConfig = {
   enabled: false,
   interpreter: 'bash',
   environment: 'bare',
+  enabledEnvironments: {
+    bash: ['bare'],
+    pwsh7: ['bare'],
+    pwsh51: ['bare'],
+  },
   ruleInterception: true,
   modelAuditEnabled: false,
   auditModelConfigId: null,
