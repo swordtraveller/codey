@@ -54,12 +54,61 @@ describe('agent tools', () => {
       'file_patch',
       'project_tree',
       'project_search_text',
-      'python_execute',
       'node_validate',
       'git_status',
       'git_unstage',
       'git_commit',
     ]))
+  })
+
+  it('hides python tools by default and shows find_hidden_toolset', () => {
+    const definitions = createAgentTools(project) as Array<{ function: { name: string } }>
+    const names = definitions.map((definition) => definition.function.name)
+
+    expect(names).not.toContain('python_execute')
+    expect(names).not.toContain('python_run_script')
+    expect(names).not.toContain('python_install_package')
+    expect(names).not.toContain('python_env_info')
+    expect(names).not.toContain('python_list_symbols')
+    expect(names).toContain('find_hidden_toolset')
+  })
+
+  it('includes python tools once the python toolset is active', () => {
+    const definitions = createAgentTools(project, false, undefined, null, ['python']) as Array<{ function: { name: string } }>
+    const names = definitions.map((definition) => definition.function.name)
+
+    expect(names).toContain('python_execute')
+    expect(names).toContain('python_run_script')
+    expect(names).toContain('python_install_package')
+    expect(names).toContain('python_env_info')
+    expect(names).toContain('python_list_symbols')
+  })
+
+  it('unlocks the python toolset via find_hidden_toolset and reports misses', async () => {
+    const writtenFiles: string[] = []
+    const unlocked: string[] = []
+    const runtime = {
+      conversationId: 'c',
+      onToolsetUnlocked: (keyword: string): void => { unlocked.push(keyword) },
+    }
+
+    const hit = JSON.parse(await runAgentTool(
+      project,
+      toolCall('find_hidden_toolset', { keyword: 'python' }),
+      writtenFiles,
+      runtime,
+    )) as { found: string[] }
+    expect(hit.found).toEqual(['python'])
+    expect(unlocked).toEqual(['python'])
+
+    const miss = JSON.parse(await runAgentTool(
+      project,
+      toolCall('find_hidden_toolset', { keyword: 'nonexistent' }),
+      writtenFiles,
+      runtime,
+    )) as { found: string[] }
+    expect(miss.found).toEqual([])
+    expect(unlocked).toEqual(['python'])
   })
 
   it('writes and reads a file while recording the changed path', async () => {

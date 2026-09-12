@@ -447,6 +447,9 @@ export type Conversation = {
   /** Last context config saved per model config id; restored when the
    *  conversation switches back to that model. */
   perModelContextConfigs?: Record<string, ContextManagementConfig>
+  /** Hidden toolsets unlocked in this conversation (e.g. ["python"]); the
+   *  matching tools are included in every model request once unlocked. */
+  unlockedToolsets?: string[]
   agentLimits: AgentLimitsConfig
   commandExecution: CommandExecutionConfig
   messages: ChatMessage[]

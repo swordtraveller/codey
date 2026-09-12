@@ -43,6 +43,7 @@ type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'mod
   contextConfigOverride?: Partial<ContextManagementConfig> | null
   agentLimits?: Partial<AgentLimitsConfig>
   commandExecution?: Partial<CommandExecutionConfig> | null
+  unlockedToolsets?: string[]
 }
 type LegacyStoredProject = Omit<
   Project,
@@ -233,6 +234,9 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     commandExecution: value.commandExecution === null
       ? { ...defaultCommandExecutionConfig }
       : normalizeStoredCommandExecution(value.commandExecution),
+    unlockedToolsets: Array.isArray(value.unlockedToolsets)
+      ? [...new Set(value.unlockedToolsets.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== ''))]
+      : [],
     messages,
     agentMessages,
   }
@@ -635,6 +639,21 @@ export function setConversationCommandExecution(projectId: string, conversationI
     const conversation = findConversation(project, conversationId)
     conversation.commandExecution = normalized
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+/** Unlocks a hidden toolset for the conversation (idempotent) and persists it. */
+export function unlockConversationToolset(projectId: string, conversationId: string, keyword: string): Promise<Project> {
+  const normalized = keyword.trim().toLowerCase()
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    if (!normalized) throw new Error('Toolset keyword is required')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    if (!(conversation.unlockedToolsets ?? []).includes(normalized)) {
+      conversation.unlockedToolsets = [...(conversation.unlockedToolsets ?? []), normalized]
+      await persistConversation(projectId, conversation)
+    }
     return project
   })
 }

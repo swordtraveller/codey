@@ -97,6 +97,7 @@ import {
   setConversationAgentLimits,
   setConversationArchived,
   setConversationCommandExecution,
+  unlockConversationToolset,
   setConversationContextConfig,
   setConversationModelConfig,
   setProjectCommandExecutionDefault,
@@ -612,6 +613,14 @@ async function developProject(
       commandExecution,
       commandRuntime,
       shellDetection: getCachedShellDetection(),
+      unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
+      onToolsetUnlocked: (keyword: string) => {
+        // Persist the unlock so it survives app restarts and conversation
+        // reopenings, like the conversation context itself.
+        void unlockConversationToolset(projectId, conversationId, keyword)
+          .then((updated) => { project = updated })
+          .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
+      },
     },
     appConfig.networkAccessEnabled,
   )

@@ -64,6 +64,7 @@ type ToolArguments = {
   timeout_seconds?: number
   interpreter?: string
   environment?: string
+  keyword?: string
   script?: string
   checks?: NodeValidationCheckInput[]
   server_id?: string
@@ -613,7 +614,7 @@ export async function runAgentTool(
   project: Project,
   toolCall: ToolCall,
   writtenFiles: string[],
-  runtime?: { conversationId: string; signal?: AbortSignal },
+  runtime?: { conversationId: string; signal?: AbortSignal; onToolsetUnlocked?: (keyword: string) => void },
   networkAccessEnabled = false,
   commandExecution?: CommandExecutionConfig,
   commandRuntime?: CommandExecutorRuntime,
@@ -627,6 +628,26 @@ export async function runAgentTool(
   throwIfAborted(runtime?.signal)
   if ((toolCall.function.name === 'web_search' || toolCall.function.name === 'web_open') && !networkAccessEnabled) {
     throw new Error('Network access is disabled')
+  }
+  if (toolCall.function.name === 'find_hidden_toolset') {
+    if (typeof args.keyword !== 'string' || args.keyword.trim().length === 0) {
+      throw new Error('keyword is required')
+    }
+    const keyword = args.keyword.trim().toLowerCase()
+    const knownToolsets: Record<string, string> = {
+      python: 'Python execution, script running, package installation, environment info, and symbol listing tools',
+    }
+    if (knownToolsets[keyword]) {
+      runtime?.onToolsetUnlocked?.(keyword)
+      return stringifyResult({
+        found: [keyword],
+        description: `${knownToolsets[keyword]} unlocked. The tools are appended to your tool list from the next request onward and stay unlocked for the rest of this conversation.`,
+      })
+    }
+    return stringifyResult({
+      found: [],
+      description: `No hidden toolset matches "${keyword}". Available toolsets: ${Object.keys(knownToolsets).join(', ')}.`,
+    })
   }
   if (toolCall.function.name === 'run_command') {
     if (!commandExecution?.enabled) {
@@ -1029,7 +1050,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   }
 }
 
-export function createAgentTools(project: Project, networkAccessEnabled = false, commandExecution?: CommandExecutionConfig, shellDetection?: ShellDetectionResult | null): object[] {
+export function createAgentTools(project: Project, networkAccessEnabled = false, commandExecution?: CommandExecutionConfig, shellDetection?: ShellDetectionResult | null, activeToolsets?: string[]): object[] {
   const folderId = {
     type: 'string',
     enum: project.folders.map((folder) => folder.id),
@@ -1062,9 +1083,19 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
     ? [buildRunCommandTool(project, commandExecution, shellDetection ?? null)]
     : []
 
+  // Hidden toolsets: unlocked per conversation via find_hidden_toolset.
+  const pythonTools = activeToolsets?.includes('python') ? [
+    { type: 'function', function: { name: 'python_execute', description: 'Execute an in-memory Python code snippet without allowing file writes.', parameters: { type: 'object', properties: { code: { type: 'string' }, timeout, folder_id: { ...folderId, description: 'Optional project folder to use as the working directory.' } }, required: ['code', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'python_run_script', description: 'Run an existing project Python script using the project agent_venv.', parameters: { type: 'object', properties: { ...pathProperties, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: [...pathRequired, 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'python_install_package', description: 'Install packages into the project agent_venv environment.', parameters: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['packages'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'python_env_info', description: 'Get structured information about the project Python environment.', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
+    { type: 'function', function: { name: 'python_list_symbols', description: 'Statically list classes and functions in a project Python file.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+  ] : []
+
   return [
     ...webTools,
     ...commandTools,
+    { type: 'function', function: { name: 'find_hidden_toolset', description: 'Unlock a hidden toolset by keyword. Hidden toolsets contain specialized tools (currently: python for Python execution, environment, and analysis tools). The unlocked tools are appended to your tool list from the next request onward and stay unlocked for the whole conversation. Call this before attempting work that needs a specialized tool; the returned JSON lists matched toolsets.', parameters: { type: 'object', properties: { keyword: { type: 'string', minLength: 1, maxLength: 100, description: 'The toolset keyword to unlock, e.g. "python".' } }, required: ['keyword'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
     { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
@@ -1077,12 +1108,8 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
     { type: 'function', function: { name: 'frontend_get_dev_server_status', description: 'Get the status and bounded output of a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'frontend_get_dev_server_logs', description: 'Get bounded stdout and stderr from a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'frontend_stop_dev_server', description: 'Stop a development server started by this conversation and its child process tree.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'python_execute', description: 'Execute an in-memory Python code snippet without allowing file writes.', parameters: { type: 'object', properties: { code: { type: 'string' }, timeout, folder_id: { ...folderId, description: 'Optional project folder to use as the working directory.' } }, required: ['code', 'timeout'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'python_run_script', description: 'Run an existing project Python script using the project agent_venv.', parameters: { type: 'object', properties: { ...pathProperties, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: [...pathRequired, 'timeout'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'python_install_package', description: 'Install packages into the project agent_venv environment.', parameters: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['packages'], additionalProperties: false } } },
     { type: 'function', function: { name: 'file_patch', description: 'Replace one exact text snippet in an existing project file.', parameters: { type: 'object', properties: { ...pathProperties, old_snippet: { type: 'string' }, new_snippet: { type: 'string' } }, required: [...pathRequired, 'old_snippet', 'new_snippet'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'python_env_info', description: 'Get structured information about the project Python environment.', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
-    { type: 'function', function: { name: 'python_list_symbols', description: 'Statically list classes and functions in a project Python file.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+    ...pythonTools,
     { type: 'function', function: { name: 'project_tree', description: 'Return a filtered directory tree from one project folder.', parameters: { type: 'object', properties: { ...pathProperties, max_depth: { type: 'integer', minimum: 0, maximum: 8 } }, required: [...pathRequired, 'max_depth'], additionalProperties: false } } },
     { type: 'function', function: { name: 'project_search_text', description: 'Search text across all or selected project folders using a JavaScript regular expression.', parameters: { type: 'object', properties: { query: { type: 'string' }, file_pattern: { type: ['string', 'null'], description: 'Optional relative glob such as **/*.py.' }, case_sensitive: { type: 'boolean' }, folder_ids: { type: 'array', items: folderId, uniqueItems: true, description: 'Optional folder IDs. Omit to search all project folders.' } }, required: ['query', 'case_sensitive'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_status', description: 'Show the concise working tree and staging status for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
