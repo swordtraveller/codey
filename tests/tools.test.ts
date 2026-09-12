@@ -54,22 +54,22 @@ describe('agent tools', () => {
       'file_patch',
       'project_tree',
       'project_search_text',
-      'node_validate',
-      'git_status',
-      'git_unstage',
-      'git_commit',
     ]))
   })
 
-  it('hides python tools by default and shows find_hidden_toolset', () => {
+  it('hides python, node, frontend, and git tools by default and shows find_hidden_toolset', () => {
     const definitions = createAgentTools(project) as Array<{ function: { name: string } }>
     const names = definitions.map((definition) => definition.function.name)
 
-    expect(names).not.toContain('python_execute')
-    expect(names).not.toContain('python_run_script')
-    expect(names).not.toContain('python_install_package')
-    expect(names).not.toContain('python_env_info')
-    expect(names).not.toContain('python_list_symbols')
+    const hidden = [
+      'python_execute', 'python_run_script', 'python_install_package', 'python_env_info', 'python_list_symbols',
+      'node_package_command', 'node_package_script', 'node_validate',
+      'frontend_start_dev_server', 'frontend_get_dev_server_status', 'frontend_get_dev_server_logs', 'frontend_stop_dev_server',
+      'git_status', 'git_diff', 'git_add', 'git_unstage', 'git_commit', 'git_log', 'git_get_current_branch',
+    ]
+    for (const tool of hidden) {
+      expect(names).not.toContain(tool)
+    }
     expect(names).toContain('find_hidden_toolset')
   })
 
@@ -82,6 +82,28 @@ describe('agent tools', () => {
     expect(names).toContain('python_install_package')
     expect(names).toContain('python_env_info')
     expect(names).toContain('python_list_symbols')
+  })
+
+  it('includes node, frontend, and git tools once their toolsets are active', () => {
+    const definitions = createAgentTools(project, false, undefined, null, ['node', 'frontend', 'git']) as Array<{ function: { name: string } }>
+    const names = definitions.map((definition) => definition.function.name)
+
+    expect(names).toContain('node_package_command')
+    expect(names).toContain('node_package_script')
+    expect(names).toContain('node_validate')
+    expect(names).toContain('frontend_start_dev_server')
+    expect(names).toContain('frontend_get_dev_server_status')
+    expect(names).toContain('frontend_get_dev_server_logs')
+    expect(names).toContain('frontend_stop_dev_server')
+    expect(names).toContain('git_status')
+    expect(names).toContain('git_diff')
+    expect(names).toContain('git_add')
+    expect(names).toContain('git_unstage')
+    expect(names).toContain('git_commit')
+    expect(names).toContain('git_log')
+    expect(names).toContain('git_get_current_branch')
+    // Python stays hidden unless unlocked.
+    expect(names).not.toContain('python_execute')
   })
 
   it('unlocks the python toolset via find_hidden_toolset and reports misses', async () => {
@@ -109,6 +131,26 @@ describe('agent tools', () => {
     )) as { found: string[] }
     expect(miss.found).toEqual([])
     expect(unlocked).toEqual(['python'])
+  })
+
+  it('unlocks node, frontend, and git toolsets via find_hidden_toolset', async () => {
+    const writtenFiles: string[] = []
+    const unlocked: string[] = []
+    const runtime = {
+      conversationId: 'c',
+      onToolsetUnlocked: (keyword: string): void => { unlocked.push(keyword) },
+    }
+
+    for (const keyword of ['node', 'frontend', 'git']) {
+      const result = JSON.parse(await runAgentTool(
+        project,
+        toolCall('find_hidden_toolset', { keyword }),
+        writtenFiles,
+        runtime,
+      )) as { found: string[] }
+      expect(result.found).toEqual([keyword])
+    }
+    expect(unlocked).toEqual(['node', 'frontend', 'git'])
   })
 
   it('writes and reads a file while recording the changed path', async () => {
