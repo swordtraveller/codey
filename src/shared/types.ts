@@ -162,13 +162,14 @@ export type CommandReviewRule = {
 /** Review settings shared by the three layers (global/project/conversation):
  *  what gets reviewed (elements) and who reviews (reviewers, fixed order). */
 export type CommandReviewConfig = {
-  /** Declared durations at or below this pass without review; longer ones
-   *  enter the reviewer chain (and are clamped here without manual
-   *  confirmation). */
+  /** Duration reference handed to the audit model (it judges whether the
+   *  requested duration is reasonable) and the fallback duration when the
+   *  model declares none. It never authorizes passage by itself. */
   durationAllowSeconds: number
   contentRules: CommandReviewRule[]
   /** Program rules always run; only the optional reviewers are listed here.
-   *  Fixed order: program rules → audit model → manual confirmation. */
+   *  Fixed order: program rules → audit model → manual confirmation. A
+   *  whitelist hit is treated as passing the whole chain. */
   reviewers: {
     auditModel: boolean
     /** Model configuration id used for auditing; must resolve to a model whose
@@ -222,7 +223,9 @@ export const defaultCommandReviewConfig: CommandReviewConfig = {
   reviewers: {
     auditModel: false,
     auditModelConfigId: null,
-    manualConfirmation: false,
+    // On by default: unmatched commands reach a human at least once, and
+    // approval memory (whitelist rules) keeps the friction low afterwards.
+    manualConfirmation: true,
   },
 }
 
@@ -238,6 +241,12 @@ export type CommandApprovalRequest = {
   command: string
   timeoutSeconds: number
   checks: string[]
+  workspacePath: string
+  environment: string
+  /** Audit-model display name when that reviewer ran and allowed. */
+  auditModelName?: string
+  /** Audit-model reason text (may be empty when it simply allowed). */
+  auditNote?: string
 }
 
 export type CommandApprovalResponse = {

@@ -24,7 +24,7 @@ const AUDIT_TIMEOUT_MS = 120_000
 export type CommandReviewDecision = {
   at: string
   command: string
-  decision: 'rule-allow' | 'rule-deny' | 'audit-deny' | 'manual-deny' | 'manual-approve' | 'duration-clamp' | 'executed'
+  decision: 'rule-allow' | 'rule-deny' | 'audit-deny' | 'manual-deny' | 'manual-approve' | 'executed'
   detail?: string
   ruleId?: string
   layer?: string
@@ -52,6 +52,12 @@ export type CommandExecutorRuntime = {
     timeoutSeconds: number
     editable: boolean
     checks: string[]
+    workspacePath: string
+    environment: string
+    /** Audit-model display name when that reviewer ran and allowed. */
+    auditModelName?: string
+    /** Audit-model reason text (may be empty when it simply allowed). */
+    auditNote?: string
   }) => Promise<{ approved: boolean; timeoutSeconds: number }>
   /** Optional audit sink (context-debug audit trail). */
   recordAudit?: (entry: CommandExecutionAudit) => void
@@ -124,7 +130,8 @@ export function buildAuditPromptTemplate(): string {
     `Workspace: <workspace path>`,
     `Environment: <interpreter>/<environment>`,
     `Command: <the command>`,
-    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+    `Requested timeout: <seconds>s (duration gate reference: <gate>s; deny when the requested duration is unreasonable for this command)`,
+    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
   ].join('\n')
 }
 
@@ -132,6 +139,8 @@ async function requestAuditVerdict(
   command: string,
   workspacePath: string,
   environment: string,
+  timeoutSeconds: number,
+  durationGateSeconds: number,
   auditModel: ModelConfig,
   signal?: AbortSignal,
 ): Promise<{ allow: boolean; reason: string }> {
@@ -144,7 +153,8 @@ async function requestAuditVerdict(
     `Workspace: ${workspacePath}`,
     `Environment: ${environment}`,
     `Command: ${command}`,
-    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+    `Requested timeout: ${timeoutSeconds}s (duration gate reference: ${durationGateSeconds}s; deny when the requested duration is unreasonable for this command)`,
+    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
   ].join('\n')
   try {
     // Pass 1: JSON mode (API-enforced schema; chatty models cannot lead with
@@ -411,8 +421,28 @@ export async function executeCommand(options: {
       runtime.onReviewStep?.(entry)
     }
 
-    // Reviewer 1: program rules (always on). A whitelist hit passes the whole
-    // chain; a blacklist hit denies it; otherwise continue by duration.
+    // Reviewer 1: program rules (always on). Duration legality is a hard
+    // check that precedes the lists — an illegal duration denies even a
+    // whitelisted command. The duration never authorizes passage: commands
+    // unmatched by the lists enter the reviewer chain regardless of duration.
+    const declared = options.requestedTimeoutSeconds
+    const declaredLegal = declared === undefined ||
+      (Number.isFinite(declared) && Math.floor(declared) === declared &&
+        declared >= commandTimeoutMinSeconds && declared <= commandTimeoutMaxSeconds)
+    if (!declaredLegal) {
+      checks.push('rules')
+      recordStep({ stage: 'duration', outcome: 'deny', detail: `declared duration ${String(declared)}s is not a legal value` })
+      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-deny', detail: `illegal declared duration: ${String(declared)}s` })
+      return {
+        ok: false,
+        output: `Blocked by command rules: the declared duration (${String(declared)}s) is not a legal value. It must be an integer between ${commandTimeoutMinSeconds} and ${commandTimeoutMaxSeconds} seconds.`,
+        audit,
+        steps,
+      }
+    }
+    let timeoutSeconds = declared === undefined ? review.durationAllowSeconds : Math.floor(declared)
+    recordStep({ stage: 'duration', outcome: 'pass', detail: declared === undefined ? `undeclared; defaults to ${timeoutSeconds}s` : `declared ${timeoutSeconds}s` })
+
     const verdict = evaluateCommandRules(trimmed, runtime.ruleLayers ?? [])
     checks.push('rules')
     audit.push({ description: `rule check: ${verdict.decision === 'deny' ? `denied (${verdict.rule?.pattern})` : verdict.decision === 'allow' ? `allowed (${verdict.rule?.pattern})` : 'no match'}`, simulated: false })
@@ -423,24 +453,18 @@ export async function executeCommand(options: {
     }
     recordStep(
       verdict.decision === 'allow'
-        ? { stage: 'rules', outcome: 'pass', detail: `whitelist: ${verdict.rule?.pattern}` }
-        : { stage: 'rules', outcome: 'pass', detail: 'no rule matched' },
+        ? { stage: 'rules', outcome: 'pass', detail: `whitelist: ${verdict.rule?.pattern} (skips the remaining reviewers)` }
+        : { stage: 'rules', outcome: 'pass', detail: 'no rule matched; entering the reviewer chain' },
     )
 
-    // Timeout normalization. An undeclared duration means the model did not
-    // evaluate the cost — it enters review rather than bypassing the gate.
-    const declaredTimeout = options.requestedTimeoutSeconds !== undefined && Number.isFinite(options.requestedTimeoutSeconds)
-    let timeoutSeconds = Math.floor(declaredTimeout ? Number(options.requestedTimeoutSeconds) : 0)
-    if (!Number.isFinite(timeoutSeconds)) timeoutSeconds = 0
-    timeoutSeconds = Math.min(commandTimeoutMaxSeconds, Math.max(commandTimeoutMinSeconds, timeoutSeconds))
-    // Effective execution timeout when none was declared: the review gate.
-    if (!declaredTimeout) timeoutSeconds = review.durationAllowSeconds
-    let clamped = false
-
-    if (verdict.decision !== 'allow' && (!declaredTimeout || timeoutSeconds > review.durationAllowSeconds)) {
-      recordStep({ stage: 'duration', outcome: 'info', detail: declaredTimeout ? `declared ${timeoutSeconds}s exceeds the ${review.durationAllowSeconds}s gate; entering review` : 'no duration declared; entering review' })
+    if (verdict.decision === 'allow') {
+      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-allow', ruleId: verdict.rule?.id, layer: verdict.level ?? undefined, detail: verdict.rule?.pattern, timeoutSeconds })
+    } else {
       // Reviewer 2: model audit (optional, fail-closed). An audit "allow"
       // means no objection — the chain continues; it never replaces the human.
+      // The audit judges the command content AND the requested duration.
+      let auditNote: string | undefined
+      let auditModelName: string | undefined
       if (review.reviewers.auditModel) {
         checks.push('model-audit')
         const auditModel = review.reviewers.auditModelConfigId
@@ -458,26 +482,32 @@ export async function executeCommand(options: {
           decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: 'audit model equals session model' })
           return { ok: false, output: 'Command denied: the audit model must differ from the session model.', audit, steps }
         }
-        const auditVerdict = await requestAuditVerdict(trimmed, options.workspacePath, `${effectiveInterpreter}/${effectiveEnvironment}`, auditModel, runtime.signal)
+        const auditVerdict = await requestAuditVerdict(trimmed, options.workspacePath, `${effectiveInterpreter}/${effectiveEnvironment}`, timeoutSeconds, review.durationAllowSeconds, auditModel, runtime.signal)
         audit.push({ description: `model audit: ${auditVerdict.allow ? 'allowed' : `denied (${auditVerdict.reason})`}`, simulated: false })
         if (!auditVerdict.allow) {
           recordStep({ stage: 'audit-model', outcome: 'deny', detail: auditVerdict.reason })
           decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: auditVerdict.reason })
           return { ok: false, output: `Command denied by the audit model: ${auditVerdict.reason}`, audit, steps }
         }
-        recordStep({ stage: 'audit-model', outcome: 'pass', detail: auditVerdict.reason || 'no objection' })
+        auditNote = auditVerdict.reason
+        auditModelName = auditModel.name || auditModel.modelName
+        recordStep({ stage: 'audit-model', outcome: 'pass', detail: auditNote || 'no objection' })
       } else {
         recordStep({ stage: 'audit-model', outcome: 'skipped', detail: 'reviewer disabled' })
       }
 
-      // Reviewer 3: manual confirmation (optional).
+      // Reviewer 3: manual confirmation (optional, on by default). The check
+      // only counts as passed after the user actually approves it.
       if (review.reviewers.manualConfirmation) {
-        checks.push('manual-confirmation')
         const confirmation = await runtime.requestConfirmation({
           command: trimmed,
           timeoutSeconds,
           editable: true,
           checks,
+          workspacePath: options.workspacePath,
+          environment: `${effectiveInterpreter}/${effectiveEnvironment}`,
+          auditModelName,
+          auditNote,
         })
         if (!confirmation.approved) {
           audit.push({ description: `manual confirmation: denied (timeout ${timeoutSeconds}s)`, simulated: false })
@@ -485,23 +515,13 @@ export async function executeCommand(options: {
           decide({ at: new Date().toISOString(), command: trimmed, decision: 'manual-deny', timeoutSeconds })
           return { ok: false, output: 'Command denied by the user.', audit, steps }
         }
+        checks.push('manual-confirmation')
         recordStep({ stage: 'manual-confirmation', outcome: 'pass', detail: 'approved by the user' })
         decide({ at: new Date().toISOString(), command: trimmed, decision: 'manual-approve', timeoutSeconds })
         timeoutSeconds = Math.min(commandTimeoutMaxSeconds, Math.max(commandTimeoutMinSeconds, confirmation.timeoutSeconds))
       } else {
         recordStep({ stage: 'manual-confirmation', outcome: 'skipped', detail: 'reviewer disabled' })
-        // Without the human in the chain, long requests clamp to the gate.
-        recordStep({ stage: 'duration', outcome: 'clamped', detail: `capped at ${review.durationAllowSeconds}s (manual confirmation disabled)` })
-        decide({ at: new Date().toISOString(), command: trimmed, decision: 'duration-clamp', timeoutSeconds: review.durationAllowSeconds })
-        timeoutSeconds = review.durationAllowSeconds
-        clamped = true
       }
-    } else if (verdict.decision !== 'allow') {
-      recordStep({ stage: 'duration', outcome: 'pass', detail: `declared ${timeoutSeconds}s within the ${review.durationAllowSeconds}s gate; direct pass` })
-    }
-    if (verdict.decision === 'allow') {
-      recordStep({ stage: 'duration', outcome: 'pass', detail: `whitelist hit bypassed the duration gate (${timeoutSeconds}s)` })
-      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-allow', ruleId: verdict.rule?.id, layer: verdict.level ?? undefined, detail: verdict.rule?.pattern, timeoutSeconds })
     }
 
     const startedAt = Date.now()
@@ -532,7 +552,6 @@ export async function executeCommand(options: {
     if (result.stdout) sections.push(`=== STDOUT ===\n${result.stdout}`)
     if (result.stderr) sections.push(`=== STDERR ===\n${result.stderr}`)
     if (result.timedOut) sections.push(`=== EXECUTION TIMEOUT ===\nTerminated after exceeding the declared duration of ${timeoutSeconds} seconds. Declare a longer timeout next time.`)
-    if (clamped) sections.push(`=== NOTE ===\nTimeout clamped to ${review.durationAllowSeconds}s because manual confirmation is disabled.`)
     return {
       ok: result.exitCode === 0 && !result.timedOut,
       output: sections.join('\n\n') || `RC: ${result.exitCode ?? 'n/a'}`,

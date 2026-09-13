@@ -446,7 +446,15 @@ function upsertRuntimeRule(map: Map<string, CommandReviewRule[]>, key: string, r
 }
 
 function requestCommandApproval(
-  request: { command: string; timeoutSeconds: number; checks: string[] },
+  request: {
+    command: string
+    timeoutSeconds: number
+    checks: string[]
+    workspacePath: string
+    environment: string
+    auditModelName?: string
+    auditNote?: string
+  },
   context: ApprovalContext,
 ): Promise<{ approved: boolean; timeoutSeconds: number }> {
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -467,6 +475,10 @@ function requestCommandApproval(
       command: request.command,
       timeoutSeconds: request.timeoutSeconds,
       checks: request.checks,
+      workspacePath: request.workspacePath,
+      environment: request.environment,
+      auditModelName: request.auditModelName,
+      auditNote: request.auditNote,
     } satisfies CommandApprovalRequest)
   })
 }

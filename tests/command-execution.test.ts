@@ -544,6 +544,7 @@ describe('executeCommand', () => {
       conversationId: 'c',
       config: config({ enabled: true }),
       command: 'echo command-execution-ok',
+      requestedTimeoutSeconds: 30,
       workspaceFolderId: 'f',
       workspacePath: process.cwd(),
       runtime: runtime(),
@@ -551,21 +552,61 @@ describe('executeCommand', () => {
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('command-execution-ok')
     expect(outcome.audit.some((entry) => entry.description.startsWith('executed'))).toBe(true)
-    // Review chain with an undeclared duration: rules pass, then the chain
-    // runs with all reviewers disabled and the duration clamped to the gate.
+    // Unmatched command: legality passes, no rule matches, the (default-on)
+    // manual reviewer approves; duration legality precedes the lists.
     expect(outcome.steps.map((step) => `${step.stage}:${step.outcome}`)).toEqual([
+      'duration:pass',
       'rules:pass',
-      'duration:info',
       'audit-model:skipped',
-      'manual-confirmation:skipped',
-      'duration:clamped',
+      'manual-confirmation:pass',
     ])
   })
 
-  bashIt('clamps long declared durations to the gate when manual confirmation is disabled', async () => {
+  it('denies illegal declared durations before the lists, even on a whitelist hit', async () => {
+    const layers = [{ level: 'global' as const, rules: [rule({ pattern: 'echo *', list: 'allow' })] }]
+    for (const illegal of [0, 1.5, -5, commandTimeoutMaxSeconds + 1]) {
+      const outcome = await executeCommand({
+        project: { folders: [] },
+        conversationId: 'c',
+        config: config({ enabled: true }),
+        command: 'echo hi',
+        requestedTimeoutSeconds: illegal,
+        workspaceFolderId: 'f',
+        workspacePath: process.cwd(),
+        runtime: runtime({ ruleLayers: layers }),
+      })
+      expect(outcome.ok).toBe(false)
+      expect(outcome.output).toContain('not a legal value')
+    }
+  })
+
+  it('defaults an undeclared duration to the gate and runs the chain', async () => {
+    let confirmations = 0
+    let observedTimeout = 0
     const outcome = await executeCommand({
       project: { folders: [] },
-      conversationId: `clamp-${Math.random()}`,
+      conversationId: 'c',
+      config: config({ enabled: true, review: review({ durationAllowSeconds: 180 }) }),
+      command: 'echo hi',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime({
+        requestConfirmation: async (request) => {
+          confirmations += 1
+          observedTimeout = request.timeoutSeconds
+          return { approved: true, timeoutSeconds: request.timeoutSeconds }
+        },
+      }),
+    })
+    expect(confirmations).toBe(1)
+    expect(observedTimeout).toBe(180)
+    expect(outcome.ok).toBe(true)
+  })
+
+  bashIt('runs unmatched commands at their declared duration with all reviewers off (no clamp)', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: `noclamp-${Math.random()}`,
       config: config({ enabled: true, review: review({ durationAllowSeconds: 180, reviewers: { auditModel: false, auditModelConfigId: null, manualConfirmation: false } }) }),
       command: 'echo hi',
       requestedTimeoutSeconds: 7_200,
@@ -574,59 +615,40 @@ describe('executeCommand', () => {
       runtime: runtime(),
     })
     expect(outcome.ok).toBe(true)
-    expect(outcome.output).toContain('Timeout clamped to 180s')
+    expect(outcome.audit.some((entry) => entry.description.includes('timeout=7200s'))).toBe(true)
+    expect(outcome.output).not.toContain('clamped')
   })
 
-  bashIt('requests confirmation only for declared durations above the gate', async () => {
+  bashIt('requests confirmation for unmatched commands regardless of duration', async () => {
     let requested = 0
-    let confirmations = 0
     const reviewConfig = review({ durationAllowSeconds: 180, reviewers: { auditModel: false, auditModelConfigId: null, manualConfirmation: true } })
-    const first = await executeCommand({
+    const outcome = await executeCommand({
       project: { folders: [] },
       conversationId: `confirm-${Math.random()}`,
       config: config({ enabled: true, review: reviewConfig }),
       command: 'sleep 0',
-      requestedTimeoutSeconds: 180,
-      workspaceFolderId: 'f',
-      workspacePath: process.cwd(),
-      runtime: runtime({
-        requestConfirmation: async (request) => {
-          confirmations += 1
-          return { approved: true, timeoutSeconds: request.timeoutSeconds }
-        },
-      }),
-    })
-    expect(first.ok).toBe(true)
-    expect(confirmations).toBe(0)
-    const second = await executeCommand({
-      project: { folders: [] },
-      conversationId: `confirm-${Math.random()}`,
-      config: config({ enabled: true, review: reviewConfig }),
-      command: 'sleep 0',
-      requestedTimeoutSeconds: 181,
+      requestedTimeoutSeconds: 10,
       workspaceFolderId: 'f',
       workspacePath: process.cwd(),
       runtime: runtime({
         requestConfirmation: async (request) => {
           requested = request.timeoutSeconds
-          confirmations += 1
           return { approved: false, timeoutSeconds: request.timeoutSeconds }
         },
       }),
     })
-    expect(requested).toBe(181)
-    expect(confirmations).toBe(1)
-    expect(second.ok).toBe(false)
-    expect(second.output).toContain('denied by the user')
+    expect(requested).toBe(10)
+    expect(outcome.ok).toBe(false)
+    expect(outcome.output).toContain('denied by the user')
   })
 
-  bashIt('caps model-requested timeouts at 24 hours', async () => {
+  bashIt('runs commands approved at the 24-hour hard ceiling', async () => {
     const outcome = await executeCommand({
       project: { folders: [] },
       conversationId: `cap-${Math.random()}`,
       config: config({ enabled: true, review: review({ reviewers: { auditModel: false, auditModelConfigId: null, manualConfirmation: true } }) }),
       command: 'echo hi',
-      requestedTimeoutSeconds: 10 * commandTimeoutMaxSeconds,
+      requestedTimeoutSeconds: commandTimeoutMaxSeconds,
       workspaceFolderId: 'f',
       workspacePath: process.cwd(),
       runtime: runtime({
@@ -635,6 +657,51 @@ describe('executeCommand', () => {
     })
     expect(outcome.ok).toBe(true)
     expect(outcome.audit.some((entry) => entry.description.includes('timeout=86400s'))).toBe(true)
+  })
+
+  it('passes the requested duration and gate reference to the audit prompt', async () => {
+    const fetchCalls: Array<{ body: string }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      fetchCalls.push({ body: String(init?.body ?? '') })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"verdict":"allow"}' } }] }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const outcome = await executeCommand({
+        project: { folders: [] },
+        conversationId: 'c',
+        config: config({
+          enabled: true,
+          interpreter: 'bash',
+          environment: 'bare',
+          review: review({
+            durationAllowSeconds: 180,
+            reviewers: { auditModel: true, auditModelConfigId: 'audit', manualConfirmation: false },
+          }),
+        }),
+        command: 'echo hi',
+        requestedTimeoutSeconds: 900,
+        workspaceFolderId: 'f',
+        workspacePath: process.cwd(),
+        runtime: runtime({
+          resolveAuditModel: async () => ({
+            ...defaultModelConfig,
+            id: 'audit',
+            modelName: 'other-model',
+            baseUrl: 'http://example.com',
+            apiKey: 'key',
+          }),
+          sessionModelName: 'glm-5.3',
+        }),
+      })
+      expect(fetchCalls.length).toBeGreaterThan(0)
+      expect(fetchCalls[0]?.body).toContain('Requested timeout: 900s')
+      expect(fetchCalls[0]?.body).toContain('duration gate reference: 180s')
+      expect(fetchCalls[0]?.body).toContain('Judge both the command content and the requested duration')
+      expect(outcome.ok).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   }, 30_000)
 
   bashIt('runs commands of the same conversation serially', async () => {

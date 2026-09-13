@@ -1037,7 +1037,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
     '- pwsh7 / pwsh51: PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. PowerShell 5.1 lacks some pwsh 7 features (?? operator, ternary) — prefer version-safe syntax.',
     ...pwshEnvNotes.map((note) => `  - ${note}`),
     'Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.',
-    `Timeout rules: declare an honest timeout (30s is typical). Commands declaring more than ${durationGateSeconds} seconds enter command review (rule check, then the optional audit model and manual approval); with manual approval disabled, declarations above ${durationGateSeconds} seconds are capped at ${durationGateSeconds} seconds. Execution is terminated as soon as the declared timeout is exceeded, so declare enough time for the command to finish.`,
+    `Timeout rules: declare an honest timeout (30s is typical); it must be an integer between 1 and 86400 seconds — an illegal duration is rejected even for whitelisted commands. Commands that do not match a whitelist rule always go through command review (rule check, then the optional audit model and manual approval) regardless of the declared duration; the audit model judges whether your requested duration is reasonable (reference: ${durationGateSeconds} seconds). Execution is terminated as soon as the declared timeout is exceeded, so declare enough time for the command to finish.`,
   ].join('\n')
   return {
     type: 'function',

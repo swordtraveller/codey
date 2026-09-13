@@ -768,11 +768,17 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
   const [scope, setScope] = useState<'turn' | 'session' | 'project' | 'global'>('project')
   const [list, setList] = useState<'allow' | 'deny'>('allow')
   useEffect(() => {
-    setRemember(true)
+    setRemember(false)
     setPatternType('exact')
     setScope('project')
     setList('allow')
   }, [request.requestId])
+  const checkLabels: Record<string, string> = {
+    rules: t('approvalCheckRules'),
+    'model-audit': t('approvalCheckModelAudit'),
+    'manual-confirmation': t('approvalCheckManual'),
+  }
+  const checksText = request.checks.map((check) => checkLabels[check] ?? check).join(', ')
   const respond = (approved: boolean): void => {
     onRespond(approved, remember ? { patternType, scope, list } : undefined)
   }
@@ -783,11 +789,22 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
           <DialogTitle>{t('approvalTitle')}</DialogTitle>
           <DialogContent className="dialog-fields">
             <p className="settings-description">
-              {t('approvalDurationReason', { duration: formatCommandDuration(request.timeoutSeconds) })}
+              {t('approvalDurationInfo', { duration: formatCommandDuration(request.timeoutSeconds) })}
             </p>
             <pre className="command-approval-command">{request.command}</pre>
+            <p className="settings-description">
+              {t('approvalEnvironment', { environment: request.environment, workspace: request.workspacePath })}
+            </p>
+            {request.auditModelName && (
+              <p className="settings-description">
+                {t('approvalAuditVerdict', {
+                  model: request.auditModelName,
+                  verdict: request.auditNote?.trim() || t('approvalNoObjection'),
+                })}
+              </p>
+            )}
             {request.checks.length > 0 && (
-              <p className="settings-description">{t('approvalChecks', { checks: request.checks.join(', ') })}</p>
+              <p className="settings-description">{t('approvalChecks', { checks: checksText })}</p>
             )}
             <div className="command-approval-memory">
               <Switch checked={remember} label={t('approvalRemember')} onChange={(_, data) => setRemember(data.checked)} />
