@@ -657,7 +657,7 @@ export async function runAgentTool(
       description: `No hidden toolset matches "${keyword}". Available toolsets: ${Object.keys(knownToolsets).join(', ')}.`,
     })
   }
-  if (toolCall.function.name === 'run_command') {
+  if (toolCall.function.name === 'command_run') {
     if (!commandExecution?.enabled) {
       throw new Error('Command execution is disabled')
     }
@@ -918,7 +918,7 @@ export async function runAgentTool(
   const { folderId, path } = requirePathArguments(args)
   const folder = getFolder(project, folderId)
 
-  if (toolCall.function.name === 'list_directory') {
+  if (toolCall.function.name === 'directory_list') {
     const target = await resolveFolderPath(folder, path, false)
     const entries = await readdir(target, { withFileTypes: true })
     return stringifyResult(
@@ -931,12 +931,12 @@ export async function runAgentTool(
         })),
     )
   }
-  if (toolCall.function.name === 'read_file') {
+  if (toolCall.function.name === 'file_read') {
     const target = await resolveFolderPath(folder, path, false)
     if ((await stat(target)).size > maxFileSize) throw new Error('File is too large to read')
     return truncateOutput(await readFile(target, 'utf8'))
   }
-  if (toolCall.function.name === 'write_file') {
+  if (toolCall.function.name === 'file_write') {
     if (typeof args.content !== 'string' || Buffer.byteLength(args.content, 'utf8') > maxWriteSize) {
       throw new Error('File content is missing or too large')
     }
@@ -1042,7 +1042,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   return {
     type: 'function',
     function: {
-      name: 'run_command',
+      name: 'command_run',
       description,
       parameters: {
         type: 'object',
@@ -1131,9 +1131,9 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
     { type: 'function', function: { name: 'find_hidden_toolset', description: 'Unlock a hidden toolset by keyword. Hidden toolsets contain specialized tools (currently: python, node, frontend, git). The unlocked tools are appended to your tool list from the next request onward and stay unlocked for the whole conversation. Call this before attempting work that needs a specialized tool; the returned JSON lists matched toolsets.', parameters: { type: 'object', properties: { keyword: { type: 'string', minLength: 1, maxLength: 100, description: 'The toolset keyword to unlock, e.g. "python".' } }, required: ['keyword'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
-    { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
-    { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'directory_list', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+    { type: 'function', function: { name: 'file_read', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+    { type: 'function', function: { name: 'file_write', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
     { type: 'function', function: { name: 'file_patch', description: 'Replace one exact text snippet in an existing project file.', parameters: { type: 'object', properties: { ...pathProperties, old_snippet: { type: 'string' }, new_snippet: { type: 'string' } }, required: [...pathRequired, 'old_snippet', 'new_snippet'], additionalProperties: false } } },
     ...pythonTools,
     ...nodeTools,

@@ -49,8 +49,8 @@ describe('agent tools', () => {
 
     expect(new Set(names).size).toBe(names.length)
     expect(names).toEqual(expect.arrayContaining([
-      'read_file',
-      'write_file',
+      'file_read',
+      'file_write',
       'file_patch',
       'project_tree',
       'project_search_text',
@@ -158,12 +158,12 @@ describe('agent tools', () => {
 
     const writeResult = JSON.parse(await runAgentTool(
       project,
-      toolCall('write_file', { folder_id: 'root', path: 'src/example.ts', content: 'export {}\n' }),
+      toolCall('file_write', { folder_id: 'root', path: 'src/example.ts', content: 'export {}\n' }),
       writtenFiles,
     )) as { success: boolean }
     const readResult = await runAgentTool(
       project,
-      toolCall('read_file', { folder_id: 'root', path: 'src/example.ts' }),
+      toolCall('file_read', { folder_id: 'root', path: 'src/example.ts' }),
       writtenFiles,
     )
 
@@ -232,7 +232,7 @@ describe('agent tools', () => {
 
     await expect(runAgentTool(
       project,
-      toolCall('write_file', { folder_id: 'root', path: 'stopped.txt', content: 'should not be written' }),
+      toolCall('file_write', { folder_id: 'root', path: 'stopped.txt', content: 'should not be written' }),
       [],
       { conversationId: 'conversation', signal: controller.signal },
     )).rejects.toThrow('Operation stopped')
@@ -243,7 +243,7 @@ describe('agent tools', () => {
   it('rejects path traversal before file access', async () => {
     await expect(runAgentTool(
       project,
-      toolCall('write_file', { folder_id: 'root', path: '../outside.txt', content: 'unsafe' }),
+      toolCall('file_write', { folder_id: 'root', path: '../outside.txt', content: 'unsafe' }),
       [],
     )).rejects.toThrow('Path is outside the project root')
   })
@@ -284,7 +284,7 @@ describe('agent tools', () => {
     const invalid: ToolCall = {
       id: 'call-1',
       type: 'function',
-      function: { name: 'read_file', arguments: '{' },
+      function: { name: 'file_read', arguments: '{' },
     }
 
     await expect(runAgentTool(project, invalid, [])).rejects.toThrow(

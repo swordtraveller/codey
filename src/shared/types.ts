@@ -538,6 +538,10 @@ export type ToolHelpEntry = {
   description: string
   parameters: string
   returns: string
+  /** Toolset this tool belongs to; absent for the meta tool. */
+  toolset?: string
+  /** True when the toolset stays hidden until unlocked via find_hidden_toolset. */
+  toolsetHidden?: boolean
 }
 
 export type ToolHelpSnapshot = {

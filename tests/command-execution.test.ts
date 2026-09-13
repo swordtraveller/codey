@@ -266,7 +266,7 @@ describe('tool description guidance', () => {
       detectedAt: new Date().toISOString(),
     }
     const tools = createAgentTools(project, false, { ...defaults, enabled: true, interpreter: 'bash' }, detection) as Array<{ function: { name: string; description: string } }>
-    const runCommand = tools.find((tool) => tool.function.name === 'run_command')!
+    const runCommand = tools.find((tool) => tool.function.name === 'command_run')!
     expect(runCommand.function.description).toContain('bash (bare), pwsh7 (bare)')
     expect(runCommand.function.description).not.toContain('pwsh51 (bare)')
     expect(runCommand.function.description).toContain('MSYS_NO_PATHCONV=1')
@@ -274,7 +274,7 @@ describe('tool description guidance', () => {
     expect(runCommand.function.description).toContain('Default combo for this session: bash/bare')
 
     const pwshTools = createAgentTools(project, false, { ...defaults, enabled: true, interpreter: 'pwsh51' }, detection) as Array<{ function: { name: string; description: string } }>
-    const pwshRunCommand = pwshTools.find((tool) => tool.function.name === 'run_command')!
+    const pwshRunCommand = pwshTools.find((tool) => tool.function.name === 'command_run')!
     expect(pwshRunCommand.function.description).toContain('Default combo for this session: pwsh51/bare')
     expect(pwshRunCommand.function.description).toContain('Get-ChildItem')
     expect(pwshRunCommand.function.description).toContain('never nest one shell inside another')

@@ -2001,3 +2001,43 @@ h1 {
   flex-direction: column;
   gap: 4px;
 }
+
+.tool-help-entry h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-help-toolset {
+  font-size: 12px;
+  font-weight: 400;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--colorNeutralBackground3, #eee);
+  white-space: nowrap;
+}
+
+.tool-help-group-header {
+  margin: 16px 0 4px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--colorNeutralStroke2, #ddd);
+  padding-bottom: 4px;
+}
+
+.tool-help-toolset-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 2px;
+  font-size: 13px;
+}
+
+.tool-help-toolset-state {
+  font-size: 12px;
+  font-weight: 400;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--colorNeutralBackground3, #eee);
+  white-space: nowrap;
+}

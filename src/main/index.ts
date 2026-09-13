@@ -295,10 +295,10 @@ async function fileExists(path: string): Promise<boolean> {
 /** Returns-tool descriptions for the help viewer; tools not in this map get a
  *  generic note. Keys are tool function names. */
 const toolReturnsNotes: Record<string, string> = {
-  read_file: 'The UTF-8 text content of the file.',
-  write_file: 'Confirmation that the file was written.',
+  file_read: 'The UTF-8 text content of the file.',
+  file_write: 'Confirmation that the file was written.',
   file_patch: 'Confirmation that the snippet was replaced.',
-  list_directory: 'JSON array of {name, type} entries.',
+  directory_list: 'JSON array of {name, type} entries.',
   project_tree: 'A filtered directory tree as text.',
   project_search_text: 'JSON array of matches with file, line, and preview.',
   context_search: 'JSON array of matching context record metadata.',
@@ -312,7 +312,7 @@ const toolReturnsNotes: Record<string, string> = {
   git_commit: 'The commit result with the new commit id.',
   git_log: 'Recent commits with hash, author, date, and message.',
   git_get_current_branch: 'The branch name or a detached-HEAD report.',
-  run_command: 'JSON {ok, output} with truncated stdout/stderr sections.',
+  command_run: 'JSON {ok, output} with truncated stdout/stderr sections.',
   python_execute: 'JSON {stdout, stderr, exit_code, duration_ms} from the sandboxed snippet.',
   python_run_script: 'The script output with execution info.',
   python_install_package: 'Installation result summary.',
@@ -327,8 +327,27 @@ const toolReturnsNotes: Record<string, string> = {
   frontend_stop_dev_server: 'Confirmation that the server tree stopped.',
 }
 
+/** Hidden-toolset membership by tool-name prefix; prefixes are unique per
+ *  toolset (python_/node_/frontend_/git_) and stable in createAgentTools. */
+/** Toolset membership by tool-name prefix; prefixes are unique per toolset
+ *  and stable in createAgentTools. Every tool follows `<toolset>_<action>`
+ *  except the find_hidden_toolset meta tool. */
+const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean }> = [
+  { prefix: 'web_', toolset: 'web', hidden: false },
+  { prefix: 'command_', toolset: 'command', hidden: false },
+  { prefix: 'context_', toolset: 'context', hidden: false },
+  { prefix: 'directory_', toolset: 'directory', hidden: false },
+  { prefix: 'file_', toolset: 'file', hidden: false },
+  { prefix: 'project_', toolset: 'project', hidden: false },
+  { prefix: 'python_', toolset: 'python', hidden: true },
+  { prefix: 'node_', toolset: 'node', hidden: true },
+  { prefix: 'frontend_', toolset: 'frontend', hidden: true },
+  { prefix: 'git_', toolset: 'git', hidden: true },
+]
+
 /** Builds the read-only tool help snapshot for the help viewer, from the live
- *  tool definitions (network access on shows the full tool set). */
+ *  tool definitions. The complete set is shown: network access on, an enabled
+ *  command-execution sample, and every hidden toolset unlocked. */
 function buildToolHelpSnapshot(): ToolHelpSnapshot {
   const sampleProject: Project = {
     id: 'sample',
@@ -348,6 +367,9 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
     // shell detection cached (the same convention as the prompts viewer).
     { ...defaultCommandExecutionConfig, enabled: true },
     null,
+    // Show every hidden-toolset tool as well — the help viewer documents the
+    // full catalog regardless of what the current conversation unlocked.
+    ['python', 'node', 'frontend', 'git'],
   ) as Array<{
     function: { name?: string; description?: string; parameters?: unknown }
   }>
@@ -359,6 +381,8 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
         description: tool.function.description ?? '',
         parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
         returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+        toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
+        toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
       })),
   }
 }

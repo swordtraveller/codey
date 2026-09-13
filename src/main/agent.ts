@@ -567,7 +567,7 @@ export function createAgentSystemMessage(project: Project, networkAccessEnabled 
       'You are a coding agent working in the project folders below.',
       ...project.folders.map((folder) => `- ${folder.id}: ${folder.path}`),
       'Each folder is an independent sandbox root. Every path-based tool requires folder_id and a relative path.',
-      'Inspect relevant files before editing. Prefer file_patch for a unique local change and write_file for complete file creation or replacement.',
+      'Inspect relevant files before editing. Prefer file_patch for a unique local change and file_write for complete file creation or replacement.',
       'Use file and project tools for general development work.',
       'Some specialized toolsets are hidden to keep the tool list small (python, node, frontend, git). Call find_hidden_toolset with the keyword before attempting work in that domain; the tools are appended from the next request onward for the whole conversation.',
       ...(strategyPrompt ? ['', `Context policy: ${strategyPrompt}`] : []),
@@ -819,7 +819,7 @@ export async function develop(
         // Live review streaming: each reviewer verdict updates the card as it
         // happens (e.g. while the manual-confirmation dialog is pending).
         const liveReviewSteps: CommandReviewStep[] = []
-        const commandRuntimeWithSteps: CommandExecutorRuntime | undefined = toolCall.function.name === 'run_command' && runtime?.commandRuntime
+        const commandRuntimeWithSteps: CommandExecutorRuntime | undefined = toolCall.function.name === 'command_run' && runtime?.commandRuntime
           ? {
               ...runtime.commandRuntime,
               onReviewStep: (step: CommandReviewStep): void => {
@@ -891,7 +891,7 @@ export async function develop(
           contextSource: 'live',
         })
         updateToolCallResult(timeline, toolCall.id, content, isError)
-        updateToolCallReview(timeline, toolCall.id, reviewSteps ?? liveReviewSteps.length > 0 ? (reviewSteps ?? liveReviewSteps) : (toolCall.function.name === 'run_command' ? undefined : [{ stage: 'rules', outcome: 'pass', detail: 'allowed by default (no review chain for this tool)' }]))
+        updateToolCallReview(timeline, toolCall.id, reviewSteps ?? liveReviewSteps.length > 0 ? (reviewSteps ?? liveReviewSteps) : (toolCall.function.name === 'command_run' ? undefined : [{ stage: 'rules', outcome: 'pass', detail: 'allowed by default (no review chain for this tool)' }]))
         onProgress?.({
           type: 'update-tool-result',
           toolCallId: toolCall.id,

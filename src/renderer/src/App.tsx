@@ -3349,13 +3349,14 @@ export function App(): React.JSX.Element {
               )}
               {helpTab === 'tools' && (
                 <section className="settings-group tool-help-group">
-                  <p className="settings-description">
-                    {toolHelp
-                      ? toolSearch.trim()
-                        ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
-                        : t('helpToolTotalCount', { count: toolHelp.entries.length })
-                      : ''}
-                  </p>
+                      <p className="settings-description">
+                        {toolHelp
+                          ? toolSearch.trim()
+                            ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
+                            : t('helpToolTotalCount', { count: toolHelp.entries.length })
+                          : ''}
+                      </p>
+                      {toolHelp && <p className="settings-description">{t('helpToolToolsetNote')}</p>}
                   <div className="tool-search-row">
                     <div className="tool-search-field">
                       <Field label={t('helpToolSearch')}>
@@ -3380,17 +3381,69 @@ export function App(): React.JSX.Element {
                   </div>
                   <div className="tool-help-list" ref={toolListRef}>
                     {!toolHelp && <p className="settings-description">{t('loadingPrompts')}</p>}
-                    {toolHelp?.entries.map((entry) => (
-                      <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
-                        <h3><HighlightedText keyword={toolSearch} text={entry.name} /></h3>
-                        <p className="settings-description">{entry.description}</p>
-                        <details>
-                          <summary>{t('helpToolParameters')}</summary>
-                          <pre className="prompt-content">{entry.parameters}</pre>
-                        </details>
-                        <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
-                      </div>
-                    ))}
+                    {toolHelp && (() => {
+                      const renderEntry = (entry: typeof toolHelp.entries[number], showToolset: boolean) => (
+                        <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
+                          <h3>
+                            <HighlightedText keyword={toolSearch} text={entry.name} />
+                            {showToolset && entry.toolset && (
+                              <span className="tool-help-toolset" title={t('helpToolToolsetTitle', { toolset: entry.toolset })}>
+                                {t('helpToolToolset', { toolset: entry.toolset })}
+                              </span>
+                            )}
+                          </h3>
+                          <p className="settings-description">{entry.description}</p>
+                          <details>
+                            <summary>{t('helpToolParameters')}</summary>
+                            <pre className="prompt-content">{entry.parameters}</pre>
+                          </details>
+                          <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
+                        </div>
+                      )
+                      const groupEntries = (hidden: boolean) => {
+                        const groups = new Map<string, typeof toolHelp.entries>()
+                        for (const entry of toolHelp.entries) {
+                          if (!entry.toolset || entry.toolsetHidden !== hidden) continue
+                          const bucket = groups.get(entry.toolset) ?? []
+                          bucket.push(entry)
+                          groups.set(entry.toolset, bucket)
+                        }
+                        return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
+                      }
+                      // Search keeps the flat list so match navigation stays
+                      // contiguous; the catalog view groups by toolset: meta
+                      // tool first, then always-unlocked sets, then sets that
+                      // unlock on demand — each section alphabetically.
+                      if (toolSearch.trim()) {
+                        return toolMatches.map((entry) => renderEntry(entry, true))
+                      }
+                      return (
+                        <>
+                          <h4 className="tool-help-group-header">{t('helpToolMetaSection')}</h4>
+                          {toolHelp.entries.filter((entry) => !entry.toolset).map((entry) => renderEntry(entry, false))}
+                          <h4 className="tool-help-group-header">{t('helpToolsetUnlockedSection')}</h4>
+                          {groupEntries(false).map(([toolset, entries]) => (
+                            <div key={toolset}>
+                              <h5 className="tool-help-toolset-header">
+                                {toolset}
+                                <span className="tool-help-toolset-state">{t('helpToolsetUnlockedLabel')}</span>
+                              </h5>
+                              {entries.map((entry) => renderEntry(entry, false))}
+                            </div>
+                          ))}
+                          <h4 className="tool-help-group-header">{t('helpToolsetOnDemandSection')}</h4>
+                          {groupEntries(true).map(([toolset, entries]) => (
+                            <div key={toolset}>
+                              <h5 className="tool-help-toolset-header">
+                                {toolset}
+                                <span className="tool-help-toolset-state">{t('helpToolsetOnDemandLabel')}</span>
+                              </h5>
+                              {entries.map((entry) => renderEntry(entry, false))}
+                            </div>
+                          ))}
+                        </>
+                      )
+                    })()}
                   </div>
                 </section>
               )}
