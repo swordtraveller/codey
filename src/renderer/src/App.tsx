@@ -224,6 +224,11 @@ function formatTurnForCopy(
   for (const message of turnMessages) {
     if (message.compression) continue
     const toolCalls = (message.blocks ?? []).filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> => block.type === 'function_call')
+    // Text first regardless of raw block order: content is finalized output
+    // for the reader, while tool calls are pending requests awaiting results.
+    if (blockHasContent(message)) {
+      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
+    }
     let toolIndex = 0
     for (const block of message.blocks ?? []) {
       if (block.type === 'function_call') {
@@ -234,9 +239,6 @@ function formatTurnForCopy(
           lines.push(block.resultError ? t('copyTurnToolError') : t('copyTurnToolResultLabel'), block.result)
         }
       }
-    }
-    if (blockHasContent(message)) {
-      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
     }
   }
   return lines.join('\n')

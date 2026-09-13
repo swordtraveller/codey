@@ -665,13 +665,39 @@ export async function develop(
   const coldMessageIds = new Set<string>()
 
   let completedToolCalls = 0
+  // Set when a response is rejected for exceeding the per-request tool-call
+  // limit; cleared once a later request succeeds, so only a terminal
+  // overflow (no requests left) is reported as such.
+  let lastOverflowCount = 0
 
   try {
     for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
+      // Budget warning: when the round is down to its last model request,
+      // force a text-only wrap-up. The warning forbids tool calls outright;
+      // any tool-call response on the last request is rejected without
+      // execution (handled below), so the round always ends with a
+      // resumable text summary instead of dying mid-exploration.
+      const requestsRemaining = agentLimits.modelRequestsPerRound - requestIndex
+      const isFinalRequest = requestsRemaining <= 1
+      const roundSystemMessage = isFinalRequest
+        ? {
+            ...systemMessage,
+            content: [
+              systemMessage.content,
+              '',
+              '[Budget warning] THIS IS THE LAST MODEL REQUEST OF THIS ROUND. Rules:',
+              '1. Do NOT call any tools — a tool-call response will be discarded without execution.',
+              '2. Respond with TEXT ONLY:',
+              '   - state whether the original task is complete;',
+              '   - if complete: give the final answer now;',
+              '   - if incomplete: summarize concrete progress (files changed, findings, verification status) and list the next steps so the work can resume cleanly in a new round.',
+            ].join('\n'),
+          }
+        : systemMessage
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const contextManageStartedAt = performance.now()
-      const managed = manageContext([systemMessage, ...activeHistory], tools, config, contextConfig, {
+      const managed = manageContext([roundSystemMessage, ...activeHistory], tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
         roundId: runtime?.roundId,
@@ -774,9 +800,68 @@ export async function develop(
       }
 
       const toolCalls = message.tool_calls ?? []
-      if (toolCalls.length > agentLimits.toolCallsPerRequest) {
-        throw new Error(`Single response tool calls exceeded the limit of ${agentLimits.toolCallsPerRequest}`)
+      if (isFinalRequest && toolCalls.length > 0) {
+        // Last-request guard: the budget warning forbade tool calls; enforce
+        // it. Reject the batch with a corrective note so the model answers in
+        // text on what is now an exhausted round (this response is kept for
+        // the record but consumes no further requests — the loop exits below).
+        history.push({
+          role: 'assistant',
+          content: message.content ?? null,
+          tool_calls: toolCalls,
+          id: randomUUID(),
+          createdAt: new Date().toISOString(),
+          representation: 'original',
+          contextSource: 'live',
+        })
+        const guardNote = 'Tool calls are not allowed on the final model request of a round. The round budget is now exhausted. Respond with a text-only wrap-up: whether the task is complete, concrete progress so far (files changed, findings, verification status), and the next steps to resume in a new round.'
+        for (const toolCall of toolCalls) {
+          history.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: guardNote,
+            id: randomUUID(),
+            createdAt: new Date().toISOString(),
+            representation: 'original',
+            contextSource: 'live',
+          })
+        }
+        // Terminate the round with the standard quota error; the tool results
+        // above keep the protocol intact for the next round's continuation.
+        throw new Error('The conversation round exceeded the configured model-request limit. The final response attempted tool calls; they were rejected. Ask the model to continue to resume from the recorded progress.')
       }
+      if (toolCalls.length > agentLimits.toolCallsPerRequest) {
+        // Overflow recovery: reject the whole batch with a correction instruction
+        // instead of aborting the round. The assistant message with its
+        // tool_calls enters history first (protocol: every tool_call needs a
+        // tool result), then each call is answered with the rejection note.
+        // The follow-up request consumes one request from the same budget
+        // (the budget warning, when active, is injected alongside).
+        lastOverflowCount = toolCalls.length
+        history.push({
+          role: 'assistant',
+          content: message.content ?? null,
+          tool_calls: toolCalls,
+          id: randomUUID(),
+          createdAt: new Date().toISOString(),
+          representation: 'original',
+          contextSource: 'live',
+        })
+        const overflowNote = `The previous response contained ${toolCalls.length} tool calls, exceeding the per-request limit of ${agentLimits.toolCallsPerRequest}. None of them were executed. Respond again with at most ${agentLimits.toolCallsPerRequest} tool calls: keep only the most essential ones and defer the rest to later requests.`
+        for (const toolCall of toolCalls) {
+          history.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: overflowNote,
+            id: randomUUID(),
+            createdAt: new Date().toISOString(),
+            representation: 'original',
+            contextSource: 'live',
+          })
+        }
+        continue
+      }
+      lastOverflowCount = 0
       if (toolCalls.length === 0) {
         const reply = message.content?.trim()
         if (!reply) {
@@ -921,7 +1006,14 @@ export async function develop(
           throw abortError()
         }
       }
-    }    throw new Error('The conversation round exceeded the configured model-request limit')
+    }
+    // The loop ran out of requests. If the last iteration ended with a
+    // rejected tool-call overflow, the model never saw the correction —
+    // surface it instead of a generic quota error.
+    if (lastOverflowCount > 0) {
+      throw new Error(`The conversation round exceeded the configured model-request limit; the last response had ${lastOverflowCount} tool calls (limit ${agentLimits.toolCallsPerRequest}) and was rejected with no requests left to retry.`)
+    }
+    throw new Error('The conversation round exceeded the configured model-request limit')
   } catch (error) {
     const stopped = runtime?.signal?.aborted === true
     return {
