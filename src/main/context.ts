@@ -421,15 +421,22 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
     if (actions.some((action) => `${action.type}:${action.messageIds.join('|')}` === signature)) return
     actions.push({ type, messageIds, truthRefs, ...(tokenDelta === undefined ? {} : { tokenDelta }) })
   }
-  const system = messages.filter((message) => message.role === 'system').map((message) => ({
-    ...message,
-    contextLayer: 'hot' as const,
-    contextRegion: 'permanent' as const,
-    contextSource: 'live' as const,
-    representation: 'original' as const,
-    enteredHotAt: message.enteredHotAt ?? message.createdAt ?? now,
-  }))
-  const nonSystem = messages.filter((message) => message.role !== 'system')
+  // Only the initial system prompt belongs to the Permanent region at the
+  // head. Runtime system messages (e.g. budget warnings) are Newborn: they
+  // stay in the ordered stream with the other messages instead of being
+  // hoisted to the front, preserving their recency position.
+  const firstSystemIndex = messages.findIndex((message) => message.role === 'system')
+  const system = firstSystemIndex >= 0
+    ? [messages[firstSystemIndex]].map((message) => ({
+        ...message,
+        contextLayer: 'hot' as const,
+        contextRegion: 'permanent' as const,
+        contextSource: 'live' as const,
+        representation: 'original' as const,
+        enteredHotAt: message.enteredHotAt ?? message.createdAt ?? now,
+      }))
+    : []
+  const nonSystem = messages.filter((message, index) => index !== firstSystemIndex)
   const explicitWarm = nonSystem.filter((message) => !isResident(message) && (message.contextLayer === 'warm' || message.manualContextLayer === 'warm'))
   const recalled = nonSystem.filter((message) => isRecalled(message) && !explicitWarm.includes(message))
   const eligible = nonSystem.filter((message) => !explicitWarm.includes(message) && !recalled.includes(message))

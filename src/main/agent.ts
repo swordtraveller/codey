@@ -674,18 +674,19 @@ export async function develop(
     for (let requestIndex = 0; requestIndex < agentLimits.modelRequestsPerRound; requestIndex += 1) {
       throwIfAborted(runtime?.signal)
       // Budget warning: when the round is down to its last model request,
-      // force a text-only wrap-up. The warning forbids tool calls outright;
-      // any tool-call response on the last request is rejected without
-      // execution (handled below), so the round always ends with a
-      // resumable text summary instead of dying mid-exploration.
+      // force a text-only wrap-up. The warning rides as a separate system
+      // message at the END of the request sequence (recency beats system-
+      // header placement for instruction following); any tool-call response
+      // on the last request is rejected without execution (handled below),
+      // so the round always ends with a resumable text summary.
       const requestsRemaining = agentLimits.modelRequestsPerRound - requestIndex
       const isFinalRequest = requestsRemaining <= 1
-      const roundSystemMessage = isFinalRequest
+      const budgetWarningMessage: ContextMessage | null = isFinalRequest
         ? {
-            ...systemMessage,
+            id: `budget-warning-${requestIndex}`,
+            createdAt: new Date().toISOString(),
+            role: 'system',
             content: [
-              systemMessage.content,
-              '',
               '[Budget warning] THIS IS THE LAST MODEL REQUEST OF THIS ROUND. Rules:',
               '1. Do NOT call any tools — a tool-call response will be discarded without execution.',
               '2. Respond with TEXT ONLY:',
@@ -694,10 +695,14 @@ export async function develop(
               '   - if incomplete: summarize concrete progress (files changed, findings, verification status) and list the next steps so the work can resume cleanly in a new round.',
             ].join('\n'),
           }
-        : systemMessage
+        : null
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
       const contextManageStartedAt = performance.now()
-      const managed = manageContext([roundSystemMessage, ...activeHistory], tools, config, contextConfig, {
+      const managed = manageContext(
+        budgetWarningMessage
+      ? [systemMessage, ...activeHistory, budgetWarningMessage]
+      : [systemMessage, ...activeHistory],
+    tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
         roundId: runtime?.roundId,
