@@ -465,12 +465,16 @@ const ConversationMessage = memo(function ConversationMessage({
   projectId,
   conversationId,
   conversationTurn,
+  showContinue,
+  onContinue,
 }: {
   message: ChatMessage
   messages: ChatMessage[]
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
+  showContinue?: boolean
+  onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const messageTurn = message.turn ?? (
@@ -504,6 +508,17 @@ const ConversationMessage = memo(function ConversationMessage({
           <div className="user-message-content">
             <div className="message-card-header">
               {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              {showContinue && onContinue && (
+                <Button
+                  aria-label={t('continue')}
+                  appearance="subtle"
+                  size="small"
+                  title={t('continue')}
+                  onClick={onContinue}
+                >
+                  {t('continue')}
+                </Button>
+              )}
               {turnCompleted && messageTurn && (
                 <Button
                   aria-label={t('copyTurn')}
@@ -576,6 +591,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn,
   scrollContainerRef,
   shouldStickToBottom,
+  lastUserMessageId,
+  onContinue,
 }: {
   messages: ChatMessage[]
   projectId: string
@@ -583,6 +600,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn?: ConversationTurn
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
+  lastUserMessageId?: string
+  onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const latestInitialStart = initialConversationWindowStart(messages)
@@ -845,6 +864,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
             projectId={projectId}
             conversationId={conversationId}
             conversationTurn={conversationTurn}
+            showContinue={message.id === lastUserMessageId}
+            onContinue={onContinue}
           />
         </div>
       ))}
@@ -1553,6 +1574,22 @@ export function App(): React.JSX.Element {
     ))
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
+  const lastUserMessage = activeConversation
+    ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
+    : undefined
+  const lastUserMessageId = activeConversationState === 'idle' ? lastUserMessage?.id : undefined
+  const continueConversation = (): void => {
+    if (!lastUserMessage || !canSend) return
+    const prompts = [t('continuePromptAbnormal'), t('continuePromptNormal')]
+    const lastTurn = lastUserMessage.turn
+      ?? (conversationTurn?.userMessageId === lastUserMessage.id ? conversationTurn : undefined)
+    const content = prompts.includes(lastUserMessage.content)
+      ? lastUserMessage.content
+      : lastTurn?.result === 'normal'
+        ? prompts[1]
+        : prompts[0]
+    void sendMessage(content, [])
+  }
 
   useEffect(() => {
     void window.codey
@@ -2821,6 +2858,8 @@ export function App(): React.JSX.Element {
                   conversationTurn={conversationTurn}
                   scrollContainerRef={conversationRef}
                   shouldStickToBottom={!showScrollToBottom}
+                  lastUserMessageId={lastUserMessageId}
+                  onContinue={continueConversation}
                 />
                 <LiveDevelopmentResponse
                   conversationKey={activeConversationKey}
