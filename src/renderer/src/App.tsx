@@ -1,4 +1,4 @@
-import {
+﻿import {
   Button,
   Dialog,
   DialogActions,
@@ -763,7 +763,7 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
   onOpenSyntaxHelp: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const [remember, setRemember] = useState(true)
+  const [remember, setRemember] = useState(false)
   const [patternType, setPatternType] = useState<'exact' | 'prefix'>('exact')
   const [scope, setScope] = useState<'turn' | 'session' | 'project' | 'global'>('project')
   const [list, setList] = useState<'allow' | 'deny'>('allow')
@@ -1753,11 +1753,9 @@ export function App(): React.JSX.Element {
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
   const [commandProjectId, setCommandProjectId] = useState('')
   const [commandConversationId, setCommandConversationId] = useState('')
+  const [commandSettingsScope, setCommandSettingsScope] = useState<'conversation' | 'project'>('conversation')
   const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig | null>(defaultCommandExecutionConfig)
   const [commandTab, setCommandTab] = useState<'execution' | 'review'>('execution')
-  const [projectCommandDialogOpen, setProjectCommandDialogOpen] = useState(false)
-  const [projectCommandDraft, setProjectCommandDraft] = useState<CommandExecutionConfig | null>(null)
-  const [projectCommandTab, setProjectCommandTab] = useState<'execution' | 'review'>('execution')
   const [approvalRequest, setApprovalRequest] = useState<CommandApprovalRequest | null>(null)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
@@ -2361,13 +2359,16 @@ export function App(): React.JSX.Element {
     return { ...structuredClone(base), review: base.review ?? structuredClone(config.commandReviewGlobal) }
   }
 
-  function openCommandExecutionSettings(): void {
-    if (!activeProject || !activeConversation || interactionLocked) {
-      return
-    }
+  function openCommandSettings(scope: 'conversation' | 'project'): void {
+    if (!activeProject || interactionLocked) return
+    const conversation = activeConversation
+    if (scope === 'conversation' && !conversation) return
     setCommandProjectId(activeProject.id)
-    setCommandConversationId(activeConversation.id)
-    setCommandDraft(activeConversation.commandExecution ? structuredClone(activeConversation.commandExecution) : null)
+    setCommandConversationId(scope === 'conversation' && conversation ? conversation.id : '')
+    setCommandSettingsScope(scope)
+    setCommandDraft(scope === 'conversation'
+      ? conversation?.commandExecution ? structuredClone(conversation.commandExecution) : null
+      : activeProject.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
     setCommandTab('execution')
     setSettingsError('')
     setCommandDialogOpen(true)
@@ -2382,22 +2383,16 @@ export function App(): React.JSX.Element {
     }).catch(() => undefined)
   }
 
-  function openProjectCommandSettings(): void {
-    if (!activeProject || interactionLocked) {
-      return
-    }
-    setCommandProjectId(activeProject.id)
-    setProjectCommandDraft(activeProject.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
-    setProjectCommandTab('execution')
+  /** Reloads the draft when the scope switch flips inside the dialog. */
+  function switchCommandSettingsScope(scope: 'conversation' | 'project'): void {
+    if (scope === commandSettingsScope) return
+    if (scope === 'conversation' && !activeConversation) return
+    setCommandSettingsScope(scope)
+    setCommandConversationId(scope === 'conversation' ? activeConversation?.id ?? '' : '')
+    setCommandDraft(scope === 'conversation'
+      ? activeConversation?.commandExecution ? structuredClone(activeConversation.commandExecution) : null
+      : activeProject?.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
     setSettingsError('')
-    setProjectCommandDialogOpen(true)
-    void window.codey.getCachedShellDetection().then((cached) => {
-      if (cached) {
-        setShellDetection(cached)
-        return
-      }
-      return runShellDetection()
-    }).catch(() => undefined)
   }
 
   async function saveCommandExecutionSettings(): Promise<void> {
@@ -2407,30 +2402,11 @@ export function App(): React.JSX.Element {
     setSaving(true)
     setSettingsError('')
     try {
-      const updated = await window.codey.setConversationCommandExecution(
-        commandProjectId,
-        commandConversationId,
-        commandDraft,
-      )
+      const updated = commandSettingsScope === 'conversation'
+        ? await window.codey.setConversationCommandExecution(commandProjectId, commandConversationId, commandDraft)
+        : await window.codey.setProjectCommandExecutionDefault(commandProjectId, commandDraft)
       replaceProject(updated)
       setCommandDialogOpen(false)
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function saveProjectCommandSettings(): Promise<void> {
-    if (interactionLocked || !isValidCommandExecutionDraft(projectCommandDraft)) {
-      return
-    }
-    setSaving(true)
-    setSettingsError('')
-    try {
-      const updated = await window.codey.setProjectCommandExecutionDefault(commandProjectId, projectCommandDraft)
-      replaceProject(updated)
-      setProjectCommandDialogOpen(false)
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
     } finally {
@@ -3097,14 +3073,9 @@ export function App(): React.JSX.Element {
                     {t('agentLimits')}
                   </Button>
                   {config.developerMode && activeProject && (
-                    <>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
-                        {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault ?? defaultCommandExecutionConfig).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
-                      </Button>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openProjectCommandSettings}>
-                        {t('projectCommandSettings')}
-                      </Button>
-                    </>
+                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openCommandSettings('conversation')}>
+                      {t('commandAndReview')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault ?? defaultCommandExecutionConfig).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
+                    </Button>
                   )}
                 </div>
               )}
@@ -3925,8 +3896,15 @@ export function App(): React.JSX.Element {
       <Dialog open={commandDialogOpen} onOpenChange={(_, data) => setCommandDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
-            <DialogTitle>{t('commandExecutionSettings')}</DialogTitle>
+            <DialogTitle>{t('commandAndReviewSettings')}</DialogTitle>
             <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={commandSettingsScope}
+                onTabSelect={(_, data) => switchCommandSettingsScope(data.value as 'conversation' | 'project')}
+              >
+                <Tab value="conversation">{t('commandScopeConversation')}</Tab>
+                <Tab value="project">{t('commandScopeProject')}</Tab>
+              </TabList>
               <TabList
                 selectedValue={commandTab}
                 onTabSelect={(_, data) => setCommandTab(data.value as typeof commandTab)}
@@ -3939,11 +3917,17 @@ export function App(): React.JSX.Element {
                   <Switch
                     checked={commandDraft !== null}
                     disabled={interactionLocked}
-                    label={t('commandOverrideProject')}
-                    onChange={(_, data) => setCommandDraft(data.checked ? effectiveConversationCommandConfig() : null)}
+                    label={commandSettingsScope === 'conversation' ? t('commandOverrideProject') : t('commandOverrideDefault')}
+                    onChange={(_, data) => setCommandDraft(data.checked
+                      ? commandSettingsScope === 'conversation'
+                        ? effectiveConversationCommandConfig()
+                        : { ...defaultCommandExecutionConfig, review: structuredClone(config.commandReviewGlobal) }
+                      : null)}
                   />
                   {commandDraft === null ? (
-                    <p className="settings-description">{t('commandFollowingProject')}</p>
+                    <p className="settings-description">
+                      {commandSettingsScope === 'conversation' ? t('commandFollowingProject') : t('commandFollowingDefault')}
+                    </p>
                   ) : (
                     <>
                       <Switch
@@ -4066,124 +4050,6 @@ export function App(): React.JSX.Element {
                 appearance="primary"
                 disabled={interactionLocked || saving || !isValidCommandExecutionDraft(commandDraft)}
                 onClick={() => void saveCommandExecutionSettings()}
-              >
-                {saving ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      <Dialog open={projectCommandDialogOpen} onOpenChange={(_, data) => setProjectCommandDialogOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>{t('projectCommandSettings')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <TabList
-                selectedValue={projectCommandTab}
-                onTabSelect={(_, data) => setProjectCommandTab(data.value as typeof projectCommandTab)}
-              >
-                <Tab value="execution">{t('commandTabExecution')}</Tab>
-                <Tab value="review">{t('commandTabReview')}</Tab>
-              </TabList>
-              {projectCommandTab === 'execution' && (
-                <>
-                  <Switch
-                    checked={projectCommandDraft !== null}
-                    disabled={interactionLocked}
-                    label={t('commandOverrideDefault')}
-                    onChange={(_, data) => setProjectCommandDraft(data.checked
-                      ? { ...defaultCommandExecutionConfig, review: structuredClone(config.commandReviewGlobal) }
-                      : null)}
-                  />
-                  {projectCommandDraft === null ? (
-                    <p className="settings-description">{t('commandFollowingDefault')}</p>
-                  ) : (
-                    <>
-                      <Switch
-                        checked={projectCommandDraft.enabled}
-                        disabled={interactionLocked}
-                        label={t('commandExecutionEnabled')}
-                        onChange={(_, data) => setProjectCommandDraft((current) => current && { ...current, enabled: data.checked })}
-                      />
-                      <p className="settings-description">{t('commandExecutionDescription')}</p>
-                      <Field label={t('commandInterpreter')}>
-                        <Select
-                          disabled={interactionLocked || !projectCommandDraft.enabled}
-                          value={projectCommandDraft.interpreter}
-                          onChange={(_, data) => setProjectCommandDraft((current) => current && ({
-                            ...current,
-                            interpreter: data.value as CommandExecutionConfig['interpreter'],
-                          }))}
-                        >
-                          <option value="bash">bash</option>
-                          <option value="pwsh7">pwsh 7</option>
-                          <option value="pwsh51">pwsh 5.1</option>
-                        </Select>
-                      </Field>
-                      <Field label={t('commandEnvironment')}>
-                        <Select
-                          disabled={interactionLocked || !projectCommandDraft.enabled}
-                          value={projectCommandDraft.environment}
-                          onChange={(_, data) => setProjectCommandDraft((current) => current && ({
-                            ...current,
-                            environment: data.value as CommandExecutionConfig['environment'],
-                          }))}
-                        >
-                          <option value="bare">{t('commandEnvBare')}</option>
-                          <option value="wsl2">wsl2</option>
-                          <option value="docker">docker</option>
-                          <option value="windows-sandbox">Windows Sandbox</option>
-                        </Select>
-                      </Field>
-                      {!commandExecutionSupported(projectCommandDraft.interpreter, projectCommandDraft.environment) && (
-                        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
-              {projectCommandTab === 'review' && (
-                projectCommandDraft === null ? (
-                  <p className="settings-description">{t('reviewFollowingNote')}</p>
-                ) : (
-                  <>
-                    <Switch
-                      checked={projectCommandDraft.review !== null}
-                      disabled={interactionLocked}
-                      label={t('reviewOverrideGlobal')}
-                      onChange={(_, data) => setProjectCommandDraft((current) => current && ({
-                        ...current,
-                        review: data.checked
-                          ? structuredClone(current.review ?? config.commandReviewGlobal)
-                          : null,
-                      }))}
-                    />
-                    {projectCommandDraft.review === null ? (
-                      <p className="settings-description">{t('reviewFollowingGlobal')}</p>
-                    ) : (
-                      <CommandReviewEditor
-                        value={projectCommandDraft.review}
-                        disabled={interactionLocked}
-                        modelConfigs={config.modelConfigs}
-                        sessionModel={effectiveModelConfig}
-                        onOpenSyntaxHelp={openCommandRulesHelp}
-                        onChange={(next) => setProjectCommandDraft((current) => current && ({ ...current, review: next }))}
-                      />
-                    )}
-                  </>
-                )
-              )}
-              {settingsError && <p className="dialog-error">{settingsError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setProjectCommandDialogOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || saving || !isValidCommandExecutionDraft(projectCommandDraft)}
-                onClick={() => void saveProjectCommandSettings()}
               >
                 {saving ? t('saving') : t('save')}
               </Button>
