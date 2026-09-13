@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { access } from 'node:fs/promises'
+import { access, appendFile } from 'node:fs/promises'
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -7,7 +7,11 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
+  CommandApprovalMemory,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   CommandExecutionConfig,
+  CommandReviewRule,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
@@ -36,7 +40,7 @@ import {
 import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
-import type { CommandExecutorRuntime } from './command-executor'
+import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
   buildContextDebugSnapshot,
@@ -108,8 +112,8 @@ import {
   updateConversationTurn,
 } from './workspace'
 import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
 import { isContextConfigValidForModel } from './context-config'
-import { commandDialogTerms, formatDuration } from './i18n-terms'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
@@ -267,10 +271,11 @@ async function validateCommandExecution(config: CommandExecutionConfig): Promise
   if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
     throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
   }
-  if (config.modelAuditEnabled) {
-    if (!config.auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
+  if (config.review?.reviewers.auditModel) {
+    const { auditModelConfigId } = config.review.reviewers
+    if (!auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
     const appConfig = await readConfig()
-    const auditModel = appConfig.modelConfigs.find((model) => model.id === config.auditModelConfigId)
+    const auditModel = appConfig.modelConfigs.find((model) => model.id === auditModelConfigId)
     if (!auditModel) throw new Error('The audit model configuration was not found')
   }
 }
@@ -420,30 +425,113 @@ function buildPromptSnapshot(): PromptSnapshot {
   }
 }
 
-/** Native confirmation for run_command; resolves denied after the timeout. */
-async function requestCommandConfirmation(request: {
-  command: string
-  timeoutSeconds: number
-  editable: boolean
-  checks: string[]
-}): Promise<{ approved: boolean; timeoutSeconds: number }> {
-  if (!mainWindow || mainWindow.isDestroyed()) return { approved: false, timeoutSeconds: request.timeoutSeconds }
-  const appConfig = await readConfig()
-  const language = appConfig.language === 'system' ? 'en' : appConfig.language
-  const terms = commandDialogTerms(appConfig.language, app.getLocale())
-  const duration = formatDuration(request.timeoutSeconds, language)
-  const checks = request.checks.join(', ') || terms.checksNone
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'warning',
-    title: terms.title,
-    message: terms.message(duration),
-    detail: terms.detail(request.command, checks),
-    buttons: [terms.approve, terms.deny],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true,
+/** In-app approval card for run_command review. The renderer replies over the
+ *  command-review:respond IPC; dismissal (window closed) resolves denied. */
+type ApprovalContext = {
+  projectId: string
+  conversationId: string
+}
+
+const pendingCommandApprovals = new Map<string, (response: CommandApprovalResponse) => void>()
+/** Runtime approval memory: per-turn rules (cleared when a new turn starts)
+ *  and per-session rules (cleared on app quit). Keyed by conversation. */
+const turnCommandRules = new Map<string, CommandReviewRule[]>()
+const sessionCommandRules = new Map<string, CommandReviewRule[]>()
+
+function upsertRuntimeRule(map: Map<string, CommandReviewRule[]>, key: string, rule: CommandReviewRule): void {
+  const rules = (map.get(key) ?? []).filter((existing) =>
+    existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+  rules.push(rule)
+  map.set(key, rules)
+}
+
+function requestCommandApproval(
+  request: { command: string; timeoutSeconds: number; checks: string[] },
+  context: ApprovalContext,
+): Promise<{ approved: boolean; timeoutSeconds: number }> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve({ approved: false, timeoutSeconds: request.timeoutSeconds })
+  }
+  const targetWindow = mainWindow
+  const requestId = randomUUID()
+  return new Promise((resolve) => {
+    pendingCommandApprovals.set(requestId, (response) => {
+      if (response.memory) {
+        void applyApprovalMemory(request.command, response.memory, context)
+          .catch((error) => log.warn('command.review.memory.failed', { requestId, error }))
+      }
+      resolve({ approved: response.approved, timeoutSeconds: request.timeoutSeconds })
+    })
+    targetWindow.webContents.send('command-review:request', {
+      requestId,
+      command: request.command,
+      timeoutSeconds: request.timeoutSeconds,
+      checks: request.checks,
+    } satisfies CommandApprovalRequest)
   })
-  return { approved: result.response === 0, timeoutSeconds: request.timeoutSeconds }
+}
+
+/** Persists an approval decision as a rule at the requested scope. Project
+ *  and global writes materialize the inherited review config first so the
+ *  effective settings never change. */
+async function applyApprovalMemory(
+  command: string,
+  memory: CommandApprovalMemory,
+  context: ApprovalContext,
+): Promise<void> {
+  const pattern = buildMemoryPattern(command, memory.patternType)
+  if (!pattern) return
+  const rule: CommandReviewRule = {
+    id: `approval-${randomUUID().slice(0, 8)}`,
+    pattern,
+    patternType: 'glob',
+    list: memory.list,
+    source: 'approval',
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  }
+  const key = `${context.projectId}:${context.conversationId}`
+  if (memory.scope === 'turn' || memory.scope === 'session') {
+    upsertRuntimeRule(memory.scope === 'turn' ? turnCommandRules : sessionCommandRules, key, rule)
+    return
+  }
+  if (memory.scope === 'project') {
+    const projects = await getProjects()
+    const project = projects.find((item) => item.id === context.projectId)
+    if (!project) return
+    const appConfig = await readConfig()
+    const review = project.commandExecutionDefault?.review
+      ? structuredClone(project.commandExecutionDefault.review)
+      : structuredClone(appConfig.commandReviewGlobal)
+    const nextRules = review.contentRules.filter((existing) =>
+      existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+    nextRules.push(rule)
+    const nextConfig = project.commandExecutionDefault
+      ? { ...structuredClone(project.commandExecutionDefault), review: { ...review, contentRules: nextRules } }
+      : { ...defaultCommandExecutionConfig, review: { ...review, contentRules: nextRules } }
+    await setProjectCommandExecutionDefault(context.projectId, nextConfig)
+    return
+  }
+  const appConfig = await readConfig()
+  const review = structuredClone(appConfig.commandReviewGlobal)
+  const nextRules = review.contentRules.filter((existing) =>
+    existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+  nextRules.push(rule)
+  await saveConfig({ ...appConfig, commandReviewGlobal: { ...review, contentRules: nextRules } })
+}
+
+/** Appends a review decision to command-review-history.jsonl (fire and forget). */
+function appendCommandReviewHistory(
+  entry: CommandReviewDecision & { projectId: string; conversationId: string },
+): void {
+  void (async () => {
+    try {
+      const file = join(app.getPath('userData'), 'command-review-history.jsonl')
+      await appendFile(file, `${JSON.stringify(entry)}\n`, 'utf8')
+    } catch (error) {
+      log.warn('command.review.history.write-failed', error)
+    }
+  })()
 }
 
 function normalizeContextMessage(
@@ -506,15 +594,33 @@ async function developProject(
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
   const agentLimits = structuredClone(conversation.agentLimits)
   const commandExecution = appConfig.developerMode
-    ? structuredClone(resolveCommandExecutionConfig(project, conversation))
+    ? structuredClone(resolveCommandExecutionConfig(project, conversation, appConfig))
     : { ...defaultCommandExecutionConfig }
+  // A new turn invalidates the previous turn's approval memory.
+  const conversationRuleKey = `${projectId}:${conversationId}`
+  turnCommandRules.delete(conversationRuleKey)
+  const ruleLayers: CommandRuleLayer[] = []
+  const turnRules = turnCommandRules.get(conversationRuleKey)
+  const sessionRules = sessionCommandRules.get(conversationRuleKey)
+  if ((turnRules?.length ?? 0) + (sessionRules?.length ?? 0) > 0) {
+    ruleLayers.push({ level: 'runtime', rules: [...(turnRules ?? []), ...(sessionRules ?? [])] })
+  }
+  if (conversation.commandExecution?.review) {
+    ruleLayers.push({ level: 'conversation', rules: conversation.commandExecution.review.contentRules })
+  }
+  if (project.commandExecutionDefault?.review) {
+    ruleLayers.push({ level: 'project', rules: project.commandExecutionDefault.review.contentRules })
+  }
+  ruleLayers.push({ level: 'global', rules: appConfig.commandReviewGlobal.contentRules })
   const commandRuntime: CommandExecutorRuntime | undefined = appConfig.developerMode
     ? {
         conversationId,
         signal,
         sessionModelName: modelConfig.modelName,
+        ruleLayers,
         resolveAuditModel: async (configId) => appConfig.modelConfigs.find((model) => model.id === configId),
-        requestConfirmation: (request) => requestCommandConfirmation(request),
+        requestConfirmation: (request) => requestCommandApproval(request, { projectId, conversationId }),
+        recordDecision: (entry) => appendCommandReviewHistory({ ...entry, projectId, conversationId }),
       }
     : undefined
   if (conversation.modelConfigId && !isContextConfigValidForModel(contextConfig, modelConfig.modelMaxContext)) {
@@ -751,6 +857,9 @@ function createMainWindow(): void {
     contextDebugWindows.clear()
     closeAllPendingScreenshots()
     closeAllPreviewWindows()
+    // A closed window can never answer pending approvals; deny them.
+    for (const resolve of pendingCommandApprovals.values()) resolve({ approved: false })
+    pendingCommandApprovals.clear()
   })
   loadRenderer(window)
 }
@@ -965,6 +1074,13 @@ app.whenReady().then(() => {
     (event, projectId: string | null, conversationId: string | null) =>
       subscribeDevelopmentProgress(event.sender, projectId, conversationId),
   )
+  ipcMain.handle('command-review:respond', (_event, requestId: string, response: CommandApprovalResponse) => {
+    const resolve = pendingCommandApprovals.get(requestId)
+    if (!resolve) return false
+    pendingCommandApprovals.delete(requestId)
+    resolve(response)
+    return true
+  })
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
@@ -1030,16 +1146,16 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
-  ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig) => {
+  ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig | null) => {
     ensureIdle(projectId, conversationId)
-    if (commandExecution.enabled) {
+    if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
     return setConversationCommandExecution(projectId, conversationId, commandExecution)
   })
-  ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig) => {
+  ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig | null) => {
     ensureProjectIdle(projectId)
-    if (commandExecution.enabled) {
+    if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
     return setProjectCommandExecutionDefault(projectId, commandExecution)

@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { commandExecutionSupported, supportedCommandCombos, type CommandEnvironment, type CommandExecutionConfig, type CommandInterpreter, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
+import { commandExecutionSupported, defaultCommandReviewConfig, supportedCommandCombos, type CommandEnvironment, type CommandExecutionConfig, type CommandInterpreter, type CommandReviewStep, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
 import { executeCommand, type CommandExecutorRuntime } from './command-executor'
 import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
@@ -614,7 +614,12 @@ export async function runAgentTool(
   project: Project,
   toolCall: ToolCall,
   writtenFiles: string[],
-  runtime?: { conversationId: string; signal?: AbortSignal; onToolsetUnlocked?: (keyword: string) => void },
+  runtime?: {
+    conversationId: string
+    signal?: AbortSignal
+    onToolsetUnlocked?: (keyword: string) => void
+    onReviewTrail?: (toolCallId: string, steps: CommandReviewStep[]) => void
+  },
   networkAccessEnabled = false,
   commandExecution?: CommandExecutionConfig,
   commandRuntime?: CommandExecutorRuntime,
@@ -690,6 +695,7 @@ export async function runAgentTool(
     for (const entry of outcome.audit) {
       commandRuntime.recordAudit?.(entry)
     }
+    runtime?.onReviewTrail?.(toolCall.id, outcome.steps)
     return stringifyResult({ ok: outcome.ok, output: outcome.output })
   }
   if (toolCall.function.name === 'web_search') {
@@ -1019,6 +1025,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
     pwshEnvNotes.push('pwsh7/docker, pwsh51/docker: runs on the Linux container image (pwsh on Linux); the project folder is mounted read-write at /work.')
   }
 
+  const durationGateSeconds = config.review?.durationAllowSeconds ?? defaultCommandReviewConfig.durationAllowSeconds
   const description = [
     'Run a shell command in the project workspace (developer mode).',
     'The command runs in the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.',
@@ -1030,7 +1037,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
     '- pwsh7 / pwsh51: PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. PowerShell 5.1 lacks some pwsh 7 features (?? operator, ternary) — prefer version-safe syntax.',
     ...pwshEnvNotes.map((note) => `  - ${note}`),
     'Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.',
-    'Timeout rules: most commands need only a small timeout (30s is typical); requesting more than 60 seconds requires user approval per command; when manual confirmation is disabled, any request is capped at 600 seconds.',
+    `Timeout rules: declare an honest timeout (30s is typical). Commands declaring more than ${durationGateSeconds} seconds enter command review (rule check, then the optional audit model and manual approval); with manual approval disabled, declarations above ${durationGateSeconds} seconds are capped at ${durationGateSeconds} seconds. Execution is terminated as soon as the declared timeout is exceeded, so declare enough time for the command to finish.`,
   ].join('\n')
   return {
     type: 'function',

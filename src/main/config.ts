@@ -7,9 +7,11 @@ import {
   defaultModelConfig,
   type AppConfig,
   type AppLanguage,
+  type CommandReviewConfig,
   type ContextManagementConfig,
   type ModelConfig,
 } from '../shared/types'
+import { isValidCommandReviewConfig, normalizeCommandReviewConfig } from './command-execution-config'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 
 type StoredModelConfig = Partial<ModelConfig> & {
@@ -28,6 +30,7 @@ type StoredAppConfig = {
   keepAwakeOnlyWhileWorking?: boolean
   networkAccessEnabled?: boolean
   performanceTracingEnabled?: boolean
+  commandReview?: Partial<CommandReviewConfig>
 }
 
 type LegacyStoredConfig = StoredModelConfig & {
@@ -106,6 +109,7 @@ async function writeConfig(config: AppConfig): Promise<void> {
   const encrypted = safeStorage.isEncryptionAvailable()
   const stored: StoredAppConfig = {
     ...config,
+    commandReview: config.commandReviewGlobal,
     modelConfigs: config.modelConfigs.map((model) => ({
       ...model,
       apiKey: encrypted
@@ -114,6 +118,7 @@ async function writeConfig(config: AppConfig): Promise<void> {
       encrypted,
     })),
   }
+  delete (stored as Record<string, unknown>).commandReviewGlobal
 
   await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
 }
@@ -143,6 +148,10 @@ export async function readConfig(): Promise<AppConfig> {
         : stored.contextManagement
       const contextManagement = normalizeContextManagementConfig(storedContext)
       const developerMode = stored.developerMode === true
+      const commandReviewGlobal = stored.commandReview === undefined
+        ? undefined
+        : normalizeCommandReviewConfig(stored.commandReview)
+      const resolvedCommandReview = commandReviewGlobal ?? { ...defaultAppConfig.commandReviewGlobal }
       const config: AppConfig = {
         modelConfigs,
         activeModelConfigId,
@@ -153,12 +162,14 @@ export async function readConfig(): Promise<AppConfig> {
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
+        commandReviewGlobal: resolvedCommandReview,
       }
       const needsMigration = stored.developerMode === undefined ||
         stored.keepAwakeEnabled === undefined ||
         stored.keepAwakeOnlyWhileWorking === undefined ||
         stored.networkAccessEnabled === undefined ||
         stored.performanceTracingEnabled === undefined ||
+        stored.commandReview === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || stored.modelConfigs.some((model) =>
         !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -180,6 +191,9 @@ export async function readConfig(): Promise<AppConfig> {
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
+        commandReviewGlobal: stored.commandReview === undefined
+          ? { ...defaultAppConfig.commandReviewGlobal }
+          : normalizeCommandReviewConfig(stored.commandReview),
       }
     }
 
@@ -201,6 +215,9 @@ export async function readConfig(): Promise<AppConfig> {
       keepAwakeEnabled,
       keepAwakeOnlyWhileWorking,
       networkAccessEnabled,
+      commandReviewGlobal: stored.commandReview === undefined
+        ? { ...defaultAppConfig.commandReviewGlobal }
+        : normalizeCommandReviewConfig(stored.commandReview),
     }
     await writeConfig(migrated)
     return migrated
@@ -215,6 +232,7 @@ export async function readConfig(): Promise<AppConfig> {
 export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const modelConfigs = config.modelConfigs.map(normalizeModelConfig)
   const contextManagement = normalizeContextManagementConfig(config.contextManagement)
+  const commandReviewGlobal = normalizeCommandReviewConfig(config.commandReviewGlobal)
   const ids = new Set(modelConfigs.map((model) => model.id))
   const activeModelConfigId = config.activeModelConfigId ?? modelConfigs[0]?.id ?? null
 
@@ -224,7 +242,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     modelConfigs.some((model) => !isValidModelConfig(model)) ||
     !activeModelConfigId ||
     !ids.has(activeModelConfigId) ||
-    !isValidContextManagementConfig(contextManagement)
+    !isValidContextManagementConfig(contextManagement) ||
+    !isValidCommandReviewConfig(commandReviewGlobal)
   ) {
     throw new Error('Enter valid model and context settings')
   }
@@ -239,6 +258,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
     networkAccessEnabled: config.networkAccessEnabled === true,
     performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
+    commandReviewGlobal,
   }
   await writeConfig(normalized)
   return normalized

@@ -14,7 +14,7 @@ import type {
   ShellDetectionResult,
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
-import { defaultStrategyPrompt, layeredStrategyPrompt } from '../shared/types'
+import { defaultStrategyPrompt, layeredStrategyPrompt, type CommandReviewStep } from '../shared/types'
 import { log } from './logger'
 import { recordPerformanceTrace } from './performance-trace'
 import { toProviderMessages } from './model-messages'
@@ -147,6 +147,20 @@ function updateToolCallResult(
   if (item?.type !== 'block' || item.block.type !== 'function_call') return
   item.block.result = content
   item.block.resultError = isError
+}
+
+/** Attaches the review chain to the tool-call block for the UI card. */
+function updateToolCallReview(
+  timeline: DevelopmentTimelineItem[],
+  toolCallId: string,
+  review: CommandReviewStep[] | undefined,
+): void {
+  if (!review) return
+  const item = timeline.find((candidate) =>
+    candidate.type === 'block' && candidate.block.type === 'function_call' && candidate.block.id === toolCallId,
+  )
+  if (item?.type !== 'block' || item.block.type !== 'function_call') return
+  item.block.review = review
 }
 function toMessageBlocks(message: ResponseMessage): AssistantMessageBlock[] {
   const blocks: AssistantMessageBlock[] = []
@@ -799,6 +813,21 @@ export async function develop(
         const toolCall = toolCalls[index]
         let content: string
         let isError = false
+        // Review trail for the tool-call card: run_command reports its real
+        // chain via onReviewTrail; every other tool is allowed by default.
+        let reviewSteps: CommandReviewStep[] | undefined
+        // Live review streaming: each reviewer verdict updates the card as it
+        // happens (e.g. while the manual-confirmation dialog is pending).
+        const liveReviewSteps: CommandReviewStep[] = []
+        const commandRuntimeWithSteps: CommandExecutorRuntime | undefined = toolCall.function.name === 'run_command' && runtime?.commandRuntime
+          ? {
+              ...runtime.commandRuntime,
+              onReviewStep: (step: CommandReviewStep): void => {
+                liveReviewSteps.push(step)
+                onProgress?.({ type: 'update-tool-review', toolCallId: toolCall.id, step })
+              },
+            }
+          : runtime?.commandRuntime
         try {
           throwIfAborted(runtime?.signal)
           content = await runAgentTool(
@@ -816,10 +845,13 @@ export async function develop(
                 tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets])
                 runtime?.onToolsetUnlocked?.(keyword)
               },
+              onReviewTrail: (toolCallId: string, steps: CommandReviewStep[]): void => {
+                if (toolCallId === toolCall.id) reviewSteps = steps
+              },
             },
             networkAccessEnabled,
             runtime?.commandExecution,
-            runtime?.commandRuntime,
+            commandRuntimeWithSteps,
           )
           completedToolCalls += 1
           isError = toolResultHasFailure(content)
@@ -859,6 +891,7 @@ export async function develop(
           contextSource: 'live',
         })
         updateToolCallResult(timeline, toolCall.id, content, isError)
+        updateToolCallReview(timeline, toolCall.id, reviewSteps ?? liveReviewSteps.length > 0 ? (reviewSteps ?? liveReviewSteps) : (toolCall.function.name === 'run_command' ? undefined : [{ stage: 'rules', outcome: 'pass', detail: 'allowed by default (no review chain for this tool)' }]))
         onProgress?.({
           type: 'update-tool-result',
           toolCallId: toolCall.id,

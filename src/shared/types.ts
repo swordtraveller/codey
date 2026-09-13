@@ -145,6 +145,106 @@ export function resolveMaxInputTokens(config: ContextManagementConfig, total: nu
   return deriveContextBudgets(total, maxOutputTokens).maxInputTokens
 }
 
+/** One blacklist/whitelist entry. Users author glob patterns
+ *  (`git *`, `pnpm test ?`); the regex patternType is reserved for the
+ *  built-in defaults and legacy migrated rules. */
+export type CommandReviewRule = {
+  id: string
+  pattern: string
+  patternType: 'glob' | 'regex'
+  list: 'allow' | 'deny'
+  source: 'builtin' | 'user' | 'approval'
+  note?: string
+  enabled: boolean
+  createdAt?: string
+}
+
+/** Review settings shared by the three layers (global/project/conversation):
+ *  what gets reviewed (elements) and who reviews (reviewers, fixed order). */
+export type CommandReviewConfig = {
+  /** Declared durations at or below this pass without review; longer ones
+   *  enter the reviewer chain (and are clamped here without manual
+   *  confirmation). */
+  durationAllowSeconds: number
+  contentRules: CommandReviewRule[]
+  /** Program rules always run; only the optional reviewers are listed here.
+   *  Fixed order: program rules → audit model → manual confirmation. */
+  reviewers: {
+    auditModel: boolean
+    /** Model configuration id used for auditing; must resolve to a model whose
+     *  modelName differs from the session model (case-insensitive). */
+    auditModelConfigId: string | null
+    manualConfirmation: boolean
+  }
+}
+
+/** Built-in deny rules as editable default content (regex, case-insensitive
+ *  against the whole command). They seed the global layer only; users may
+ *  edit or remove them like any other rule. */
+export const builtinCommandDenyPatterns: string[] = [
+  '\\bformat\\s+[a-z]:',
+  '\\bcd\\s+[a-z]:\\\\?\\s*&&\\s*(del|rd|format)',
+  '\\brd\\s+\\/s\\s+\\/q\\s+%?(systemroot|windir|programfiles)',
+  '\\breg(\\.exe)?\\s+(delete|add)\\s+(HKLM|HKCU)\\\\(system|software\\\\microsoft\\\\windows\\\\currentversion\\\\run)',
+  '\\bbcdedit\\b',
+  '\\bdiskpart\\b',
+  '\\bcipher\\s+\\/w',
+  '\\bshutdown\\b|\\brestart-computer\\b',
+  '\\bvssadmin\\b',
+  '\\bwevtutil\\s+cl\\b',
+  '\\bpowershell.+-enc(odedcommand)?\\s+[a-z0-9+/=]{40,}',
+  '\\b(curl|wget|invoke-webrequest|invoke-restmethod)\\b[^\\n|;]*\\|\\s*(cmd|powershell|pwsh|bash|iex|invoke-expression)',
+  '\\bnet\\s+user\\b[^\\n]*\\/(add|delete)',
+  '\\bschtasks\\b[^\\n]*\\/(create|delete)',
+  '\\bsc(\\.exe)?\\s+(config|delete|stop|start)\\b',
+  '\\bremove-item\\b[^\\n]*-recurse[^\\n]*-force[^\\n]*(c:\\\\|\\/etc\\/|~\\/?\\s*$)',
+  '\\bgit\\s+push\\b[^\\n]*--force',
+]
+
+export function createBuiltinReviewRules(): CommandReviewRule[] {
+  return builtinCommandDenyPatterns.map((pattern, index) => ({
+    id: `builtin-${index + 1}`,
+    pattern,
+    patternType: 'regex',
+    list: 'deny',
+    source: 'builtin',
+    enabled: true,
+  }))
+}
+
+export const commandReviewDurationDefaultSeconds = 180
+export const commandReviewDurationMinSeconds = 60
+export const commandReviewDurationMaxSeconds = 86_400
+
+export const defaultCommandReviewConfig: CommandReviewConfig = {
+  durationAllowSeconds: commandReviewDurationDefaultSeconds,
+  contentRules: createBuiltinReviewRules(),
+  reviewers: {
+    auditModel: false,
+    auditModelConfigId: null,
+    manualConfirmation: false,
+  },
+}
+
+/** Approval-memory form payload from the in-app approval card. */
+export type CommandApprovalMemory = {
+  patternType: 'exact' | 'prefix'
+  scope: 'turn' | 'session' | 'project' | 'global'
+  list: 'allow' | 'deny'
+}
+
+export type CommandApprovalRequest = {
+  requestId: string
+  command: string
+  timeoutSeconds: number
+  checks: string[]
+}
+
+export type CommandApprovalResponse = {
+  approved: boolean
+  memory?: CommandApprovalMemory
+}
+
 export type AppConfig = {
   modelConfigs: ModelConfig[]
   activeModelConfigId: string | null
@@ -155,6 +255,8 @@ export type AppConfig = {
   keepAwakeOnlyWhileWorking: boolean
   networkAccessEnabled: boolean
   performanceTracingEnabled: boolean
+  /** Global command-review defaults; projects and conversations may override. */
+  commandReviewGlobal: CommandReviewConfig
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -167,6 +269,7 @@ export const defaultAppConfig: AppConfig = {
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
   performanceTracingEnabled: false,
+  commandReviewGlobal: { ...defaultCommandReviewConfig },
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -216,9 +319,17 @@ export type ContextMetrics = {
   truncated: boolean
 }
 
+/** One review step in the run_command approval chain, rendered on the tool
+ *  call card. Non-run_command tools get a single default-allow entry. */
+export type CommandReviewStep = {
+  stage: 'rules' | 'audit-model' | 'manual-confirmation' | 'duration' | 'execution'
+  outcome: 'pass' | 'deny' | 'skipped' | 'clamped' | 'info'
+  detail?: string
+}
+
 export type AssistantMessageBlock =
   | { type: 'content'; content: string }
-  | { type: 'function_call'; id: string; name: string; parameters: string; result?: string; resultError?: boolean }
+  | { type: 'function_call'; id: string; name: string; parameters: string; result?: string; resultError?: boolean; review?: CommandReviewStep[] }
 
 export type ContextCompressionNotice = {
   originalTokens: number
@@ -325,16 +436,9 @@ export type CommandExecutionConfig = {
    *  The model may override interpreter/environment per call, but only within
    *  these enabled combos. */
   enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]>
-  /** Rule interception is always active; this flag mirrors the UI switch that
-   *  cannot be turned off (kept for forward compatibility). */
-  ruleInterception: true
-  modelAuditEnabled: boolean
-  /** Model configuration id used for auditing; must resolve to a model whose
-   *  modelName differs from the session model (case-insensitive). */
-  auditModelConfigId: string | null
-  manualConfirmationEnabled: boolean
-  /** Extra deny rules (regex source) on top of the built-in blocklist. */
-  denyRules: string[]
+  /** Review settings for run_command; null = inherit the global review
+   *  defaults (AppConfig.commandReviewGlobal). */
+  review: CommandReviewConfig | null
 }
 
 export const defaultCommandExecutionConfig: CommandExecutionConfig = {
@@ -346,20 +450,13 @@ export const defaultCommandExecutionConfig: CommandExecutionConfig = {
     pwsh7: ['bare'],
     pwsh51: ['bare'],
   },
-  ruleInterception: true,
-  modelAuditEnabled: false,
-  auditModelConfigId: null,
-  manualConfirmationEnabled: false,
-  denyRules: [],
+  review: null,
 }
 
 /** Commands may request their own timeout (seconds); the hard bounds. */
 export const commandTimeoutMinSeconds = 1
 export const commandTimeoutMaxSeconds = 86_400
-/** Without manual confirmation, requested timeouts are clamped to this. */
-export const commandTimeoutClampSeconds = 600
-/** Requests above this require manual confirmation when it is enabled. */
-export const commandConfirmationThresholdSeconds = 60
+
 export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; environment: CommandEnvironment }> = [
   { interpreter: 'bash', environment: 'bare' },
   { interpreter: 'pwsh7', environment: 'bare' },
@@ -451,7 +548,8 @@ export type Conversation = {
    *  matching tools are included in every model request once unlocked. */
   unlockedToolsets?: string[]
   agentLimits: AgentLimitsConfig
-  commandExecution: CommandExecutionConfig
+  /** Full command-execution override; null = inherit the project default. */
+  commandExecution: CommandExecutionConfig | null
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
@@ -468,7 +566,9 @@ export type Project = {
   archived: boolean
   defaultModelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null
-  commandExecutionDefault: CommandExecutionConfig
+  /** Project-level command-execution default; null = inherit the built-in
+   *  defaults plus the global review config. */
+  commandExecutionDefault: CommandExecutionConfig | null
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]
@@ -491,6 +591,7 @@ export type DevelopmentProgressUpdate =
   | { type: 'append-stream'; delta: DevelopmentStreamDelta }
   | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
   | { type: 'update-tool-result'; toolCallId: string; result: string; resultError: boolean }
+  | { type: 'update-tool-review'; toolCallId: string; step: CommandReviewStep }
 
 export type DevelopmentProgress = {
   projectId: string

@@ -783,6 +783,85 @@ h1 {
   border-top: 1px solid #e0e0e0;
 }
 
+.tool-review-section {
+  margin-top: 10px;
+}
+
+.tool-review-section > span {
+  display: block;
+  color: #777;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tool-review-steps {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.review-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.review-stage {
+  font-weight: 600;
+  color: #555;
+  min-width: 84px;
+}
+
+.review-outcome {
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.outcome-pass {
+  color: #0f7b0f;
+  background: rgb(15 123 15 / 8%);
+}
+
+.outcome-deny {
+  color: #a4262c;
+  background: rgb(164 38 44 / 8%);
+}
+
+.outcome-skipped {
+  color: #777;
+  background: rgb(119 119 119 / 10%);
+}
+
+.outcome-clamped {
+  color: #8a5300;
+  background: rgb(138 83 0 / 10%);
+}
+
+.outcome-info {
+  color: #0f6cbd;
+  background: rgb(15 108 189 / 8%);
+}
+
+.review-detail {
+  color: #777;
+  font-size: 11px;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.tool-review-section + .tool-output-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e0e0e0;
+}
+
 .tool-output-section > span {
   display: block;
   color: #777;
@@ -1845,4 +1924,80 @@ h1 {
 
 .archive-list-item small {
   color: #707070;
+}
+
+.command-review-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.command-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.command-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.command-rule-row .command-rule-pattern {
+  flex: 1;
+  min-width: 220px;
+  font-family: var(--font-family-monospace, monospace);
+}
+
+.command-rule-row .settings-warning {
+  width: 100%;
+  margin: 0;
+}
+
+.command-rule-source {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--colorNeutralBackground3, #eee);
+  white-space: nowrap;
+}
+
+.command-rule-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.command-rule-add input {
+  flex: 1;
+}
+
+.command-approval-command {
+  margin: 0;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--colorNeutralBackground3, #eee);
+  font-family: var(--font-family-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.command-approval-memory {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.command-rules-help-list {
+  margin: 0 0 8px 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }

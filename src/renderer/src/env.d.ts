@@ -3,6 +3,8 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   ColdRecallPreview,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextDebugMessage,
   ContextDebugOverview,
   ContextManagementConfig,
@@ -83,12 +85,14 @@ declare global {
       setConversationCommandExecution(
         projectId: string,
         conversationId: string,
-        commandExecution: CommandExecutionConfig,
+        commandExecution: CommandExecutionConfig | null,
       ): Promise<Project>
       setProjectCommandExecutionDefault(
         projectId: string,
-        commandExecution: CommandExecutionConfig,
+        commandExecution: CommandExecutionConfig | null,
       ): Promise<Project>
+      onCommandReviewRequest(listener: (request: CommandApprovalRequest) => void): () => void
+      respondCommandReview(requestId: string, response: CommandApprovalResponse): Promise<boolean>
       detectShells(): Promise<ShellDetectionResult>
       getCachedShellDetection(): Promise<ShellDetectionResult | null>
       pickBashExecutable(): Promise<string | null>

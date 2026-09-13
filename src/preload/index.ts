@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
   AppConfig,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
@@ -100,7 +102,7 @@ contextBridge.exposeInMainWorld(
     setConversationCommandExecution: (
       projectId: string,
       conversationId: string,
-      commandExecution: CommandExecutionConfig,
+      commandExecution: CommandExecutionConfig | null,
     ) => ipcRenderer.invoke(
       'conversations:set-command-execution',
       projectId,
@@ -109,12 +111,19 @@ contextBridge.exposeInMainWorld(
     ),
     setProjectCommandExecutionDefault: (
       projectId: string,
-      commandExecution: CommandExecutionConfig,
+      commandExecution: CommandExecutionConfig | null,
     ) => ipcRenderer.invoke(
       'projects:set-command-execution-default',
       projectId,
       commandExecution,
     ),
+    onCommandReviewRequest: (listener: (request: CommandApprovalRequest) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, request: CommandApprovalRequest) => listener(request)
+      ipcRenderer.on('command-review:request', handler)
+      return () => ipcRenderer.removeListener('command-review:request', handler)
+    },
+    respondCommandReview: (requestId: string, response: CommandApprovalResponse) =>
+      ipcRenderer.invoke('command-review:respond', requestId, response),
     detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
     getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
     pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),

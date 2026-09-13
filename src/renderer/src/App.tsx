@@ -56,12 +56,17 @@ import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
   defaultCommandExecutionConfig,
+  defaultCommandReviewConfig,
   defaultContextManagementConfig,
   defaultModelConfig,
   commandExecutionSupported,
   deriveContextBudgets,
   maximumAgentLimit,
+  type CommandApprovalMemory,
+  type CommandApprovalRequest,
   type CommandExecutionConfig,
+  type CommandReviewConfig,
+  type CommandReviewRule,
   type ModelConfig,
   type Project,
   type PromptSnapshot,
@@ -69,6 +74,7 @@ import {
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
+import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
 const markdownPlugins = [remarkGfm]
 
@@ -435,6 +441,20 @@ function FunctionCallMessage({
         <span>{t('toolParameters')}</span>
         <pre>{formatToolOutput(block.parameters)}</pre>
       </div>
+      {block.review && block.review.length > 0 && (
+        <div className="tool-output-section tool-review-section">
+          <span>{t('toolReviewChain')}</span>
+          <ul className="tool-review-steps">
+            {block.review.map((step, index) => (
+              <li key={index} className={`review-step review-${step.outcome}`}>
+                <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
+                <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
+                {step.detail && <span className="review-detail">{step.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {block.result !== undefined && (
         <div className="tool-output-section">
           <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
@@ -555,6 +575,264 @@ const ConversationMessage = memo(function ConversationMessage({
     </>
   )
 })
+
+function formatCommandDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const rest = seconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${rest}s`
+}
+
+/** Shared review editor for the three settings surfaces (global, project,
+ *  conversation): duration gate, reviewer checkboxes, rule list. */
+function CommandReviewEditor({ value, onChange, disabled, modelConfigs, sessionModel, onOpenSyntaxHelp }: {
+  value: CommandReviewConfig
+  onChange: (next: CommandReviewConfig) => void
+  disabled?: boolean
+  modelConfigs: ModelConfig[]
+  sessionModel?: ModelConfig
+  onOpenSyntaxHelp?: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [newPattern, setNewPattern] = useState('')
+  const [newList, setNewList] = useState<'allow' | 'deny'>('deny')
+  const newPatternInvalid = newPattern.trim() !== '' && !isValidGlobPattern(newPattern)
+  const newPatternConflict = newPattern.trim() !== '' && Boolean(findConflictingRule(value.contentRules, { pattern: newPattern, list: newList }))
+  const auditModel = value.reviewers.auditModelConfigId
+    ? modelConfigs.find((model) => model.id === value.reviewers.auditModelConfigId)
+    : undefined
+  const updateRule = (id: string, patch: Partial<CommandReviewRule>): void => {
+    onChange({ ...value, contentRules: value.contentRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) })
+  }
+  const removeRule = (id: string): void => {
+    onChange({ ...value, contentRules: value.contentRules.filter((rule) => rule.id !== id) })
+  }
+  const addRule = (): void => {
+    const pattern = newPattern.trim()
+    if (!pattern || newPatternInvalid) return
+    onChange({
+      ...value,
+      contentRules: [
+        ...value.contentRules.filter((rule) => rule.pattern.trim().toLowerCase() !== pattern.toLowerCase()),
+        { id: crypto.randomUUID(), pattern, patternType: 'glob', list: newList, source: 'user', enabled: true, createdAt: new Date().toISOString() },
+      ],
+    })
+    setNewPattern('')
+  }
+  return (
+    <div className="command-review-editor">
+      <Field label={t('reviewDurationGate')} hint={t('reviewDurationGateHint')}>
+        <Input
+          type="number"
+          min={1}
+          max={1_440}
+          disabled={disabled}
+          value={String(Math.round(value.durationAllowSeconds / 60))}
+          onChange={(_, data) => {
+            const minutes = Math.floor(Number(data.value))
+            if (!Number.isFinite(minutes)) return
+            onChange({ ...value, durationAllowSeconds: Math.min(1_440, Math.max(1, minutes)) * 60 })
+          }}
+        />
+      </Field>
+      <p className="settings-description">{t('reviewDurationGateUnit')}</p>
+
+      <p className="section-label">{t('reviewReviewers')}</p>
+      <Switch checked disabled label={t('reviewProgramRules')} />
+      <p className="settings-description">{t('reviewProgramRulesNote')}</p>
+      <Switch
+        checked={value.reviewers.auditModel}
+        disabled={disabled}
+        label={t('commandModelAudit')}
+        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModel: data.checked } })}
+      />
+      {value.reviewers.auditModel && (
+        <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
+          <Select
+            disabled={disabled}
+            value={value.reviewers.auditModelConfigId ?? ''}
+            onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModelConfigId: data.value || null } })}
+          >
+            <option value="">{t('notConfigured')}</option>
+            {modelConfigs
+              .filter((model) => model.id !== sessionModel?.id)
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name || model.modelName || t('unnamedModel')}
+                </option>
+              ))}
+          </Select>
+        </Field>
+      )}
+      {value.reviewers.auditModel && auditModel && sessionModel &&
+        auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase() && (
+        <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+      )}
+      <Switch
+        checked={value.reviewers.manualConfirmation}
+        disabled={disabled}
+        label={t('commandManualConfirmation')}
+        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, manualConfirmation: data.checked } })}
+      />
+      <p className="settings-description">{t('reviewManualConfirmationNote')}</p>
+
+      <p className="section-label">{t('reviewContentRules')}</p>
+      {onOpenSyntaxHelp && (
+        <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
+          {t('reviewSyntaxHelp')}
+        </Button>
+      )}
+      <div className="command-rules-list">
+        {value.contentRules.length === 0 && <p className="settings-description">{t('reviewNoRules')}</p>}
+        {value.contentRules.map((rule) => {
+          const conflict = findConflictingRule(value.contentRules, rule)
+          return (
+            <div className="command-rule-row" key={rule.id}>
+              <input
+                aria-label={t('reviewRuleEnabled')}
+                type="checkbox"
+                checked={rule.enabled}
+                disabled={disabled}
+                onChange={(event) => updateRule(rule.id, { enabled: event.target.checked })}
+              />
+              <input
+                aria-label={t('reviewRulePattern')}
+                className="command-rule-pattern"
+                type="text"
+                value={rule.pattern}
+                disabled={disabled}
+                onChange={(event) => updateRule(rule.id, { pattern: event.target.value })}
+              />
+              <Select
+                aria-label={t('reviewRuleList')}
+                disabled={disabled}
+                value={rule.list}
+                onChange={(_, data) => updateRule(rule.id, { list: data.value as 'allow' | 'deny' })}
+              >
+                <option value="deny">{t('reviewRuleDeny')}</option>
+                <option value="allow">{t('reviewRuleAllow')}</option>
+              </Select>
+              <span className={`command-rule-source source-${rule.source}`} title={rule.patternType === 'regex' ? t('reviewRuleRegex') : undefined}>
+                {t(`reviewSource_${rule.source}`)}
+              </span>
+              <Button appearance="subtle" size="small" disabled={disabled} onClick={() => removeRule(rule.id)}>
+                {t('reviewRuleDelete')}
+              </Button>
+              {conflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
+            </div>
+          )
+        })}
+      </div>
+      {!disabled && (
+        <div className="command-rule-add">
+          <Input
+            aria-label={t('reviewNewRulePattern')}
+            placeholder="git *"
+            type="text"
+            value={newPattern}
+            onChange={(_, data) => setNewPattern(data.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') addRule()
+            }}
+          />
+          <Select
+            aria-label={t('reviewNewRuleList')}
+            value={newList}
+            onChange={(_, data) => setNewList(data.value as 'allow' | 'deny')}
+          >
+            <option value="deny">{t('reviewRuleDeny')}</option>
+            <option value="allow">{t('reviewRuleAllow')}</option>
+          </Select>
+          <Button appearance="secondary" disabled={newPatternInvalid || newPattern.trim() === ''} onClick={addRule}>
+            {t('reviewRuleAdd')}
+          </Button>
+        </div>
+      )}
+      {newPatternInvalid && <p className="settings-warning" role="alert">{t('reviewRulePatternInvalid')}</p>}
+      {newPatternConflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
+    </div>
+  )
+}
+
+/** In-app approval card shown when run_command needs manual review. */
+function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
+  request: CommandApprovalRequest
+  onRespond: (approved: boolean, memory?: CommandApprovalMemory) => void
+  onOpenSyntaxHelp: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [remember, setRemember] = useState(true)
+  const [patternType, setPatternType] = useState<'exact' | 'prefix'>('exact')
+  const [scope, setScope] = useState<'turn' | 'session' | 'project' | 'global'>('project')
+  const [list, setList] = useState<'allow' | 'deny'>('allow')
+  useEffect(() => {
+    setRemember(true)
+    setPatternType('exact')
+    setScope('project')
+    setList('allow')
+  }, [request.requestId])
+  const respond = (approved: boolean): void => {
+    onRespond(approved, remember ? { patternType, scope, list } : undefined)
+  }
+  return (
+    <Dialog open modalType="alert" onOpenChange={(_, data) => { if (!data.open) respond(false) }}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>{t('approvalTitle')}</DialogTitle>
+          <DialogContent className="dialog-fields">
+            <p className="settings-description">
+              {t('approvalDurationReason', { duration: formatCommandDuration(request.timeoutSeconds) })}
+            </p>
+            <pre className="command-approval-command">{request.command}</pre>
+            {request.checks.length > 0 && (
+              <p className="settings-description">{t('approvalChecks', { checks: request.checks.join(', ') })}</p>
+            )}
+            <div className="command-approval-memory">
+              <Switch checked={remember} label={t('approvalRemember')} onChange={(_, data) => setRemember(data.checked)} />
+              {remember && (
+                <>
+                  <Field label={t('approvalMemoryPattern')}>
+                    <Select value={patternType} onChange={(_, data) => setPatternType(data.value as 'exact' | 'prefix')}>
+                      <option value="exact">{t('approvalMemoryExact')}</option>
+                      <option value="prefix">{t('approvalMemoryPrefix')}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t('approvalMemoryScope')}>
+                    <Select value={scope} onChange={(_, data) => setScope(data.value as typeof scope)}>
+                      <option value="turn">{t('approvalScopeTurn')}</option>
+                      <option value="session">{t('approvalScopeSession')}</option>
+                      <option value="project">{t('approvalScopeProject')}</option>
+                      <option value="global">{t('approvalScopeGlobal')}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t('approvalMemoryList')}>
+                    <Select value={list} onChange={(_, data) => setList(data.value as 'allow' | 'deny')}>
+                      <option value="allow">{t('approvalMemoryAllow')}</option>
+                      <option value="deny">{t('approvalMemoryDeny')}</option>
+                    </Select>
+                  </Field>
+                </>
+              )}
+            </div>
+            <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
+              {t('reviewSyntaxHelp')}
+            </Button>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={() => respond(false)}>
+              {t('approvalDeny')}
+            </Button>
+            <Button appearance="primary" onClick={() => respond(true)}>
+              {t('approvalApprove')}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  )
+}
 
 type VirtualWindow = { start: number; end: number }
 
@@ -1475,7 +1753,12 @@ export function App(): React.JSX.Element {
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
   const [commandProjectId, setCommandProjectId] = useState('')
   const [commandConversationId, setCommandConversationId] = useState('')
-  const [commandDraft, setCommandDraft] = useState(defaultCommandExecutionConfig)
+  const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig | null>(defaultCommandExecutionConfig)
+  const [commandTab, setCommandTab] = useState<'execution' | 'review'>('execution')
+  const [projectCommandDialogOpen, setProjectCommandDialogOpen] = useState(false)
+  const [projectCommandDraft, setProjectCommandDraft] = useState<CommandExecutionConfig | null>(null)
+  const [projectCommandTab, setProjectCommandTab] = useState<'execution' | 'review'>('execution')
+  const [approvalRequest, setApprovalRequest] = useState<CommandApprovalRequest | null>(null)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
   const [wslDistros, setWslDistros] = useState<string[]>([])
@@ -1483,7 +1766,7 @@ export function App(): React.JSX.Element {
   const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
   const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
   const [helpDialogOpen, setHelpDialogOpen] = useState(false)
-  const [helpTab, setHelpTab] = useState<'tools'>('tools')
+  const [helpTab, setHelpTab] = useState<'tools' | 'commandRules'>('tools')
   const [toolHelp, setToolHelp] = useState<ToolHelpSnapshot | null>(null)
   const [toolSearch, setToolSearch] = useState('')
   const [toolMatchIndex, setToolMatchIndex] = useState(0)
@@ -2069,13 +2352,23 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /** Materializes the effective config for a conversation: its own override,
+   *  else the project default, else the built-in matrix — with review falling
+   *  back to the global review config. Used when a user turns off
+   *  "follow upper layer" and starts editing an override. */
+  function effectiveConversationCommandConfig(): CommandExecutionConfig {
+    const base = activeConversation?.commandExecution ?? activeProject?.commandExecutionDefault ?? defaultCommandExecutionConfig
+    return { ...structuredClone(base), review: base.review ?? structuredClone(config.commandReviewGlobal) }
+  }
+
   function openCommandExecutionSettings(): void {
     if (!activeProject || !activeConversation || interactionLocked) {
       return
     }
     setCommandProjectId(activeProject.id)
     setCommandConversationId(activeConversation.id)
-    setCommandDraft({ ...(activeConversation.commandExecution ?? activeProject.commandExecutionDefault) })
+    setCommandDraft(activeConversation.commandExecution ? structuredClone(activeConversation.commandExecution) : null)
+    setCommandTab('execution')
     setSettingsError('')
     setCommandDialogOpen(true)
     // Availability checks need a detection; run one if none is cached so the
@@ -2089,8 +2382,26 @@ export function App(): React.JSX.Element {
     }).catch(() => undefined)
   }
 
+  function openProjectCommandSettings(): void {
+    if (!activeProject || interactionLocked) {
+      return
+    }
+    setCommandProjectId(activeProject.id)
+    setProjectCommandDraft(activeProject.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
+    setProjectCommandTab('execution')
+    setSettingsError('')
+    setProjectCommandDialogOpen(true)
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) {
+        setShellDetection(cached)
+        return
+      }
+      return runShellDetection()
+    }).catch(() => undefined)
+  }
+
   async function saveCommandExecutionSettings(): Promise<void> {
-    if (interactionLocked || !isValidCommandExecutionDraft()) {
+    if (interactionLocked || !isValidCommandExecutionDraft(commandDraft)) {
       return
     }
     setSaving(true)
@@ -2110,30 +2421,54 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function isValidCommandExecutionDraft(): boolean {
-    if (!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment)) return false
+  async function saveProjectCommandSettings(): Promise<void> {
+    if (interactionLocked || !isValidCommandExecutionDraft(projectCommandDraft)) {
+      return
+    }
+    setSaving(true)
+    setSettingsError('')
+    try {
+      const updated = await window.codey.setProjectCommandExecutionDefault(commandProjectId, projectCommandDraft)
+      replaceProject(updated)
+      setProjectCommandDialogOpen(false)
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function isValidCommandExecutionDraft(draft: CommandExecutionConfig | null): boolean {
+    if (draft === null) return true
+    if (!commandExecutionSupported(draft.interpreter, draft.environment)) return false
     // The session default combo must be within the enabled combos.
-    if (!(commandDraft.enabledEnvironments[commandDraft.interpreter] ?? []).includes(commandDraft.environment)) return false
+    if (!(draft.enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) return false
     // Every enabled combo must be supported.
-    for (const [interpreter, environments] of Object.entries(commandDraft.enabledEnvironments)) {
+    for (const [interpreter, environments] of Object.entries(draft.enabledEnvironments)) {
       for (const environment of environments) {
         if (!commandExecutionSupported(interpreter as CommandExecutionConfig['interpreter'], environment)) return false
       }
     }
-    if (commandDraft.modelAuditEnabled && !commandDraft.auditModelConfigId) return false
-    if (commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId) {
-      const auditModel = config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)
-      const sessionModel = effectiveModelConfig
-      if (!auditModel || !sessionModel) return false
-      if (auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) return false
-    }
-    try {
-      for (const rule of commandDraft.denyRules) new RegExp(rule, 'i')
-      return true
-    } catch {
-      return false
+    if (draft.review !== null && !validateCommandReviewConfig(draft.review)) return false
+    return true
+  }
+
+  function respondCommandApproval(approved: boolean, memory?: CommandApprovalMemory): void {
+    const request = approvalRequest
+    if (!request) return
+    setApprovalRequest(null)
+    void window.codey.respondCommandReview(request.requestId, { approved, memory }).catch(() => undefined)
+  }
+
+  function openCommandRulesHelp(): void {
+    setHelpTab('commandRules')
+    setHelpDialogOpen(true)
+    if (!toolHelp) {
+      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
     }
   }
+
+  useEffect(() => window.codey.onCommandReviewRequest((request) => setApprovalRequest(request)), [])
 
   async function runShellDetection(): Promise<void> {
     if (shellDetectBusy) {
@@ -2620,6 +2955,7 @@ export function App(): React.JSX.Element {
       (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
   )
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
+  const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
 
   return (
@@ -2761,9 +3097,14 @@ export function App(): React.JSX.Element {
                     {t('agentLimits')}
                   </Button>
                   {config.developerMode && activeProject && (
-                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
-                      {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
-                    </Button>
+                    <>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
+                        {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault ?? defaultCommandExecutionConfig).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
+                      </Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openProjectCommandSettings}>
+                        {t('projectCommandSettings')}
+                      </Button>
+                    </>
                   )}
                 </div>
               )}
@@ -2994,7 +3335,30 @@ export function App(): React.JSX.Element {
                 onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
               >
                 <Tab value="tools">{t('helpTools')}</Tab>
+                <Tab value="commandRules">{t('helpCommandRules')}</Tab>
               </TabList>
+              {helpTab === 'commandRules' && (
+                <section className="settings-group command-rules-help">
+                  <p className="settings-description">{t('helpCommandRulesIntro')}</p>
+                  <p className="section-label">{t('helpCommandRulesPatterns')}</p>
+                  <ul className="command-rules-help-list">
+                    <li><code>git status</code> — {t('helpCommandRulesExact')}</li>
+                    <li><code>git *</code> — {t('helpCommandRulesStar')}</li>
+                    <li><code>pnpm run build *</code> — {t('helpCommandRulesTailStar')}</li>
+                    <li><code>npm run ?</code> — {t('helpCommandRulesQuestion')}</li>
+                    <li><code>git commit -m "fix bug"</code> — {t('helpCommandRulesQuoted')}</li>
+                  </ul>
+                  <p className="section-label">{t('helpCommandRulesSemantics')}</p>
+                  <ul className="command-rules-help-list">
+                    <li>{t('helpCommandRulesCase')}</li>
+                    <li>{t('helpCommandRulesPrecedence')}</li>
+                    <li>{t('helpCommandRulesMutex')}</li>
+                    <li>{t('helpCommandRulesDuration')}</li>
+                    <li>{t('helpCommandRulesBuiltin')}</li>
+                    <li>{t('helpCommandRulesRegex')}</li>
+                  </ul>
+                </section>
+              )}
               {helpTab === 'tools' && (
                 <section className="settings-group tool-help-group">
                   <p className="settings-description">
@@ -3051,6 +3415,14 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {approvalRequest && (
+        <CommandApprovalDialog
+          request={approvalRequest}
+          onRespond={(approved, memory) => respondCommandApproval(approved, memory)}
+          onOpenSyntaxHelp={openCommandRulesHelp}
+        />
+      )}
 
       <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
         <DialogSurface>
@@ -3109,7 +3481,7 @@ export function App(): React.JSX.Element {
                   </Button>
                   <Button
                     appearance="primary"
-                    disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
+                    disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || interactionLocked || saving}
                     onClick={() => void saveSettings()}
                   >
                     {saving ? t('saving') : t('save')}
@@ -3267,6 +3639,18 @@ export function App(): React.JSX.Element {
                   }))}
                 />
                 <p className="settings-description">{t('developerModeDescription')}</p>
+                {configDraft.developerMode && (
+                  <div className="command-review-global-group">
+                    <h3>{t('globalCommandReview')}</h3>
+                    <p className="settings-description">{t('globalCommandReviewDescription')}</p>
+                    <CommandReviewEditor
+                      value={configDraft.commandReviewGlobal}
+                      modelConfigs={configDraft.modelConfigs}
+                      onOpenSyntaxHelp={openCommandRulesHelp}
+                      onChange={(next) => setConfigDraft((current) => ({ ...current, commandReviewGlobal: next }))}
+                    />
+                  </div>
+                )}
                 {configDraft.developerMode && (
                   <div className="shell-detection-group">
                     <h3>{t('environmentDetection')}</h3>
@@ -3543,128 +3927,135 @@ export function App(): React.JSX.Element {
           <DialogBody>
             <DialogTitle>{t('commandExecutionSettings')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <Switch
-                checked={commandDraft.enabled}
-                disabled={interactionLocked}
-                label={t('commandExecutionEnabled')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, enabled: data.checked }))}
-              />
-              <p className="settings-description">{t('commandExecutionDescription')}</p>
-              <Field label={t('commandInterpreter')}>
-                <Select
-                  disabled={interactionLocked || !commandDraft.enabled}
-                  value={commandDraft.interpreter}
-                  onChange={(_, data) => setCommandDraft((current) => ({
-                    ...current,
-                    interpreter: data.value as CommandExecutionConfig['interpreter'],
-                  }))}
-                >
-                  <option value="bash">bash</option>
-                  <option value="pwsh7">pwsh 7</option>
-                  <option value="pwsh51">pwsh 5.1</option>
-                </Select>
-              </Field>
-              <Field label={t('commandEnvironment')}>
-                <Select
-                  disabled={interactionLocked || !commandDraft.enabled}
-                  value={commandDraft.environment}
-                  onChange={(_, data) => setCommandDraft((current) => ({
-                    ...current,
-                    environment: data.value as CommandExecutionConfig['environment'],
-                  }))}
-                >
-                  <option value="bare">{t('commandEnvBare')}</option>
-                  <option value="wsl2">wsl2</option>
-                  <option value="docker">docker</option>
-                  <option value="windows-sandbox">Windows Sandbox</option>
-                </Select>
-              </Field>
-              {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
-                <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
-              )}
-              {commandDraft.enabled && (
-                <div className="enabled-environments-group">
-                  <p className="section-label">{t('enabledEnvironments')}</p>
-                  <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
-                  {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
-                    <div className="enabled-environments-row" key={interpreter}>
-                      <span className="enabled-environments-label">
-                        {interpreterLabels[interpreter] ?? interpreter}
-                      </span>
-                      {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
-                        <label className="enabled-environments-check" key={environment}>
-                          <input
-                            type="checkbox"
-                            checked={commandDraft.enabledEnvironments[interpreter]?.includes(environment) ?? false}
-                            onChange={(event) => setCommandDraft((current) => {
-                              const current2 = current.enabledEnvironments[interpreter] ?? []
-                              const next = event.target.checked
-                                ? [...current2, environment]
-                                : current2.filter((entry) => entry !== environment)
-                              return {
-                                ...current,
-                                enabledEnvironments: {
-                                  ...current.enabledEnvironments,
-                                  [interpreter]: next,
-                                },
-                              }
-                            })}
-                          />
-                          {environmentLabels[environment] ?? environment}
-                        </label>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <Switch
-                checked={commandDraft.modelAuditEnabled}
-                disabled={interactionLocked || !commandDraft.enabled}
-                label={t('commandModelAudit')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, modelAuditEnabled: data.checked }))}
-              />
-              {commandDraft.modelAuditEnabled && (
+              <TabList
+                selectedValue={commandTab}
+                onTabSelect={(_, data) => setCommandTab(data.value as typeof commandTab)}
+              >
+                <Tab value="execution">{t('commandTabExecution')}</Tab>
+                <Tab value="review">{t('commandTabReview')}</Tab>
+              </TabList>
+              {commandTab === 'execution' && (
                 <>
-                  <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
-                    <Select
-                      disabled={interactionLocked}
-                      value={commandDraft.auditModelConfigId ?? ''}
-                      onChange={(_, data) => setCommandDraft((current) => ({
-                        ...current,
-                        auditModelConfigId: data.value || null,
-                      }))}
-                    >
-                      <option value="">{t('notConfigured')}</option>
-                      {config.modelConfigs
-                        .filter((model) => model.id !== effectiveModelConfig?.id)
-                        .map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.name || model.modelName || t('unnamedModel')}
-                          </option>
-                        ))}
-                    </Select>
-                  </Field>
-                  {effectiveModelConfig && (
-                    <p className="settings-description">
-                      {t('commandSessionModelInfo', {
-                        config: effectiveModelConfig.name || effectiveModelConfig.modelName,
-                        model: effectiveModelConfig.modelName,
-                      })}
-                    </p>
+                  <Switch
+                    checked={commandDraft !== null}
+                    disabled={interactionLocked}
+                    label={t('commandOverrideProject')}
+                    onChange={(_, data) => setCommandDraft(data.checked ? effectiveConversationCommandConfig() : null)}
+                  />
+                  {commandDraft === null ? (
+                    <p className="settings-description">{t('commandFollowingProject')}</p>
+                  ) : (
+                    <>
+                      <Switch
+                        checked={commandDraft.enabled}
+                        disabled={interactionLocked}
+                        label={t('commandExecutionEnabled')}
+                        onChange={(_, data) => setCommandDraft((current) => current && { ...current, enabled: data.checked })}
+                      />
+                      <p className="settings-description">{t('commandExecutionDescription')}</p>
+                      <Field label={t('commandInterpreter')}>
+                        <Select
+                          disabled={interactionLocked || !commandDraft.enabled}
+                          value={commandDraft.interpreter}
+                          onChange={(_, data) => setCommandDraft((current) => current && ({
+                            ...current,
+                            interpreter: data.value as CommandExecutionConfig['interpreter'],
+                          }))}
+                        >
+                          <option value="bash">bash</option>
+                          <option value="pwsh7">pwsh 7</option>
+                          <option value="pwsh51">pwsh 5.1</option>
+                        </Select>
+                      </Field>
+                      <Field label={t('commandEnvironment')}>
+                        <Select
+                          disabled={interactionLocked || !commandDraft.enabled}
+                          value={commandDraft.environment}
+                          onChange={(_, data) => setCommandDraft((current) => current && ({
+                            ...current,
+                            environment: data.value as CommandExecutionConfig['environment'],
+                          }))}
+                        >
+                          <option value="bare">{t('commandEnvBare')}</option>
+                          <option value="wsl2">wsl2</option>
+                          <option value="docker">docker</option>
+                          <option value="windows-sandbox">Windows Sandbox</option>
+                        </Select>
+                      </Field>
+                      {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
+                        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+                      )}
+                      {commandDraft.enabled && (
+                        <div className="enabled-environments-group">
+                          <p className="section-label">{t('enabledEnvironments')}</p>
+                          <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
+                          {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
+                            <div className="enabled-environments-row" key={interpreter}>
+                              <span className="enabled-environments-label">
+                                {interpreterLabels[interpreter] ?? interpreter}
+                              </span>
+                              {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
+                                <label className="enabled-environments-check" key={environment}>
+                                  <input
+                                    type="checkbox"
+                                    checked={commandDraft.enabledEnvironments[interpreter]?.includes(environment) ?? false}
+                                    onChange={(event) => setCommandDraft((current) => {
+                                      if (!current) return current
+                                      const current2 = current.enabledEnvironments[interpreter] ?? []
+                                      const next = event.target.checked
+                                        ? [...current2, environment]
+                                        : current2.filter((entry) => entry !== environment)
+                                      return {
+                                        ...current,
+                                        enabledEnvironments: {
+                                          ...current.enabledEnvironments,
+                                          [interpreter]: next,
+                                        },
+                                      }
+                                    })}
+                                  />
+                                  {environmentLabels[environment] ?? environment}
+                                </label>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
-              {commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId && effectiveModelConfig &&
-                config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)?.modelName.trim().toLowerCase() === effectiveModelConfig.modelName.trim().toLowerCase() && (
-                <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+              {commandTab === 'review' && (
+                commandDraft === null ? (
+                  <p className="settings-description">{t('reviewFollowingNote')}</p>
+                ) : (
+                  <>
+                    <Switch
+                      checked={commandDraft.review !== null}
+                      disabled={interactionLocked}
+                      label={t('reviewOverrideGlobal')}
+                      onChange={(_, data) => setCommandDraft((current) => current && ({
+                        ...current,
+                        review: data.checked
+                          ? structuredClone(current.review ?? config.commandReviewGlobal)
+                          : null,
+                      }))}
+                    />
+                    {commandDraft.review === null ? (
+                      <p className="settings-description">{t('reviewFollowingGlobal')}</p>
+                    ) : (
+                      <CommandReviewEditor
+                        value={commandDraft.review}
+                        disabled={interactionLocked}
+                        modelConfigs={config.modelConfigs}
+                        sessionModel={effectiveModelConfig}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        onChange={(next) => setCommandDraft((current) => current && ({ ...current, review: next }))}
+                      />
+                    )}
+                  </>
+                )
               )}
-              <Switch
-                checked={commandDraft.manualConfirmationEnabled}
-                disabled={interactionLocked || !commandDraft.enabled}
-                label={t('commandManualConfirmation')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, manualConfirmationEnabled: data.checked }))}
-              />
-              <p className="settings-description">{t('commandRuleInterceptionNote')}</p>
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -3673,8 +4064,126 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={interactionLocked || saving || !isValidCommandExecutionDraft()}
+                disabled={interactionLocked || saving || !isValidCommandExecutionDraft(commandDraft)}
                 onClick={() => void saveCommandExecutionSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={projectCommandDialogOpen} onOpenChange={(_, data) => setProjectCommandDialogOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('projectCommandSettings')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={projectCommandTab}
+                onTabSelect={(_, data) => setProjectCommandTab(data.value as typeof projectCommandTab)}
+              >
+                <Tab value="execution">{t('commandTabExecution')}</Tab>
+                <Tab value="review">{t('commandTabReview')}</Tab>
+              </TabList>
+              {projectCommandTab === 'execution' && (
+                <>
+                  <Switch
+                    checked={projectCommandDraft !== null}
+                    disabled={interactionLocked}
+                    label={t('commandOverrideDefault')}
+                    onChange={(_, data) => setProjectCommandDraft(data.checked
+                      ? { ...defaultCommandExecutionConfig, review: structuredClone(config.commandReviewGlobal) }
+                      : null)}
+                  />
+                  {projectCommandDraft === null ? (
+                    <p className="settings-description">{t('commandFollowingDefault')}</p>
+                  ) : (
+                    <>
+                      <Switch
+                        checked={projectCommandDraft.enabled}
+                        disabled={interactionLocked}
+                        label={t('commandExecutionEnabled')}
+                        onChange={(_, data) => setProjectCommandDraft((current) => current && { ...current, enabled: data.checked })}
+                      />
+                      <p className="settings-description">{t('commandExecutionDescription')}</p>
+                      <Field label={t('commandInterpreter')}>
+                        <Select
+                          disabled={interactionLocked || !projectCommandDraft.enabled}
+                          value={projectCommandDraft.interpreter}
+                          onChange={(_, data) => setProjectCommandDraft((current) => current && ({
+                            ...current,
+                            interpreter: data.value as CommandExecutionConfig['interpreter'],
+                          }))}
+                        >
+                          <option value="bash">bash</option>
+                          <option value="pwsh7">pwsh 7</option>
+                          <option value="pwsh51">pwsh 5.1</option>
+                        </Select>
+                      </Field>
+                      <Field label={t('commandEnvironment')}>
+                        <Select
+                          disabled={interactionLocked || !projectCommandDraft.enabled}
+                          value={projectCommandDraft.environment}
+                          onChange={(_, data) => setProjectCommandDraft((current) => current && ({
+                            ...current,
+                            environment: data.value as CommandExecutionConfig['environment'],
+                          }))}
+                        >
+                          <option value="bare">{t('commandEnvBare')}</option>
+                          <option value="wsl2">wsl2</option>
+                          <option value="docker">docker</option>
+                          <option value="windows-sandbox">Windows Sandbox</option>
+                        </Select>
+                      </Field>
+                      {!commandExecutionSupported(projectCommandDraft.interpreter, projectCommandDraft.environment) && (
+                        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+              {projectCommandTab === 'review' && (
+                projectCommandDraft === null ? (
+                  <p className="settings-description">{t('reviewFollowingNote')}</p>
+                ) : (
+                  <>
+                    <Switch
+                      checked={projectCommandDraft.review !== null}
+                      disabled={interactionLocked}
+                      label={t('reviewOverrideGlobal')}
+                      onChange={(_, data) => setProjectCommandDraft((current) => current && ({
+                        ...current,
+                        review: data.checked
+                          ? structuredClone(current.review ?? config.commandReviewGlobal)
+                          : null,
+                      }))}
+                    />
+                    {projectCommandDraft.review === null ? (
+                      <p className="settings-description">{t('reviewFollowingGlobal')}</p>
+                    ) : (
+                      <CommandReviewEditor
+                        value={projectCommandDraft.review}
+                        disabled={interactionLocked}
+                        modelConfigs={config.modelConfigs}
+                        sessionModel={effectiveModelConfig}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        onChange={(next) => setProjectCommandDraft((current) => current && ({ ...current, review: next }))}
+                      />
+                    )}
+                  </>
+                )
+              )}
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setProjectCommandDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !isValidCommandExecutionDraft(projectCommandDraft)}
+                onClick={() => void saveProjectCommandSettings()}
               >
                 {saving ? t('saving') : t('save')}
               </Button>

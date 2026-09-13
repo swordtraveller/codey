@@ -8,6 +8,7 @@ import { createModelConfigSnapshot, resolveModelConfig } from '../src/main/model
 import {
   defaultAgentLimitsConfig,
   defaultCommandExecutionConfig,
+  defaultCommandReviewConfig,
   defaultContextManagementConfig,
   type AppConfig,
   type ContextManagementConfig,
@@ -42,6 +43,7 @@ const config: AppConfig = {
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
   performanceTracingEnabled: false,
+  commandReviewGlobal: { ...defaultCommandReviewConfig, contentRules: [] },
 }
 const project: Project = {
   id: 'project',

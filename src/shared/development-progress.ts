@@ -157,5 +157,26 @@ export function applyDevelopmentProgressUpdate(
       })
       return changed ? { ...state, timeline } : state
     }
+    case 'update-tool-review': {
+      let changed = false
+      const timeline = state.timeline.map((item) => {
+        if (
+          item.type !== 'block' ||
+          item.block.type !== 'function_call' ||
+          item.block.id !== update.toolCallId
+        ) {
+          return item
+        }
+        changed = true
+        return {
+          type: 'block' as const,
+          block: {
+            ...item.block,
+            review: [...(item.block.review ?? []), update.step],
+          },
+        }
+      })
+      return changed ? { ...state, timeline } : state
+    }
   }
 }

@@ -201,11 +201,15 @@ function normalizeStoredAgentLimits(
 
 function normalizeStoredCommandExecution(
   value: Partial<CommandExecutionConfig> | null | undefined,
-): CommandExecutionConfig {
+): CommandExecutionConfig | null {
+  // null = inherit the upper layer (project for conversations, global for
+  // projects). Invalid stored configs fall back to inherit rather than a
+  // materialized default so a bad write never freezes stale settings.
+  if (value === null || value === undefined) return null
   const normalized = normalizeCommandExecutionConfig(value)
   return isValidCommandExecutionConfig(normalized)
     ? normalized
-    : { ...defaultCommandExecutionConfig }
+    : null
 }
 
 function validateOverride(contextConfig: ContextManagementConfig | null): ContextManagementConfig | null {
@@ -231,9 +235,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     modelConfigId: value.modelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
-    commandExecution: value.commandExecution === null
-      ? { ...defaultCommandExecutionConfig }
-      : normalizeStoredCommandExecution(value.commandExecution),
+    commandExecution: normalizeStoredCommandExecution(value.commandExecution),
     unlockedToolsets: Array.isArray(value.unlockedToolsets)
       ? [...new Set(value.unlockedToolsets.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== ''))]
       : [],
@@ -256,9 +258,7 @@ async function normalizeProjectMetadata(
     archived: value.archived === true,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
-    commandExecutionDefault: value.commandExecutionDefault === null || value.commandExecutionDefault === undefined
-      ? { ...defaultCommandExecutionConfig }
-      : normalizeStoredCommandExecution(value.commandExecutionDefault),
+    commandExecutionDefault: normalizeStoredCommandExecution(value.commandExecutionDefault),
     folders,
     conversations,
     pythonEnvironmentFolderId: configuredFolder
@@ -457,7 +457,8 @@ function createConversationRecord(index: number): Conversation {
     modelConfigId: null,
     contextConfigOverride: null,
     agentLimits: { ...defaultAgentLimitsConfig },
-    commandExecution: { ...defaultCommandExecutionConfig },
+    // null = inherit the project default (and, through it, the global review).
+    commandExecution: null,
     messages: [],
     agentMessages: [],
   }
@@ -512,7 +513,8 @@ export function createProject(name: string, defaultModelConfigId: string | null 
       archived: false,
       defaultModelConfigId,
       contextConfigOverride: null,
-      commandExecutionDefault: { ...defaultCommandExecutionConfig },
+      // null = inherit the built-in matrix defaults plus the global review.
+      commandExecutionDefault: null,
       folders: [],
       pythonEnvironmentFolderId: null,
       conversations: [createConversationRecord(1)],
@@ -631,10 +633,12 @@ export function setConversationAgentLimits(projectId: string, conversationId: st
   })
 }
 
-export function setConversationCommandExecution(projectId: string, conversationId: string, commandExecution: CommandExecutionConfig): Promise<Project> {
+export function setConversationCommandExecution(projectId: string, conversationId: string, commandExecution: CommandExecutionConfig | null): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
-    const normalized = normalizeCommandExecutionConfig(commandExecution)
-    if (!isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const normalized = commandExecution === null
+      ? null
+      : normalizeCommandExecutionConfig(commandExecution)
+    if (normalized !== null && !isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     conversation.commandExecution = normalized
@@ -658,10 +662,12 @@ export function unlockConversationToolset(projectId: string, conversationId: str
   })
 }
 
-export function setProjectCommandExecutionDefault(projectId: string, commandExecution: CommandExecutionConfig): Promise<Project> {
+export function setProjectCommandExecutionDefault(projectId: string, commandExecution: CommandExecutionConfig | null): Promise<Project> {
   return serializeWrite(projectWriteScope(projectId), async () => {
-    const normalized = normalizeCommandExecutionConfig(commandExecution)
-    if (!isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const normalized = commandExecution === null
+      ? null
+      : normalizeCommandExecutionConfig(commandExecution)
+    if (normalized !== null && !isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
     const project = await findProject(projectId)
     project.commandExecutionDefault = normalized
     await persistProjectMetadata(project)
