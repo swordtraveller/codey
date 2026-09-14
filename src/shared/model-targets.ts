@@ -26,7 +26,7 @@ export function flattenModelLink(
   if (!provider || !definition) return undefined
   return {
     id: link.id,
-    name: link.name || definition.name || definition.modelName,
+    name: link.name || definition.modelName,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     modelName: definition.modelName,
@@ -67,7 +67,7 @@ function chainMember(source: ModelTargetSource, link: ModelLink): ModelChainMemb
   if (!provider || !definition) return undefined
   return {
     modelId: link.id,
-    label: link.name || definition.name || definition.modelName,
+    label: link.name || definition.modelName,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     modelName: definition.modelName,

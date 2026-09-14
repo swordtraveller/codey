@@ -51,7 +51,6 @@ export const defaultProviderConfig: ProviderConfig = {
  *  capabilities. Shared across providers — a Model combines it with one. */
 export type ModelDefinition = {
   id: string
-  name: string
   modelName: string
   modelMaxContext: number
   modelMaxOutputTokens?: number
@@ -63,7 +62,6 @@ export type ModelDefinition = {
 
 export const defaultModelDefinition: ModelDefinition = {
   id: '',
-  name: '',
   modelName: '',
   modelMaxContext: 128_000,
   supportsImageInput: false,

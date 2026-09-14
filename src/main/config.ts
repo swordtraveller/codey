@@ -126,7 +126,6 @@ export function migrateLegacyModel(
   }
   layers.modelDefinitions.push({
     id: randomUUID(),
-    name: legacy.name || legacy.modelName,
     modelName: legacy.modelName,
     modelMaxContext: legacy.modelMaxContext,
     modelMaxOutputTokens: legacy.modelMaxOutputTokens,
@@ -156,7 +155,6 @@ export function normalizeModelDefinition(value: Partial<ModelDefinition> | null 
   const maxContext = Math.floor(Number(value?.modelMaxContext))
   return {
     id: typeof value?.id === 'string' && value.id.trim() ? value.id.trim() : randomUUID(),
-    name: (value?.name ?? '').trim(),
     modelName: (value?.modelName ?? '').trim(),
     modelMaxContext: Number.isFinite(maxContext) && maxContext >= 1_000 ? maxContext : 128_000,
     modelMaxOutputTokens: toOptionalTokenCount(value?.modelMaxOutputTokens),
@@ -206,7 +204,6 @@ export function isValidProviderConfig(provider: ProviderConfig): boolean {
 export function isValidModelDefinition(definition: ModelDefinition): boolean {
   return Boolean(
     definition.id &&
-    definition.name &&
     definition.modelName &&
     Number.isInteger(definition.modelMaxContext) &&
     definition.modelMaxContext >= 1_000 &&

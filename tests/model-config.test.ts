@@ -43,9 +43,9 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     { id: 'provider-b', name: 'Provider B', baseUrl: 'https://b.example.com/v1', apiKey: 'key-b' },
   ]
   const modelDefinitions = overrides.modelDefinitions ?? ([
-    { id: 'def-app', name: 'app', modelName: 'app-model', modelMaxContext: 128_000, supportsImageInput: true, supportsPdfInput: false, supportsVideoInput: false, supportsAudioInput: false },
-    { id: 'def-project', name: 'project', modelName: 'project-model', modelMaxContext: 64_000, supportsImageInput: false, supportsPdfInput: false, supportsVideoInput: false, supportsAudioInput: false },
-    { id: 'def-conversation', name: 'conversation', modelName: 'conversation-model', modelMaxContext: 200_000, modelMaxOutputTokens: 8_192, supportsImageInput: true, supportsPdfInput: true, supportsVideoInput: false, supportsAudioInput: false },
+    { id: 'def-app', modelName: 'app-model', modelMaxContext: 128_000, supportsImageInput: true, supportsPdfInput: false, supportsVideoInput: false, supportsAudioInput: false },
+    { id: 'def-project', modelName: 'project-model', modelMaxContext: 64_000, supportsImageInput: false, supportsPdfInput: false, supportsVideoInput: false, supportsAudioInput: false },
+    { id: 'def-conversation', modelName: 'conversation-model', modelMaxContext: 200_000, modelMaxOutputTokens: 8_192, supportsImageInput: true, supportsPdfInput: true, supportsVideoInput: false, supportsAudioInput: false },
   ] as ModelDefinition[])
   const models = overrides.models ?? [
     { id: 'app', name: 'app', providerId: 'provider-a', definitionId: 'def-app' },
@@ -180,8 +180,8 @@ describe('configuration resolution', () => {
 describe('group envelope', () => {
   it('takes the weakest member: min context, min defined output, modality intersection', () => {
     const envelope = groupEnvelope([
-      { id: 'a', name: 'a', modelName: 'a', modelMaxContext: 128_000, modelMaxOutputTokens: 16_384, supportsImageInput: true, supportsPdfInput: true },
-      { id: 'b', name: 'b', modelName: 'b', modelMaxContext: 64_000, modelMaxOutputTokens: 4_096, supportsImageInput: true },
+      { id: 'a', modelName: 'a', modelMaxContext: 128_000, modelMaxOutputTokens: 16_384, supportsImageInput: true, supportsPdfInput: true },
+      { id: 'b', modelName: 'b', modelMaxContext: 64_000, modelMaxOutputTokens: 4_096, supportsImageInput: true },
     ])
     expect(envelope.modelMaxContext).toBe(64_000)
     expect(envelope.modelMaxOutputTokens).toBe(4_096)
@@ -191,8 +191,8 @@ describe('group envelope', () => {
 
   it('treats an undefined output limit as unconstrained', () => {
     const envelope = groupEnvelope([
-      { id: 'a', name: 'a', modelName: 'a', modelMaxContext: 128_000, modelMaxOutputTokens: 4_096 },
-      { id: 'b', name: 'b', modelName: 'b', modelMaxContext: 64_000 },
+      { id: 'a', modelName: 'a', modelMaxContext: 128_000, modelMaxOutputTokens: 4_096 },
+      { id: 'b', modelName: 'b', modelMaxContext: 64_000 },
     ])
     expect(envelope.modelMaxOutputTokens).toBeUndefined()
     expect(envelope.modelMaxContext).toBe(64_000)

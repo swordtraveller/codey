@@ -2626,7 +2626,7 @@ export function App(): React.JSX.Element {
       showToast(t('definitionInUse'), 'error')
       return
     }
-    if (!window.confirm(t('deleteDefinitionConfirm', { name: definition.name || definition.modelName }))) return
+    if (!window.confirm(t('deleteDefinitionConfirm', { name: definition.modelName }))) return
     setConfigDraft((current) => ({
       ...current,
       modelDefinitions: current.modelDefinitions.filter((entry) => entry.id !== definition.id),
@@ -2652,7 +2652,7 @@ export function App(): React.JSX.Element {
       id: crypto.randomUUID(),
       providerId: configDraft.providers[0]!.id,
       definitionId: configDraft.modelDefinitions[0]!.id,
-      name: configDraft.modelDefinitions[0]!.name || configDraft.modelDefinitions[0]!.modelName,
+      name: configDraft.modelDefinitions[0]!.modelName,
     }
     setConfigDraft((current) => ({
       ...current,
@@ -3120,7 +3120,6 @@ export function App(): React.JSX.Element {
     if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
     if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
     if (configDraft.modelDefinitions.some((definition) =>
-      !definition.name.trim() ||
       !definition.modelName.trim() ||
       definition.modelMaxContext < 1_000 ||
       (definition.modelMaxOutputTokens !== undefined &&
@@ -3781,7 +3780,7 @@ export function App(): React.JSX.Element {
                   >
                     {configDraft.modelDefinitions.map((definition) => (
                       <option key={definition.id} value={definition.id}>
-                        {definition.name || definition.modelName || t('unnamedModel')}
+                        {definition.modelName || t('unnamedModel')}
                       </option>
                     ))}
                   </Select>
@@ -3797,12 +3796,6 @@ export function App(): React.JSX.Element {
                     {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
                   </Button>
                 </div>
-                <Field label={t('modelConfigName')} required>
-                  <Input
-                    value={selectedDefinitionDraft?.name ?? ''}
-                    onChange={(_, data) => updateSelectedDefinition({ name: data.value })}
-                  />
-                </Field>
                 <Field label={t('modelName')} required>
                   <Input
                     value={selectedDefinitionDraft?.modelName ?? ''}
@@ -3908,7 +3901,7 @@ export function App(): React.JSX.Element {
                   >
                     {configDraft.modelDefinitions.map((definition) => (
                       <option key={definition.id} value={definition.id}>
-                        {definition.name || definition.modelName || t('unnamedModel')}
+                        {definition.modelName || t('unnamedModel')}
                       </option>
                     ))}
                   </Select>
