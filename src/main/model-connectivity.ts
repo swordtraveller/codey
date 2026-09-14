@@ -30,3 +30,30 @@ export async function testModelConnectivity(model: ModelConfig): Promise<ModelCo
     return { status: 'endpoint-error', detail: 'unparseable /models response' }
   }
 }
+
+/** Provider-level probe: verifies the endpoint and credentials without
+ *  checking for a specific model. */
+export async function testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult> {
+  const base = provider.baseUrl.replace(/\/+$/, '')
+  let response: Response
+  try {
+    response = await fetch(`${base}/models`, {
+      headers: { authorization: `Bearer ${provider.apiKey}` },
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch (error) {
+    return { status: 'network-error', detail: error instanceof Error ? error.message : String(error) }
+  }
+  if (response.status === 401 || response.status === 403) {
+    return { status: 'auth-error', detail: `HTTP ${response.status}` }
+  }
+  if (!response.ok) {
+    return { status: 'endpoint-error', detail: `HTTP ${response.status}` }
+  }
+  try {
+    const payload = await response.json() as { data?: Array<{ id?: string }> }
+    return { status: 'ok', models: (payload.data ?? []).length }
+  } catch {
+    return { status: 'endpoint-error', detail: 'unparseable /models response' }
+  }
+}

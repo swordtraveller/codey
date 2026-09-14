@@ -2041,3 +2041,54 @@ h1 {
   background: var(--colorNeutralBackground3, #eee);
   white-space: nowrap;
 }
+
+.settings-section-title {
+  margin: 18px 0 6px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--colorNeutralStroke2, #ddd);
+  padding-bottom: 4px;
+}
+
+.layer-config-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.layer-config-toolbar select {
+  flex: 1;
+  min-width: 180px;
+}
+
+.group-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-member-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-member-index {
+  min-width: 18px;
+  text-align: right;
+  color: #707070;
+}
+
+.group-member-name {
+  flex: 1;
+}
+
+.model-group-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--colorNeutralBackground3, #eee);
+}

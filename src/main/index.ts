@@ -72,9 +72,9 @@ import { BridgeHandoverService } from './bridge'
 import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
-import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
+import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveModelById } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
-import { testModelConnectivity } from './model-connectivity'
+import { testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
 import { buildRunCommandTool, createAgentTools } from './tools'
 import {
@@ -259,7 +259,7 @@ async function runDebugOperation<T>(
 async function validateModelConfigId(modelConfigId: string | null): Promise<void> {
   if (!modelConfigId) return
   const config = await readConfig()
-  if (!config.modelConfigs.some((model) => model.id === modelConfigId)) {
+  if (!isValidModelTargetId(config, modelConfigId)) {
     throw new Error('Model configuration not found')
   }
 }
@@ -275,7 +275,7 @@ async function validateCommandExecution(config: CommandExecutionConfig): Promise
     const { auditModelConfigId } = config.review.reviewers
     if (!auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
     const appConfig = await readConfig()
-    const auditModel = appConfig.modelConfigs.find((model) => model.id === auditModelConfigId)
+    const auditModel = resolveModelById(appConfig, auditModelConfigId)
     if (!auditModel) throw new Error('The audit model configuration was not found')
   }
 }
@@ -620,7 +620,7 @@ async function developProject(
   if (!conversation) return { project, writtenFiles: [], error: 'Conversation not found' }
 
   const appConfig = await readConfig()
-  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) {
     return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
   }
@@ -654,7 +654,7 @@ async function developProject(
         signal,
         sessionModelName: modelConfig.modelName,
         ruleLayers,
-        resolveAuditModel: async (configId) => appConfig.modelConfigs.find((model) => model.id === configId),
+        resolveAuditModel: async (configId) => resolveModelById(appConfig, configId),
         requestConfirmation: (request) => requestCommandApproval(request, { projectId, conversationId }),
         recordDecision: (entry) => appendCommandReviewHistory({ ...entry, projectId, conversationId }),
       }
@@ -971,7 +971,7 @@ async function initializeContextDebugContext(
   if (getConversationState(projectId, conversationId) !== 'idle') return
   if (hasContextDebugSnapshot(projectId, conversationId)) return
 
-  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) return
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
@@ -1126,6 +1126,7 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
   ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
+  ipcMain.handle('models:test-provider', (_event, provider: { baseUrl: string; apiKey: string }) => testProviderConnectivity(provider))
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))

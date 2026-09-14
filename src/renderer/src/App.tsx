@@ -58,7 +58,10 @@ import {
   defaultCommandExecutionConfig,
   defaultCommandReviewConfig,
   defaultContextManagementConfig,
-  defaultModelConfig,
+  defaultModelDefinition,
+  defaultModelLink,
+  defaultProviderConfig,
+  modelGroupDefaultRetries,
   commandExecutionSupported,
   deriveContextBudgets,
   maximumAgentLimit,
@@ -68,12 +71,18 @@ import {
   type CommandReviewConfig,
   type CommandReviewRule,
   type ModelConfig,
+  type ModelDefinition,
+  type RuntimeModelConfig,
+  type ModelGroupConfig,
+  type ModelLink,
   type Project,
+  type ProviderConfig,
   type PromptSnapshot,
   type ToolHelpSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
+import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
 const markdownPlugins = [remarkGfm]
@@ -1271,9 +1280,9 @@ function ContextSettingsFields({
   disabled = false,
   modelDisabled,
   showCustomStrategy = false,
-  modelConfigs,
+  modelTargets,
+  referenceModel,
   activeModelConfigId,
-  fallbackModelId,
   emptyModelOptionLabel,
   onModelConfigChange,
   onChange,
@@ -1282,18 +1291,17 @@ function ContextSettingsFields({
   disabled?: boolean
   modelDisabled?: boolean
   showCustomStrategy?: boolean
-  modelConfigs?: ModelConfig[]
+  /** Selectable targets: single models and model groups. */
+  modelTargets?: Array<{ id: string; label: string }>
+  /** Resolved effective target used for budget derivation. */
+  referenceModel?: RuntimeModelConfig
   activeModelConfigId?: string | null
-  fallbackModelId?: string | null
   emptyModelOptionLabel?: string
   onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
-  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ??
-    modelConfigs?.find((model) => model.id === fallbackModelId) ??
-    modelConfigs?.[0]
 
   function setStrategyMode(mode: ContextStrategyMode): void {
     if (mode === 'custom') {
@@ -1394,7 +1402,7 @@ function ContextSettingsFields({
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
             />
           </Field>
-          {modelConfigs !== undefined && modelConfigs.length > 0 && (
+          {modelTargets !== undefined && modelTargets.length > 0 && (
             <Field label={t('modelConfiguration')}>
               <Select
                 disabled={modelDisabled ?? disabled}
@@ -1402,9 +1410,9 @@ function ContextSettingsFields({
                 onChange={(_, data) => onModelConfigChange?.(data.value)}
               >
                 {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
-                {modelConfigs.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name || model.modelName || t('unnamedModel')}
+                {modelTargets.map((target) => (
+                  <option key={target.id} value={target.id}>
+                    {target.label}
                   </option>
                 ))}
               </Select>
@@ -1754,6 +1762,10 @@ export function App(): React.JSX.Element {
   const [activeConversationId, setActiveConversationId] = useState('')
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
+  const [selectedProviderId, setSelectedProviderId] = useState('')
+  const [selectedDefinitionId, setSelectedDefinitionId] = useState('')
+  const [selectedLinkId, setSelectedLinkId] = useState('')
+  const [selectedGroupId, setSelectedGroupId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
   const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
@@ -1835,7 +1847,14 @@ export function App(): React.JSX.Element {
   )
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
-  const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
+  const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
+  /** Single models flattened (audit-model pickers list models only, no groups). */
+  const flatModelConfigs = config.models
+    .map((model) => flattenModelLink(config, model))
+    .filter((model): model is ModelConfig => model !== undefined)
+  const flatDraftModelConfigs = configDraft.models
+    .map((model) => flattenModelLink(configDraft, model))
+    .filter((model): model is ModelConfig => model !== undefined)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
   const maxInputTokensError = effectiveModelConfig &&
@@ -2063,11 +2082,28 @@ export function App(): React.JSX.Element {
   }
 
   function createSettingsDraft(): typeof defaultAppConfig {
-    if (config.modelConfigs.length > 0) {
+    if (config.providers.length > 0 && config.modelDefinitions.length > 0 && config.models.length > 0) {
       return config
     }
-    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
-    return { ...config, modelConfigs: [model], activeModelConfigId: model.id }
+    if (config.providers.length > 0 || config.modelDefinitions.length > 0 || config.models.length > 0) {
+      return config
+    }
+    // Seed one empty provider → definition → model chain on first run.
+    const provider = { ...defaultProviderConfig, id: crypto.randomUUID() }
+    const definition = { ...defaultModelDefinition, id: crypto.randomUUID() }
+    const link: ModelLink = {
+      ...defaultModelLink,
+      id: crypto.randomUUID(),
+      providerId: provider.id,
+      definitionId: definition.id,
+    }
+    return {
+      ...config,
+      providers: [provider],
+      modelDefinitions: [definition],
+      models: [link],
+      activeModelConfigId: link.id,
+    }
   }
 
   function openHelp(): void {
@@ -2537,54 +2573,223 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function updateSelectedModel(patch: Partial<ModelConfig>): void {
-    const selectedId = configDraft.activeModelConfigId
-    if (!selectedId) {
+  // ---- Model settings: four-layer CRUD (providers / definitions / links / groups) ----
+
+  function updateSelectedProvider(patch: Partial<ProviderConfig>): void {
+    const selectedId = selectedProviderDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      providers: current.providers.map((provider) => provider.id === selectedId ? { ...provider, ...patch } : provider),
+    }))
+  }
+
+  function addProviderDraft(): void {
+    const provider = { ...defaultProviderConfig, id: crypto.randomUUID() }
+    setConfigDraft((current) => ({ ...current, providers: [...current.providers, provider] }))
+    setSelectedProviderId(provider.id)
+  }
+
+  function deleteSelectedProviderDraft(): void {
+    const provider = selectedProviderDraft
+    if (!provider) return
+    if (configDraft.models.some((model) => model.providerId === provider.id)) {
+      showToast(t('providerInUse'), 'error')
       return
+    }
+    if (!window.confirm(t('deleteProviderConfirm', { name: provider.name || provider.baseUrl }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      providers: current.providers.filter((entry) => entry.id !== provider.id),
+    }))
+  }
+
+  function updateSelectedDefinition(patch: Partial<ModelDefinition>): void {
+    const selectedId = selectedDefinitionDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelDefinitions: current.modelDefinitions.map((definition) => definition.id === selectedId ? { ...definition, ...patch } : definition),
+    }))
+  }
+
+  function addDefinitionDraft(): void {
+    const definition = { ...defaultModelDefinition, id: crypto.randomUUID() }
+    setConfigDraft((current) => ({ ...current, modelDefinitions: [...current.modelDefinitions, definition] }))
+    setSelectedDefinitionId(definition.id)
+  }
+
+  function deleteSelectedDefinitionDraft(): void {
+    const definition = selectedDefinitionDraft
+    if (!definition) return
+    if (configDraft.models.some((model) => model.definitionId === definition.id)) {
+      showToast(t('definitionInUse'), 'error')
+      return
+    }
+    if (!window.confirm(t('deleteDefinitionConfirm', { name: definition.name || definition.modelName }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelDefinitions: current.modelDefinitions.filter((entry) => entry.id !== definition.id),
+    }))
+  }
+
+  function updateSelectedLink(patch: Partial<ModelLink>): void {
+    const selectedId = selectedModelLinkDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      models: current.models.map((model) => model.id === selectedId ? { ...model, ...patch } : model),
+    }))
+  }
+
+  function addModelLinkDraft(): void {
+    if (configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0) {
+      showToast(t('modelLinkNeedsProviderAndDefinition'), 'error')
+      return
+    }
+    const link: ModelLink = {
+      ...defaultModelLink,
+      id: crypto.randomUUID(),
+      providerId: configDraft.providers[0]!.id,
+      definitionId: configDraft.modelDefinitions[0]!.id,
+      name: configDraft.modelDefinitions[0]!.name || configDraft.modelDefinitions[0]!.modelName,
     }
     setConfigDraft((current) => ({
       ...current,
-      modelConfigs: current.modelConfigs.map((model) =>
-        model.id === selectedId ? { ...model, ...patch } : model,
+      models: [...current.models, link],
+      activeModelConfigId: current.activeModelConfigId ?? link.id,
+    }))
+    setSelectedLinkId(link.id)
+  }
+
+  function deleteSelectedModelLinkDraft(): void {
+    const link = selectedModelLinkDraft
+    if (!link) return
+    if (!window.confirm(t('deleteModelConfigConfirm', { name: link.name }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      models: current.models.filter((entry) => entry.id !== link.id),
+      // Strip the link from every group and drop groups left empty.
+      modelGroups: current.modelGroups
+        .map((group) => ({ ...group, modelIds: group.modelIds.filter((id) => id !== link.id) }))
+        .filter((group) => group.modelIds.length > 0),
+      activeModelConfigId: current.activeModelConfigId === link.id
+        ? (current.models.find((entry) => entry.id !== link.id)?.id ?? null)
+        : current.activeModelConfigId,
+    }))
+  }
+
+  function updateSelectedGroup(patch: Partial<ModelGroupConfig>): void {
+    const selectedId = selectedGroupDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) => group.id === selectedId ? { ...group, ...patch } : group),
+    }))
+  }
+
+  function addGroupDraft(): void {
+    if (configDraft.models.length === 0) {
+      showToast(t('groupNeedsModel'), 'error')
+      return
+    }
+    const group: ModelGroupConfig = {
+      id: crypto.randomUUID(),
+      name: '',
+      modelIds: [configDraft.models[0]!.id],
+      retriesPerModel: modelGroupDefaultRetries,
+    }
+    setConfigDraft((current) => ({ ...current, modelGroups: [...current.modelGroups, group] }))
+    setSelectedGroupId(group.id)
+  }
+
+  function deleteSelectedGroupDraft(): void {
+    const group = selectedGroupDraft
+    if (!group) return
+    if (!window.confirm(t('deleteGroupConfirm', { name: group.name }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.filter((entry) => entry.id !== group.id),
+      activeModelConfigId: current.activeModelConfigId === group.id
+        ? (current.models[0]?.id ?? null)
+        : current.activeModelConfigId,
+    }))
+  }
+
+  function moveGroupMember(groupId: string, modelId: string, direction: -1 | 1): void {
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) => {
+        if (group.id !== groupId) return group
+        const index = group.modelIds.indexOf(modelId)
+        const target = index + direction
+        if (index < 0 || target < 0 || target >= group.modelIds.length) return group
+        const modelIds = [...group.modelIds]
+        modelIds.splice(target, 0, modelIds.splice(index, 1)[0]!)
+        return { ...group, modelIds }
+      }),
+    }))
+  }
+
+  function removeGroupMember(groupId: string, modelId: string): void {
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) =>
+        group.id === groupId ? { ...group, modelIds: group.modelIds.filter((id) => id !== modelId) } : group,
       ),
     }))
   }
 
-  function addModelConfig(): void {
-    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
+  function addGroupMember(groupId: string, modelId: string): void {
     setConfigDraft((current) => ({
       ...current,
-      modelConfigs: [...current.modelConfigs, model],
-      activeModelConfigId: model.id,
+      modelGroups: current.modelGroups.map((group) =>
+        group.id === groupId && !group.modelIds.includes(modelId)
+          ? { ...group, modelIds: [...group.modelIds, modelId] }
+          : group,
+      ),
     }))
   }
 
-  function duplicateSelectedModelConfig(): void {
-    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
-    if (!selected) {
-      return
-    }
-    const copy: ModelConfig = {
-      ...selected,
-      id: crypto.randomUUID(),
-      name: `${selected.name || selected.modelName || t('unnamedModel')} ${t('modelConfigCopySuffix')}`,
-    }
-    setConfigDraft((current) => ({
-      ...current,
-      modelConfigs: [...current.modelConfigs, copy],
-      activeModelConfigId: copy.id,
-    }))
-  }
-
-  async function testSelectedModelConnectivity(): Promise<void> {
-    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
-    if (!selected || connectivityBusy || !selected.baseUrl.trim() || !selected.modelName.trim()) {
-      return
-    }
+  async function testSelectedProviderConnectivity(): Promise<void> {
+    const provider = selectedProviderDraft
+    if (!provider || connectivityBusy || !provider.baseUrl.trim() || !provider.apiKey.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
     try {
-      const result = await window.codey.testModelConnectivity(selected)
+      const result = await window.codey.testProviderConnectivity({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+      if (result.status === 'ok') {
+        setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
+        return
+      }
+      if (result.status === 'network-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+        return
+      }
+      if (result.status === 'auth-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityAuthError') })
+        return
+      }
+      if (result.status === 'endpoint-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
+        return
+      }
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+    } catch {
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+    } finally {
+      setConnectivityBusy(false)
+    }
+  }
+
+  async function testSelectedModelConnectivity(): Promise<void> {
+    const link = selectedModelLinkDraft
+    const flat = link ? flattenModelLink(configDraft, link) : undefined
+    if (!flat || connectivityBusy || !flat.baseUrl.trim() || !flat.modelName.trim()) return
+    setConnectivityBusy(true)
+    setConnectivityStatus(null)
+    try {
+      const result = await window.codey.testModelConnectivity(flat)
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -2598,7 +2803,7 @@ export function App(): React.JSX.Element {
         return
       }
       if (result.status === 'model-not-found') {
-        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }) })
+        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: flat.modelName, available: result.available.slice(0, 5).join(', ') }) })
         return
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
@@ -2609,35 +2814,6 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function deleteSelectedModelConfig(): void {
-    const selectedId = configDraft.activeModelConfigId
-    if (!selectedId) {
-      return
-    }
-    const target = configDraft.modelConfigs.find((model) => model.id === selectedId)
-    if (!target) {
-      return
-    }
-    const label = target.name || target.modelName || t('unnamedModel')
-    if (!window.confirm(t('deleteModelConfigConfirm', { name: label }))) {
-      return
-    }
-    setConfigDraft((current) => {
-      const remaining = current.modelConfigs.filter((model) => model.id !== selectedId)
-      if (remaining.length === 0) {
-        const model = { ...defaultModelConfig, id: crypto.randomUUID() }
-        return { ...current, modelConfigs: [model], activeModelConfigId: model.id }
-      }
-      return {
-        ...current,
-        modelConfigs: remaining,
-        activeModelConfigId: remaining.some((model) => model.id === current.activeModelConfigId)
-          ? current.activeModelConfigId
-          : remaining[0].id,
-      }
-    })
-  }
-
   function showToast(message: string, tone: 'info' | 'error'): void {
     if (toastTimerRef.current !== undefined) window.clearTimeout(toastTimerRef.current)
     setToast({ message, tone })
@@ -2645,7 +2821,7 @@ export function App(): React.JSX.Element {
   }
 
   async function fetchModelCapabilitiesForSelected(): Promise<void> {
-    const modelName = selectedModel?.modelName.trim() ?? ''
+    const modelName = selectedDefinitionDraft?.modelName.trim() ?? ''
     if (!modelName || capabilitiesBusy) {
       return
     }
@@ -2653,7 +2829,7 @@ export function App(): React.JSX.Element {
     try {
       const result = await window.codey.fetchModelCapabilities(modelName)
       if (result.status === 'ok') {
-        updateSelectedModel({
+        updateSelectedDefinition({
           ...(result.maxContextTokens !== undefined ? { modelMaxContext: result.maxContextTokens } : {}),
           ...(result.maxOutputTokens !== undefined ? { modelMaxOutputTokens: result.maxOutputTokens } : {}),
           supportsImageInput: result.image,
@@ -2936,19 +3112,32 @@ export function App(): React.JSX.Element {
     : activeProject.folders.length === 0
       ? t('folderDescription')
       : t('conversationDescription')
-  const selectedModel = configDraft.modelConfigs.find(
-    (model) => model.id === configDraft.activeModelConfigId,
-  ) ?? configDraft.modelConfigs[0]
+  const selectedProviderDraft = configDraft.providers.find((provider) => provider.id === selectedProviderId) ?? configDraft.providers[0]
+  const selectedDefinitionDraft = configDraft.modelDefinitions.find((definition) => definition.id === selectedDefinitionId) ?? configDraft.modelDefinitions[0]
+  const selectedModelLinkDraft = configDraft.models.find((model) => model.id === selectedLinkId) ?? configDraft.models[0]
+  const selectedGroupDraft = configDraft.modelGroups.find((group) => group.id === selectedGroupId) ?? configDraft.modelGroups[0]
+  const invalidModelConfig = (() => {
+    if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
+    if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
+    if (configDraft.modelDefinitions.some((definition) =>
+      !definition.name.trim() ||
+      !definition.modelName.trim() ||
+      definition.modelMaxContext < 1_000 ||
+      (definition.modelMaxOutputTokens !== undefined &&
+        (!Number.isInteger(definition.modelMaxOutputTokens) || definition.modelMaxOutputTokens < 1)))) return true
+    const providerIds = new Set(configDraft.providers.map((provider) => provider.id))
+    const definitionIds = new Set(configDraft.modelDefinitions.map((definition) => definition.id))
+    const modelIds = new Set(configDraft.models.map((model) => model.id))
+    if (configDraft.models.some((model) => !model.name.trim() || !providerIds.has(model.providerId) || !definitionIds.has(model.definitionId))) return true
+    if (configDraft.modelGroups.some((group) =>
+      !group.name.trim() ||
+      group.modelIds.length === 0 ||
+      group.modelIds.some((id) => !modelIds.has(id)))) return true
+    const active = configDraft.activeModelConfigId
+    if (active && !modelIds.has(active) && !configDraft.modelGroups.some((group) => group.id === active)) return true
+    return false
+  })()
   const settingsDirty = configDraft !== config
-  const invalidModelConfig = configDraft.modelConfigs.length === 0 || configDraft.modelConfigs.some((model) =>
-    !model.name.trim() ||
-    !model.baseUrl.trim() ||
-    !model.apiKey.trim() ||
-    !model.modelName.trim() ||
-    model.modelMaxContext < 1_000 ||
-    (model.modelMaxOutputTokens !== undefined &&
-      (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
-  )
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
@@ -2979,9 +3168,10 @@ export function App(): React.JSX.Element {
                     <div className="project-menu-panel">
                       <label>
                         <span>{t('projectDefaultModel')}</span>
-                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.modelConfigs.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
+                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.models.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
                           <option value="">{t('applicationDefault')}</option>
-                          {config.modelConfigs.map((model) => <option key={model.id} value={model.id}>{model.name || model.modelName || t('unnamedModel')}</option>)}
+                          {config.models.map((model) => <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>)}
+                          {config.modelGroups.map((group) => <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>)}
                         </Select>
                       </label>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>{t('contextSettings')}</Button>
@@ -3052,13 +3242,15 @@ export function App(): React.JSX.Element {
               {activeConversation && <span>{activeConversation.title}</span>}
             </div>
             <div className="topbar-controls">
-              {activeConversation && config.modelConfigs.length > 0 ? (
+              {activeConversation && config.models.length > 0 ? (
                 <div className="topbar-row topbar-model-row">
                   <label className="topbar-field-label">
                     <span>{t('configuration')}:</span>
                     <span className="conversation-model-picker">
                       <span>
                         {effectiveModelConfig?.name || effectiveModelConfig?.modelName || t('notConfigured')}
+                        {config.modelGroups.some((group) => group.id === effectiveModelConfigId) &&
+                          <span className="model-group-badge">{t('modelGroupBadge')}</span>}
                       </span>
                       <select
                         aria-label={t('conversationModel')}
@@ -3067,9 +3259,14 @@ export function App(): React.JSX.Element {
                         onChange={(event) => void changeConversationModelConfig(event.target.value)}
                       >
                         <option value="">{t('followProjectDefault')}</option>
-                        {config.modelConfigs.map((model) => (
+                        {config.models.map((model) => (
                           <option key={model.id} value={model.id}>
-                            {model.name || model.modelName || t('unnamedModel')}
+                            {model.name || t('unnamedModel')}
+                          </option>
+                        ))}
+                        {config.modelGroups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
                           </option>
                         ))}
                       </select>
@@ -3493,35 +3690,25 @@ export function App(): React.JSX.Element {
               <section className="settings-group">
                 <div className="model-config-toolbar">
                   <Select
-                    aria-label={t('modelSettings')}
+                    aria-label={t('defaultModelTarget')}
                     value={configDraft.activeModelConfigId ?? ''}
                     onChange={(_, data) => setConfigDraft((current) => ({
                       ...current,
                       activeModelConfigId: data.value || null,
                     }))}
                   >
-                    {configDraft.modelConfigs.map((model) => (
+                    <option value="">{t('notConfigured')}</option>
+                    {configDraft.models.map((model) => (
                       <option key={model.id} value={model.id}>
-                        {model.name || model.modelName || t('unnamedModel')}
+                        {model.name || t('unnamedModel')}
+                      </option>
+                    ))}
+                    {configDraft.modelGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
                       </option>
                     ))}
                   </Select>
-                  <Button appearance="secondary" onClick={addModelConfig}>
-                    {t('addModelConfig')}
-                  </Button>
-                  <Button appearance="secondary" onClick={duplicateSelectedModelConfig}>
-                    {t('duplicateModelConfig')}
-                  </Button>
-                  <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
-                    {t('deleteModelConfig')}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedModel?.baseUrl.trim() || !selectedModel?.modelName.trim() || connectivityBusy}
-                    onClick={() => void testSelectedModelConnectivity()}
-                  >
-                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
-                  </Button>
                   <Button
                     appearance="primary"
                     disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || interactionLocked || saving}
@@ -3538,47 +3725,98 @@ export function App(): React.JSX.Element {
                     <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
                   )}
                 </p>
-                <Field label={t('modelConfigName')} required>
+
+                <h4 className="settings-section-title">{t('providersSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('providersSection')}
+                    value={selectedProviderDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedProviderId(data.value)}
+                  >
+                    {configDraft.providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name || provider.baseUrl || t('unnamedProvider')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addProviderDraft}>{t('addProvider')}</Button>
+                  <Button appearance="secondary" disabled={!selectedProviderDraft} onClick={deleteSelectedProviderDraft}>
+                    {t('deleteProvider')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedProviderDraft?.baseUrl.trim() || !selectedProviderDraft?.apiKey.trim() || connectivityBusy}
+                    onClick={() => void testSelectedProviderConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                </div>
+                <Field label={t('providerName')} required>
                   <Input
-                    value={selectedModel?.name ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ name: data.value })}
+                    value={selectedProviderDraft?.name ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ name: data.value })}
                   />
                 </Field>
                 <Field label={t('baseUrl')} required>
                   <Input
-                    value={selectedModel?.baseUrl ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ baseUrl: data.value })}
+                    value={selectedProviderDraft?.baseUrl ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ baseUrl: data.value })}
                     placeholder="https://api.example.com/v1"
                   />
                 </Field>
                 <Field label={t('apiKey')} required>
                   <Input
                     type="password"
-                    value={selectedModel?.apiKey ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ apiKey: data.value })}
+                    value={selectedProviderDraft?.apiKey ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ apiKey: data.value })}
+                  />
+                </Field>
+
+                <h4 className="settings-section-title">{t('definitionsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('definitionsSection')}
+                    value={selectedDefinitionDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedDefinitionId(data.value)}
+                  >
+                    {configDraft.modelDefinitions.map((definition) => (
+                      <option key={definition.id} value={definition.id}>
+                        {definition.name || definition.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addDefinitionDraft}>{t('addDefinition')}</Button>
+                  <Button appearance="secondary" disabled={!selectedDefinitionDraft} onClick={deleteSelectedDefinitionDraft}>
+                    {t('deleteDefinition')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedDefinitionDraft?.modelName.trim() || capabilitiesBusy}
+                    onClick={() => void fetchModelCapabilitiesForSelected()}
+                  >
+                    {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
+                  </Button>
+                </div>
+                <Field label={t('modelConfigName')} required>
+                  <Input
+                    value={selectedDefinitionDraft?.name ?? ''}
+                    onChange={(_, data) => updateSelectedDefinition({ name: data.value })}
                   />
                 </Field>
                 <Field label={t('modelName')} required>
                   <Input
-                    value={selectedModel?.modelName ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ modelName: data.value })}
+                    value={selectedDefinitionDraft?.modelName ?? ''}
+                    onChange={(_, data) => updateSelectedDefinition({ modelName: data.value })}
                     placeholder="model-name"
                   />
                 </Field>
-                <Button
-                  appearance="secondary"
-                  disabled={!selectedModel?.modelName.trim() || capabilitiesBusy}
-                  onClick={() => void fetchModelCapabilitiesForSelected()}
-                >
-                  {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
-                </Button>
                 <Field label={t('maximumContextTokens')} required>
                   <Input
                     min={1000}
                     step={1000}
                     type="number"
-                    value={String(selectedModel?.modelMaxContext ?? '')}
-                    onChange={(_, data) => updateSelectedModel({ modelMaxContext: Number(data.value) })}
+                    value={String(selectedDefinitionDraft?.modelMaxContext ?? '')}
+                    onChange={(_, data) => updateSelectedDefinition({ modelMaxContext: Number(data.value) })}
                   />
                 </Field>
                 <Field label={t('maximumOutputTokens')} hint={t('maximumOutputTokensHint')}>
@@ -3586,8 +3824,8 @@ export function App(): React.JSX.Element {
                     min={1}
                     step={1000}
                     type="number"
-                    value={selectedModel?.modelMaxOutputTokens === undefined ? '' : String(selectedModel.modelMaxOutputTokens)}
-                    onChange={(_, data) => updateSelectedModel({
+                    value={selectedDefinitionDraft?.modelMaxOutputTokens === undefined ? '' : String(selectedDefinitionDraft.modelMaxOutputTokens)}
+                    onChange={(_, data) => updateSelectedDefinition({
                       modelMaxOutputTokens: data.value === '' || !Number.isFinite(Number(data.value))
                         ? undefined
                         : Number(data.value),
@@ -3598,27 +3836,151 @@ export function App(): React.JSX.Element {
                   <p className="section-label">{t('multimodalCapabilities')}</p>
                   <div className="multimodal-switches">
                     <Switch
-                      checked={selectedModel?.supportsImageInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsImageInput ?? false}
                       label={t('modalityImage')}
-                      onChange={(_, data) => updateSelectedModel({ supportsImageInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsImageInput: data.checked })}
                     />
                     <Switch
-                      checked={selectedModel?.supportsPdfInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsPdfInput ?? false}
                       label={t('modalityPdf')}
-                      onChange={(_, data) => updateSelectedModel({ supportsPdfInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsPdfInput: data.checked })}
                     />
                     <Switch
-                      checked={selectedModel?.supportsVideoInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsVideoInput ?? false}
                       label={t('modalityVideo')}
-                      onChange={(_, data) => updateSelectedModel({ supportsVideoInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsVideoInput: data.checked })}
                     />
-                     <Switch
-                       checked={selectedModel?.supportsAudioInput ?? false}
-                       label={t('modalityAudio')}
-                       onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
-                     />
-                   </div>
-                 </div>
+                    <Switch
+                      checked={selectedDefinitionDraft?.supportsAudioInput ?? false}
+                      label={t('modalityAudio')}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsAudioInput: data.checked })}
+                    />
+                  </div>
+                </div>
+
+                <h4 className="settings-section-title">{t('modelsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('modelsSection')}
+                    value={selectedModelLinkDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedLinkId(data.value)}
+                  >
+                    {configDraft.models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addModelLinkDraft}>{t('addModelConfig')}</Button>
+                  <Button appearance="secondary" disabled={!selectedModelLinkDraft} onClick={deleteSelectedModelLinkDraft}>
+                    {t('deleteModelConfig')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedModelLinkDraft || !flattenModelLink(configDraft, selectedModelLinkDraft)?.modelName.trim() || connectivityBusy}
+                    onClick={() => void testSelectedModelConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                </div>
+                <Field label={t('modelConfigName')} required>
+                  <Input
+                    value={selectedModelLinkDraft?.name ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ name: data.value })}
+                  />
+                </Field>
+                <Field label={t('providerLabel')} required>
+                  <Select
+                    value={selectedModelLinkDraft?.providerId ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ providerId: data.value })}
+                  >
+                    {configDraft.providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name || provider.baseUrl || t('unnamedProvider')}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label={t('modelDefinitionLabel')} required>
+                  <Select
+                    value={selectedModelLinkDraft?.definitionId ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ definitionId: data.value })}
+                  >
+                    {configDraft.modelDefinitions.map((definition) => (
+                      <option key={definition.id} value={definition.id}>
+                        {definition.name || definition.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+
+                <h4 className="settings-section-title">{t('groupsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('groupsSection')}
+                    value={selectedGroupDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedGroupId(data.value)}
+                  >
+                    {configDraft.modelGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name || t('unnamedModelGroup')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addGroupDraft}>{t('addGroup')}</Button>
+                  <Button appearance="secondary" disabled={!selectedGroupDraft} onClick={deleteSelectedGroupDraft}>
+                    {t('deleteGroup')}
+                  </Button>
+                </div>
+                {selectedGroupDraft && (
+                  <>
+                    <Field label={t('groupName')} required>
+                      <Input
+                        value={selectedGroupDraft.name}
+                        onChange={(_, data) => updateSelectedGroup({ name: data.value })}
+                      />
+                    </Field>
+                    <Field label={t('retriesPerModel')} hint={t('retriesPerModelHint')}>
+                      <Input
+                        min={1}
+                        max={10}
+                        type="number"
+                        value={String(selectedGroupDraft.retriesPerModel)}
+                        onChange={(_, data) => updateSelectedGroup({
+                          retriesPerModel: Math.min(10, Math.max(1, Math.floor(Number(data.value) || 1))),
+                        })}
+                      />
+                    </Field>
+                    <p className="section-label">{t('groupMembers')}</p>
+                    <div className="group-member-list">
+                      {selectedGroupDraft.modelIds.map((modelId, index) => {
+                        const member = configDraft.models.find((model) => model.id === modelId)
+                        return (
+                          <div className="group-member-row" key={modelId}>
+                            <span className="group-member-index">{index + 1}</span>
+                            <span className="group-member-name">{member?.name || t('unnamedModel')}</span>
+                            <Button appearance="subtle" size="small" disabled={index === 0} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, -1)}>↑</Button>
+                            <Button appearance="subtle" size="small" disabled={index === selectedGroupDraft.modelIds.length - 1} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, 1)}>↓</Button>
+                            <Button appearance="subtle" size="small" onClick={() => removeGroupMember(selectedGroupDraft.id, modelId)}>{t('reviewRuleDelete')}</Button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <Field label={t('addGroupMember')}>
+                      <Select value="" onChange={(_, data) => data.value && addGroupMember(selectedGroupDraft.id, data.value)}>
+                        <option value="">{t('addGroupMemberPlaceholder')}</option>
+                        {configDraft.models
+                          .filter((model) => !selectedGroupDraft.modelIds.includes(model.id))
+                          .map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.name || t('unnamedModel')}
+                            </option>
+                          ))}
+                      </Select>
+                    </Field>
+                    <p className="settings-description">{t('groupEnvelopeNote')}</p>
+                  </>
+                )}
               </section>
               )}
               {settingsTab === 'language' && (
@@ -3688,7 +4050,7 @@ export function App(): React.JSX.Element {
                     <p className="settings-description">{t('globalCommandReviewDescription')}</p>
                     <CommandReviewEditor
                       value={configDraft.commandReviewGlobal}
-                      modelConfigs={configDraft.modelConfigs}
+                      modelConfigs={flatDraftModelConfigs}
                       onOpenSyntaxHelp={openCommandRulesHelp}
                       onChange={(next) => setConfigDraft((current) => ({ ...current, commandReviewGlobal: next }))}
                     />
@@ -4103,7 +4465,7 @@ export function App(): React.JSX.Element {
                       <CommandReviewEditor
                         value={commandDraft.review}
                         disabled={interactionLocked}
-                        modelConfigs={config.modelConfigs}
+                        modelConfigs={flatModelConfigs}
                         sessionModel={effectiveModelConfig}
                         onOpenSyntaxHelp={openCommandRulesHelp}
                         onChange={(next) => setCommandDraft((current) => current && ({ ...current, review: next }))}
@@ -4147,13 +4509,16 @@ export function App(): React.JSX.Element {
                 disabled={interactionLocked || !contextOverrideEnabled}
                 modelDisabled={interactionLocked}
                 showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
-                modelConfigs={config.modelConfigs}
+                modelTargets={[
+                  ...config.models.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                  ...config.modelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                ]}
+                referenceModel={resolveModelTarget(config, contextScope === 'conversation'
+                  ? (activeConversation?.modelConfigId ?? activeProject?.defaultModelConfigId ?? config.activeModelConfigId)
+                  : (projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? config.activeModelConfigId))}
                 activeModelConfigId={contextScope === 'conversation'
                   ? activeConversation?.modelConfigId ?? ''
                   : projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? ''}
-                fallbackModelId={contextScope === 'conversation'
-                  ? activeProject?.defaultModelConfigId ?? config.activeModelConfigId
-                  : config.activeModelConfigId}
                 emptyModelOptionLabel={t(contextScope === 'conversation' ? 'followProjectDefault' : 'applicationDefault')}
                 onModelConfigChange={(modelConfigId) => void changeContextModelConfig(modelConfigId)}
                 value={contextDraft}

@@ -50,6 +50,7 @@ declare global {
       saveConfig(config: AppConfig): Promise<AppConfig>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
+      testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>

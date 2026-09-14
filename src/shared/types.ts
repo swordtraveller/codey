@@ -32,6 +32,92 @@ export const defaultModelConfig: ModelConfig = {
   supportsAudioInput: false,
 }
 
+/** A model provider: an OpenAI-compatible endpoint plus credentials. */
+export type ProviderConfig = {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+}
+
+export const defaultProviderConfig: ProviderConfig = {
+  id: '',
+  name: '',
+  baseUrl: '',
+  apiKey: '',
+}
+
+/** A named model definition: API model name plus window and modality
+ *  capabilities. Shared across providers — a Model combines it with one. */
+export type ModelDefinition = {
+  id: string
+  name: string
+  modelName: string
+  modelMaxContext: number
+  modelMaxOutputTokens?: number
+  supportsImageInput?: boolean
+  supportsPdfInput?: boolean
+  supportsVideoInput?: boolean
+  supportsAudioInput?: boolean
+}
+
+export const defaultModelDefinition: ModelDefinition = {
+  id: '',
+  name: '',
+  modelName: '',
+  modelMaxContext: 128_000,
+  supportsImageInput: false,
+  supportsPdfInput: false,
+  supportsVideoInput: false,
+  supportsAudioInput: false,
+}
+
+/** A model = one provider + one model definition. The id is the stable
+ *  reference used by projects, conversations, and model groups. */
+export type ModelLink = {
+  id: string
+  name: string
+  providerId: string
+  definitionId: string
+}
+
+export const defaultModelLink: ModelLink = {
+  id: '',
+  name: '',
+  providerId: '',
+  definitionId: '',
+}
+
+/** Default attempts per chain member before failing over. */
+export const modelGroupDefaultRetries = 3
+export const modelGroupMinRetries = 1
+export const modelGroupMaxRetries = 10
+
+/** An ordered failover group of models. */
+export type ModelGroupConfig = {
+  id: string
+  name: string
+  modelIds: string[]
+  retriesPerModel: number
+}
+
+/** One executable member of a resolved target's failover chain. */
+export type ModelChainMember = {
+  modelId: string
+  label: string
+  baseUrl: string
+  apiKey: string
+  modelName: string
+}
+
+/** The flattened runtime config the whole pipeline keeps consuming: envelope
+ *  fields (weakest member for groups) plus the executable chain. baseUrl /
+ *  apiKey / modelName mirror the first member for logging compatibility. */
+export type RuntimeModelConfig = ModelConfig & {
+  chain: ModelChainMember[]
+  retriesPerModel: number
+}
+
 export type ModelCapabilitiesResult =
   | {
     status: 'ok'
@@ -255,7 +341,14 @@ export type CommandApprovalResponse = {
 }
 
 export type AppConfig = {
+  /** Legacy flat list — kept only for read-migration into the four-layer
+   *  structure below; always empty after migration. */
   modelConfigs: ModelConfig[]
+  providers: ProviderConfig[]
+  modelDefinitions: ModelDefinition[]
+  models: ModelLink[]
+  modelGroups: ModelGroupConfig[]
+  /** Global default target: a model id or a model group id. */
   activeModelConfigId: string | null
   contextManagement: ContextManagementConfig
   language: AppLanguage
@@ -270,6 +363,10 @@ export type AppConfig = {
 
 export const defaultAppConfig: AppConfig = {
   modelConfigs: [],
+  providers: [],
+  modelDefinitions: [],
+  models: [],
+  modelGroups: [],
   activeModelConfigId: null,
   contextManagement: defaultContextManagementConfig,
   language: 'system',

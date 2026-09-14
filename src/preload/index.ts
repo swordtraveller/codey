@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
     testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
       ipcRenderer.invoke('models:test-connectivity', model),
+    testProviderConnectivity: (provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-provider', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),

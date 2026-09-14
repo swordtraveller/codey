@@ -11,6 +11,7 @@ import type {
   DevelopmentTimelineItem,
   ModelConfig,
   Project,
+  RuntimeModelConfig,
   ShellDetectionResult,
 } from '../shared/types'
 import { manageContext, type ContextMessage, type ContextResult } from './context'
@@ -177,9 +178,8 @@ function toMessageBlocks(message: ResponseMessage): AssistantMessageBlock[] {
 }
 
 const modelRequestTimeoutMs = 180_000
-const maxNetworkAttempts = 2
 
-type CompletionError = Error & { partial?: ResponseMessage }
+type CompletionError = Error & { partial?: ResponseMessage; status?: number }
 
 function abortError(): Error {
   const error = new Error('Operation stopped')
@@ -370,7 +370,9 @@ async function requestCompletionAttempt(
       const message =
         data.error?.message || body.slice(0, 200) || 'Request failed with status ' + response.status
       log.error('model.response.failed', { status: response.status, message })
-      throw new Error(message)
+      const failure = new Error(message) as CompletionError
+      failure.status = response.status
+      throw failure
     }
 
     if (!response.headers.get('content-type')?.includes('text/event-stream')) {
@@ -472,12 +474,25 @@ async function requestCompletionAttempt(
     if (publishTimer) {
       clearTimeout(publishTimer)
     }
-    throw createCompletionError(error, currentMessage())
+    const failure = createCompletionError(error, currentMessage())
+    failure.status = (error as CompletionError).status
+    throw failure
   }
 }
 
-async function requestCompletion(
-  config: ModelConfig,
+/** 4xx failures other than 429 are definitive for a member: retrying the
+ *  same credentials/model is pointless, so the chain fails over at once. */
+function isDefinitiveStatus(status: number | undefined): boolean {
+  if (status === undefined || status === 429) return false
+  return status >= 400 && status < 500
+}
+
+function isRetryableStatus(status: number | undefined): boolean {
+  return status !== undefined && (status === 429 || status >= 500)
+}
+
+export async function requestCompletion(
+  target: RuntimeModelConfig,
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
@@ -486,70 +501,113 @@ async function requestCompletion(
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
+  let lastFailure: CompletionError | undefined
+  const exhaustedMembers: string[] = []
 
-  for (let attempt = 1; attempt <= maxNetworkAttempts; attempt += 1) {
-    throwIfAborted(signal)
-    const controller = new AbortController()
-    const abort = (): void => controller.abort()
-    signal?.addEventListener('abort', abort, { once: true })
-    let timedOut = false
-    const timeout = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, modelRequestTimeoutMs)
-    const update = (message: ResponseMessage): void => {
-      const isMoreComplete = responseSize(message) >= responseSize(latestPartial)
-      if (isMoreComplete) {
-        latestPartial = message
-      }
-      if (hasResponseData(message) && isMoreComplete) {
-        onUpdate?.(message)
-      }
+  for (let memberIndex = 0; memberIndex < target.chain.length; memberIndex += 1) {
+    const member = target.chain[memberIndex]!
+    const memberConfig: ModelConfig = {
+      ...target,
+      baseUrl: member.baseUrl,
+      apiKey: member.apiKey,
+      modelName: member.modelName,
     }
+    const maxAttempts = target.retriesPerModel
 
-    try {
-      return await requestCompletionAttempt(config, messages, tools, controller.signal, update, runtime)
-    } catch (error) {
-      const details = errorDetails(error)
-      const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
-      const partial = hasResponseData(errorPartial) ? errorPartial : latestPartial
-      const bestPartial = responseSize(partial) >= responseSize(latestPartial) ? partial : latestPartial
-      const failure = createCompletionError(
-        error,
-        bestPartial,
-        signal?.aborted
-          ? 'Operation stopped'
-          : timedOut
-            ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
-            : details.message,
-      )
-      if (signal?.aborted) throw failure
-      log.error('model.request.failed', {
-        attempt,
-        maxAttempts: maxNetworkAttempts,
-        timeoutSeconds: modelRequestTimeoutMs / 1000,
-        ...details,
-        message: failure.message,
-        hasPartialResponse: hasResponseData(failure.partial),
-        hasImageInput,
-      })
-
-      if (attempt < maxNetworkAttempts && !hasImageInput && (timedOut || isRetryableRequestError(error))) {
-        log.warn('model.request.retrying', {
-          attempt: attempt + 1,
-          maxAttempts: maxNetworkAttempts,
-          reason: failure.message,
-        })
-        continue
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      throwIfAborted(signal)
+      const controller = new AbortController()
+      const abort = (): void => controller.abort()
+      signal?.addEventListener('abort', abort, { once: true })
+      let timedOut = false
+      const timeout = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, modelRequestTimeoutMs)
+      const update = (message: ResponseMessage): void => {
+        const isMoreComplete = responseSize(message) >= responseSize(latestPartial)
+        if (isMoreComplete) {
+          latestPartial = message
+        }
+        if (hasResponseData(message) && isMoreComplete) {
+          onUpdate?.(message)
+        }
       }
-      throw failure
-    } finally {
-      clearTimeout(timeout)
-      signal?.removeEventListener('abort', abort)
+
+      try {
+        return await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
+      } catch (error) {
+        const details = errorDetails(error)
+        const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
+        const partial = hasResponseData(errorPartial) ? errorPartial : latestPartial
+        const bestPartial = responseSize(partial) >= responseSize(latestPartial) ? partial : latestPartial
+        const failure = createCompletionError(
+          error,
+          bestPartial,
+          signal?.aborted
+            ? 'Operation stopped'
+            : timedOut
+              ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
+              : details.message,
+        )
+        failure.status = (error as CompletionError).status
+        lastFailure = failure
+        if (signal?.aborted) throw failure
+        log.error('model.request.failed', {
+          member: member.label,
+          memberAttempt: attempt,
+          maxAttempts,
+          timeoutSeconds: modelRequestTimeoutMs / 1000,
+          ...details,
+          message: failure.message,
+          hasPartialResponse: hasResponseData(failure.partial),
+          hasImageInput,
+        })
+
+        // Output already streamed: retrying or failing over would duplicate
+        // visible content — surface the failure for this turn as-is.
+        if (hasResponseData(failure.partial)) throw failure
+
+        const retryable = timedOut || isRetryableRequestError(error) || isRetryableStatus(failure.status)
+        const definitive = isDefinitiveStatus(failure.status)
+        const nextMember = target.chain[memberIndex + 1]
+        if (retryable && !hasImageInput && attempt < maxAttempts) {
+          log.warn('model.request.retrying', {
+            member: member.label,
+            attempt: attempt + 1,
+            maxAttempts,
+            reason: failure.message,
+          })
+          continue
+        }
+        exhaustedMembers.push(member.label)
+        if (nextMember) {
+          log.warn('model.request.failing-over', {
+            from: member.label,
+            to: nextMember.label,
+            reason: definitive ? `status ${failure.status}` : failure.message,
+          })
+          break
+        }
+        const chainFailure = new Error(
+          `All models in the chain failed (${exhaustedMembers.join(' → ')}): ${failure.message}`,
+        ) as CompletionError
+        chainFailure.partial = failure.partial
+        chainFailure.status = failure.status
+        throw chainFailure
+      } finally {
+        clearTimeout(timeout)
+        signal?.removeEventListener('abort', abort)
+      }
     }
   }
 
-  throw new Error('Model request failed')
+  const exhausted = exhaustedMembers.join(' → ')
+  const summary = new Error(
+    `All models in the chain failed (${exhausted || 'no member attempted'}): ${lastFailure?.message ?? 'request failed'}`,
+  ) as CompletionError
+  summary.partial = lastFailure?.partial
+  throw summary
 }
 
 export function createAgentSystemMessage(project: Project, networkAccessEnabled = false, contextConfig?: ContextManagementConfig): ContextMessage {
@@ -604,7 +662,7 @@ export function buildAgentContext(
 }
 export async function develop(
   project: Project,
-  config: ModelConfig,
+  config: RuntimeModelConfig,
   contextConfig: ContextManagementConfig,
   agentLimits: AgentLimitsConfig,
   agentMessages: AgentContextMessage[],
