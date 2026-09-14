@@ -168,12 +168,15 @@ function toMessageBlocks(message: ResponseMessage): AssistantMessageBlock[] {
   if (message.content) {
     blocks.push({ type: 'content', content: message.content })
   }
-  blocks.push(...(message.tool_calls ?? []).map((toolCall) => ({
-    type: 'function_call' as const,
-    id: toolCall.id,
-    name: toolCall.function.name,
-    parameters: toolCall.function.arguments,
-  })))
+  for (const toolCall of message.tool_calls ?? []) {
+    if (!toolCall) continue
+    blocks.push({
+      type: 'function_call',
+      id: toolCall.id,
+      name: toolCall.function.name,
+      parameters: toolCall.function.arguments,
+    })
+  }
   return blocks
 }
 
@@ -320,10 +323,10 @@ async function requestCompletionAttempt(
   const requestStartedAt = performance.now()
   const currentMessage = (): ResponseMessage => ({
     content: content || null,
-    tool_calls: toolCalls.length ? toolCalls.map((toolCall) => ({
+    tool_calls: toolCalls.length ? toolCalls.flatMap((toolCall) => toolCall ? [{
       ...toolCall,
       function: { ...toolCall.function },
-    })) : undefined,
+    }] : []) : undefined,
   })
   const publish = (): void => {
     publishTimer = undefined

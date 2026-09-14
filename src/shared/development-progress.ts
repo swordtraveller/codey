@@ -13,10 +13,10 @@ function appendStreamingDelta(
   blocks: AssistantMessageBlock[],
   delta: DevelopmentStreamDelta,
 ): AssistantMessageBlock[] {
-  const contentBlock = blocks.find((block) => block.type === 'content')
+  const contentBlock = blocks.find((block) => block?.type === 'content')
   const toolBlocks = blocks
     .filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> =>
-      block.type === 'function_call')
+      block?.type === 'function_call')
     .map((block) => ({ ...block }))
   let content = contentBlock?.content ?? ''
   let changed = false
@@ -56,10 +56,10 @@ function streamParts(blocks: AssistantMessageBlock[]): {
   toolCalls: Array<Extract<AssistantMessageBlock, { type: 'function_call' }>>
 } {
   return {
-    content: blocks.find((block) => block.type === 'content')?.content ?? '',
+    content: blocks.find((block) => block?.type === 'content')?.content ?? '',
     toolCalls: blocks.filter(
       (block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> =>
-        block.type === 'function_call',
+        block?.type === 'function_call',
     ),
   }
 }
@@ -87,6 +87,10 @@ export function compactDevelopmentProgressUpdate(
   for (let index = 0; index < next.toolCalls.length; index += 1) {
     const current = previous.toolCalls[index]
     const candidate = next.toolCalls[index]
+    // Some providers emit sparse tool-call arrays while assembling a stream.
+    // Preserve the full snapshot until the array is complete instead of
+    // dereferencing an undefined candidate in the main process.
+    if (!candidate) return update
     const id = appendedSuffix(current?.id ?? '', candidate.id)
     const name = appendedSuffix(current?.name ?? '', candidate.name)
     const parameters = appendedSuffix(current?.parameters ?? '', candidate.parameters)
