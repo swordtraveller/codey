@@ -103,6 +103,7 @@ export type ModelGroupConfig = {
 export type ModelChainMember = {
   modelId: string
   label: string
+  providerName?: string
   baseUrl: string
   apiKey: string
   modelName: string
@@ -694,6 +695,7 @@ export type DevelopmentStreamDelta = {
 
 export type DevelopmentProgressUpdate =
   | { type: 'reset' }
+  | { type: 'model-changed'; providerName: string; modelName: string }
   | { type: 'append'; items: DevelopmentTimelineItem[] }
   | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
   | { type: 'append-stream'; delta: DevelopmentStreamDelta }

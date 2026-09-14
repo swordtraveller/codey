@@ -118,6 +118,8 @@ export function applyDevelopmentProgressUpdate(
   switch (update.type) {
     case 'reset':
       return createDevelopmentProgressState()
+    case 'model-changed':
+      return state
     case 'append':
       return update.items.length === 0
         ? state

@@ -68,6 +68,7 @@ function chainMember(source: ModelTargetSource, link: ModelLink): ModelChainMemb
   return {
     modelId: link.id,
     label: link.name || definition.modelName,
+    providerName: provider.name || provider.baseUrl,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     modelName: definition.modelName,

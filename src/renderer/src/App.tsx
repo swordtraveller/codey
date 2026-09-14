@@ -1821,6 +1821,7 @@ export function App(): React.JSX.Element {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
+  const [sessionModelDisplay, setSessionModelDisplay] = useState<{ key: string; providerName: string; modelName: string } | null>(null)
   const [stoppingConversations, setStoppingConversations] = useState<Record<string, boolean>>({})
   const [conversationTurns, setConversationTurns] = useState<Record<string, ConversationTurn>>({})
   const [saving, setSaving] = useState(false)
@@ -1858,9 +1859,16 @@ export function App(): React.JSX.Element {
   const activeConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
+  const activeConversationKey = activeProject && activeConversation
+    ? `${activeProject.id}:${activeConversation.id}`
+    : ''
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
   const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
+  const effectiveModelMember = effectiveModelConfig?.chain[0]
+  const displayedSessionModel = sessionModelDisplay?.key === activeConversationKey
+    ? sessionModelDisplay
+    : effectiveModelMember
   /** Single models flattened (audit-model pickers list models only, no groups). */
   const flatModelConfigs = config.models
     .map((model) => flattenModelLink(config, model))
@@ -1888,9 +1896,6 @@ export function App(): React.JSX.Element {
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
-    : ''
-  const activeConversationKey = activeProject && activeConversation
-    ? `${activeProject.id}:${activeConversation.id}`
     : ''
   const activeConversationState = activeConversationKey
     ? conversationStates[activeConversationKey] ?? 'idle'
@@ -1959,6 +1964,13 @@ export function App(): React.JSX.Element {
       window.codey.recordPerformanceTrace({
         traceId: activeTraceIdsRef.current[key] ?? 'renderer-session', scope: 'renderer', phase: 'progress-received',
         projectId: progress.projectId, conversationId: progress.conversationId,
+      })
+    }
+    if (progress.update.type === 'model-changed') {
+      setSessionModelDisplay({
+        key,
+        providerName: progress.update.providerName,
+        modelName: progress.update.modelName,
       })
     }
     updateDevelopmentProgress(progress)
@@ -3241,6 +3253,8 @@ export function App(): React.JSX.Element {
     return false
   })()
   const settingsDirty = configDraft !== config
+  const sortedConversationModelGroups = [...config.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
+  const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
@@ -3362,22 +3376,26 @@ export function App(): React.JSX.Element {
                         onChange={(event) => void changeConversationModelConfig(event.target.value)}
                       >
                         <option value="">{t('followProjectDefault')}</option>
-                        {config.models.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.name || t('unnamedModel')}
-                          </option>
-                        ))}
-                        {config.modelGroups.map((group) => (
+                        {sortedConversationModelGroups.map((group) => (
                           <option key={group.id} value={group.id}>
                             {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
+                          </option>
+                        ))}
+                        {sortedConversationModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name || t('unnamedModel')}
                           </option>
                         ))}
                       </select>
                     </span>
                   </label>
                   <span className="topbar-model-name">
+                    <span>{t('providerLabel')}:</span>
+                    <strong>{configured ? displayedSessionModel?.providerName || t('notConfigured') : t('notConfigured')}</strong>
+                  </span>
+                  <span className="topbar-model-name">
                     <span>{t('modelLabel')}:</span>
-                    <strong>{configured ? effectiveModelConfig?.modelName : t('notConfigured')}</strong>
+                    <strong>{configured ? displayedSessionModel?.modelName : t('notConfigured')}</strong>
                   </span>
                 </div>
               ) : (

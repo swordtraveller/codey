@@ -279,6 +279,7 @@ async function requestCompletionAttempt(
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
   runtime?: { traceId?: string; projectId?: string; conversationId?: string },
+  onModelChange?: (providerName: string, modelName: string) => void,
 ): Promise<ChatResponse> {
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
@@ -498,6 +499,7 @@ export async function requestCompletion(
   onUpdate?: (message: ResponseMessage) => void,
   signal?: AbortSignal,
   runtime?: { traceId?: string; projectId?: string; conversationId?: string },
+  onModelChange?: (providerName: string, modelName: string) => void,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
@@ -506,6 +508,7 @@ export async function requestCompletion(
 
   for (let memberIndex = 0; memberIndex < target.chain.length; memberIndex += 1) {
     const member = target.chain[memberIndex]!
+    onModelChange?.(member.providerName ?? '', member.modelName)
     const memberConfig: ModelConfig = {
       ...target,
       baseUrl: member.baseUrl,
@@ -839,9 +842,11 @@ export async function develop(
       }
       let response: ChatResponse
       try {
-        response = await requestCompletion(config, requestMessages, tools, (message) => {
-          onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
-        }, runtime?.signal, runtime)
+          response = await requestCompletion(config, requestMessages, tools, (message) => {
+            onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
+          }, runtime?.signal, runtime, (providerName, modelName) => {
+            onProgress?.({ type: 'model-changed', providerName, modelName })
+          })
       } catch (error) {
         const partial = (error as CompletionError).partial
         const partialBlocks = toMessageBlocks(partial ?? {})
