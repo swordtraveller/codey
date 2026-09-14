@@ -1766,6 +1766,16 @@ export function App(): React.JSX.Element {
   const [selectedDefinitionId, setSelectedDefinitionId] = useState('')
   const [selectedLinkId, setSelectedLinkId] = useState('')
   const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [modelCombos, setModelCombos] = useState<Array<{
+    key: string
+    providerId: string
+    definitionId: string
+    providerName: string
+    modelName: string
+    name: string
+    selected: boolean
+  }> | null>(null)
+  const [comboBusy, setComboBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
   const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
@@ -2642,6 +2652,80 @@ export function App(): React.JSX.Element {
     }))
   }
 
+  /** Queries every provider's model list and crosses it with the user's
+   *  model definitions to offer all available combinations. */
+  async function queryModelCombos(): Promise<void> {
+    if (comboBusy) return
+    setComboBusy(true)
+    try {
+      const results = await Promise.all(configDraft.providers.map(async (provider) => {
+        try {
+          const result = await window.codey.listProviderModels({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+          return { provider, models: result.status === 'ok' ? result.models : [] as string[] }
+        } catch {
+          return { provider, models: [] as string[] }
+        }
+      }))
+      const existing = new Set(configDraft.models.map((model) => `${model.providerId}:${model.definitionId}`))
+      const combos: Array<{
+        key: string
+        providerId: string
+        definitionId: string
+        providerName: string
+        modelName: string
+        name: string
+        selected: boolean
+      }> = []
+      for (const definition of configDraft.modelDefinitions) {
+        for (const { provider, models } of results) {
+          if (!models.some((id) => id.toLowerCase() === definition.modelName.trim().toLowerCase())) continue
+          if (existing.has(`${provider.id}:${definition.id}`)) continue
+          combos.push({
+            key: `${provider.id}:${definition.id}`,
+            providerId: provider.id,
+            definitionId: definition.id,
+            providerName: provider.name || provider.baseUrl,
+            modelName: definition.modelName,
+            name: `${provider.name || provider.baseUrl}-${definition.modelName}`,
+            selected: true,
+          })
+        }
+      }
+      setModelCombos(combos)
+    } finally {
+      setComboBusy(false)
+    }
+  }
+
+  function toggleModelCombo(key: string, selected: boolean): void {
+    setModelCombos((current) => current?.map((combo) => combo.key === key ? { ...combo, selected } : combo) ?? null)
+  }
+
+  function renameModelCombo(key: string, name: string): void {
+    setModelCombos((current) => current?.map((combo) => combo.key === key ? { ...combo, name } : combo) ?? null)
+  }
+
+  function applyModelCombos(): void {
+    const combos = modelCombos?.filter((combo) => combo.selected) ?? []
+    if (combos.length === 0) {
+      setModelCombos(null)
+      return
+    }
+    setConfigDraft((current) => ({
+      ...current,
+      models: [
+        ...current.models,
+        ...combos.map((combo) => ({
+          id: crypto.randomUUID(),
+          name: combo.name.trim() || `${combo.providerName}-${combo.modelName}`,
+          providerId: combo.providerId,
+          definitionId: combo.definitionId,
+        })),
+      ],
+    }))
+    setModelCombos(null)
+  }
+
   function addModelLinkDraft(): void {
     if (configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0) {
       showToast(t('modelLinkNeedsProviderAndDefinition'), 'error')
@@ -3112,6 +3196,10 @@ export function App(): React.JSX.Element {
     : activeProject.folders.length === 0
       ? t('folderDescription')
       : t('conversationDescription')
+  const sortedProviderOptions = [...configDraft.providers].sort((a, b) => (a.name || a.baseUrl).localeCompare(b.name || b.baseUrl))
+  const sortedDefinitionOptions = [...configDraft.modelDefinitions].sort((a, b) => a.modelName.localeCompare(b.modelName))
+  const duplicateProviderNames = new Set(configDraft.providers.map((provider) => provider.name.trim().toLowerCase())).size !== configDraft.providers.length
+  const duplicateDefinitionModelNames = new Set(configDraft.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== configDraft.modelDefinitions.length
   const selectedProviderDraft = configDraft.providers.find((provider) => provider.id === selectedProviderId) ?? configDraft.providers[0]
   const selectedDefinitionDraft = configDraft.modelDefinitions.find((definition) => definition.id === selectedDefinitionId) ?? configDraft.modelDefinitions[0]
   const selectedModelLinkDraft = configDraft.models.find((model) => model.id === selectedLinkId) ?? configDraft.models[0]
@@ -3119,6 +3207,7 @@ export function App(): React.JSX.Element {
   const invalidModelConfig = (() => {
     if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
     if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
+    if (duplicateProviderNames || duplicateDefinitionModelNames) return true
     if (configDraft.modelDefinitions.some((definition) =>
       !definition.modelName.trim() ||
       definition.modelMaxContext < 1_000 ||
@@ -3732,7 +3821,7 @@ export function App(): React.JSX.Element {
                     value={selectedProviderDraft?.id ?? ''}
                     onChange={(_, data) => setSelectedProviderId(data.value)}
                   >
-                    {configDraft.providers.map((provider) => (
+                    {sortedProviderOptions.map((provider) => (
                       <option key={provider.id} value={provider.id}>
                         {provider.name || provider.baseUrl || t('unnamedProvider')}
                       </option>
@@ -3771,6 +3860,8 @@ export function App(): React.JSX.Element {
                   />
                 </Field>
 
+                {duplicateProviderNames && <p className="settings-warning" role="alert">{t('duplicateProviderName')}</p>}
+
                 <h4 className="settings-section-title">{t('definitionsSection')}</h4>
                 <div className="layer-config-toolbar">
                   <Select
@@ -3778,7 +3869,7 @@ export function App(): React.JSX.Element {
                     value={selectedDefinitionDraft?.id ?? ''}
                     onChange={(_, data) => setSelectedDefinitionId(data.value)}
                   >
-                    {configDraft.modelDefinitions.map((definition) => (
+                    {sortedDefinitionOptions.map((definition) => (
                       <option key={definition.id} value={definition.id}>
                         {definition.modelName || t('unnamedModel')}
                       </option>
@@ -3851,6 +3942,8 @@ export function App(): React.JSX.Element {
                   </div>
                 </div>
 
+                {duplicateDefinitionModelNames && <p className="settings-warning" role="alert">{t('duplicateDefinitionModelName')}</p>}
+
                 <h4 className="settings-section-title">{t('modelsSection')}</h4>
                 <div className="layer-config-toolbar">
                   <Select
@@ -3864,6 +3957,13 @@ export function App(): React.JSX.Element {
                       </option>
                     ))}
                   </Select>
+                  <Button
+                    appearance="secondary"
+                    disabled={comboBusy || configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0}
+                    onClick={() => void queryModelCombos()}
+                  >
+                    {comboBusy ? t('modelComboBusy') : t('modelComboButton')}
+                  </Button>
                   <Button appearance="secondary" onClick={addModelLinkDraft}>{t('addModelConfig')}</Button>
                   <Button appearance="secondary" disabled={!selectedModelLinkDraft} onClick={deleteSelectedModelLinkDraft}>
                     {t('deleteModelConfig')}
@@ -3876,6 +3976,41 @@ export function App(): React.JSX.Element {
                     {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
                   </Button>
                 </div>
+                {modelCombos !== null && (
+                  <div className="model-combo-panel">
+                    <p className="section-label">{t('modelComboTitle')}</p>
+                    {modelCombos.length === 0 && (
+                      <p className="settings-description">{t('modelComboEmpty')}</p>
+                    )}
+                    {modelCombos.map((combo) => (
+                      <div className="model-combo-row" key={combo.key}>
+                        <input
+                          aria-label={t('modelComboSelect')}
+                          type="checkbox"
+                          checked={combo.selected}
+                          onChange={(event) => toggleModelCombo(combo.key, event.target.checked)}
+                        />
+                        <span className="model-combo-provider">{combo.providerName}</span>
+                        <span className="model-combo-model">{combo.modelName}</span>
+                        <Input
+                          aria-label={t('modelComboName')}
+                          value={combo.name}
+                          onChange={(_, data) => renameModelCombo(combo.key, data.value)}
+                        />
+                      </div>
+                    ))}
+                    <div className="model-combo-actions">
+                      <Button appearance="secondary" onClick={() => setModelCombos(null)}>{t('cancel')}</Button>
+                      <Button
+                        appearance="primary"
+                        disabled={modelCombos.every((combo) => !combo.selected)}
+                        onClick={applyModelCombos}
+                      >
+                        {t('modelComboAdd')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 <Field label={t('modelConfigName')} required>
                   <Input
                     value={selectedModelLinkDraft?.name ?? ''}
@@ -3887,7 +4022,7 @@ export function App(): React.JSX.Element {
                     value={selectedModelLinkDraft?.providerId ?? ''}
                     onChange={(_, data) => updateSelectedLink({ providerId: data.value })}
                   >
-                    {configDraft.providers.map((provider) => (
+                    {sortedProviderOptions.map((provider) => (
                       <option key={provider.id} value={provider.id}>
                         {provider.name || provider.baseUrl || t('unnamedProvider')}
                       </option>
@@ -3899,7 +4034,7 @@ export function App(): React.JSX.Element {
                     value={selectedModelLinkDraft?.definitionId ?? ''}
                     onChange={(_, data) => updateSelectedLink({ definitionId: data.value })}
                   >
-                    {configDraft.modelDefinitions.map((definition) => (
+                    {sortedDefinitionOptions.map((definition) => (
                       <option key={definition.id} value={definition.id}>
                         {definition.modelName || t('unnamedModel')}
                       </option>

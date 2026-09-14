@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('models:test-connectivity', model),
     testProviderConnectivity: (provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult> =>
       ipcRenderer.invoke('models:test-provider', provider),
+    listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
+      ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),

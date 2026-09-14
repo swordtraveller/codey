@@ -74,7 +74,7 @@ import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreen
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
 import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveModelById } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
-import { testModelConnectivity, testProviderConnectivity } from './model-connectivity'
+import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
 import { buildRunCommandTool, createAgentTools } from './tools'
 import {
@@ -1127,6 +1127,7 @@ app.whenReady().then(() => {
   ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
   ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
   ipcMain.handle('models:test-provider', (_event, provider: { baseUrl: string; apiKey: string }) => testProviderConnectivity(provider))
+  ipcMain.handle('models:list-provider-models', (_event, provider: { baseUrl: string; apiKey: string }) => listProviderModels(provider))
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))

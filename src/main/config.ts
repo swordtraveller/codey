@@ -218,6 +218,8 @@ export function isValidAppConfigLayers(config: Pick<AppConfig, 'providers' | 'mo
   const modelIds = new Set(config.models.map((model) => model.id))
   if (config.providers.some((provider) => !isValidProviderConfig(provider))) return false
   if (config.modelDefinitions.some((definition) => !isValidModelDefinition(definition))) return false
+  if (new Set(config.providers.map((provider) => provider.name.trim().toLowerCase())).size !== config.providers.length) return false
+  if (new Set(config.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== config.modelDefinitions.length) return false
   if (providerIds.size !== config.providers.length) return false
   if (definitionIds.size !== config.modelDefinitions.length) return false
   if (modelIds.size !== config.models.length) return false

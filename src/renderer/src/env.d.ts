@@ -51,6 +51,7 @@ declare global {
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
       testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
+      listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>

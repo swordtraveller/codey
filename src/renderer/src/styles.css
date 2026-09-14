@@ -2092,3 +2092,38 @@ h1 {
   border-radius: 8px;
   background: var(--colorNeutralBackground3, #eee);
 }
+
+.model-combo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--colorNeutralStroke2, #ddd);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.model-combo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-combo-provider {
+  min-width: 120px;
+}
+
+.model-combo-model {
+  min-width: 140px;
+  font-family: var(--font-family-monospace, monospace);
+}
+
+.model-combo-row input[type='text'] {
+  flex: 1;
+}
+
+.model-combo-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
