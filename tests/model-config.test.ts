@@ -70,6 +70,8 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     networkAccessEnabled: false,
     performanceTracingEnabled: false,
     commandReviewGlobal: { ...defaultCommandReviewConfig, contentRules: [] },
+    agentLimitsGlobal: { ...defaultAgentLimitsConfig },
+    commandExecutionGlobal: { ...defaultCommandExecutionConfig },
   }
 }
 
@@ -80,6 +82,7 @@ const project: Project = {
   defaultModelConfigId: 'project',
   contextConfigOverride: null,
   commandExecutionDefault: { ...defaultCommandExecutionConfig },
+  agentLimitsDefault: null,
   folders: [],
   pythonEnvironmentFolderId: null,
   conversations: [],

@@ -41,7 +41,7 @@ type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'mod
   agentMessages?: PersistedAgentMessage[]
   modelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
-  agentLimits?: Partial<AgentLimitsConfig>
+  agentLimits?: Partial<AgentLimitsConfig> | null
   commandExecution?: Partial<CommandExecutionConfig> | null
   unlockedToolsets?: string[]
 }
@@ -55,10 +55,11 @@ type LegacyStoredProject = Omit<
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
 }
-type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault'> & {
+type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault' | 'agentLimitsDefault'> & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
   commandExecutionDefault?: Partial<CommandExecutionConfig> | null
+  agentLimitsDefault?: Partial<AgentLimitsConfig> | null
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversationIds: string[]
@@ -191,12 +192,16 @@ function normalizeOverride(
 }
 
 function normalizeStoredAgentLimits(
-  value: Partial<AgentLimitsConfig> | undefined,
-): AgentLimitsConfig {
+  value: Partial<AgentLimitsConfig> | null | undefined,
+): AgentLimitsConfig | null {
+  // null = inherit the upper layer (project for conversations, global for
+  // projects). Invalid stored configs fall back to inherit rather than a
+  // materialized default so a bad write never freezes stale settings.
+  if (value === null || value === undefined) return null
   const normalized = normalizeAgentLimitsConfig(value)
   return isValidAgentLimitsConfig(normalized)
     ? normalized
-    : { ...defaultAgentLimitsConfig }
+    : null
 }
 
 function normalizeStoredCommandExecution(
@@ -259,6 +264,7 @@ async function normalizeProjectMetadata(
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     commandExecutionDefault: normalizeStoredCommandExecution(value.commandExecutionDefault),
+    agentLimitsDefault: normalizeStoredAgentLimits(value.agentLimitsDefault),
     folders,
     conversations,
     pythonEnvironmentFolderId: configuredFolder
@@ -456,7 +462,8 @@ function createConversationRecord(index: number): Conversation {
     archived: false,
     modelConfigId: null,
     contextConfigOverride: null,
-    agentLimits: { ...defaultAgentLimitsConfig },
+    // null = inherit the project agent-limits default.
+    agentLimits: null,
     // null = inherit the project default (and, through it, the global review).
     commandExecution: null,
     messages: [],
@@ -515,6 +522,8 @@ export function createProject(name: string, defaultModelConfigId: string | null 
       contextConfigOverride: null,
       // null = inherit the built-in matrix defaults plus the global review.
       commandExecutionDefault: null,
+      // null = inherit the global agent-limits default.
+      agentLimitsDefault: null,
       folders: [],
       pythonEnvironmentFolderId: null,
       conversations: [createConversationRecord(1)],
@@ -621,14 +630,29 @@ export function setConversationArchived(projectId: string, conversationId: strin
   })
 }
 
-export function setConversationAgentLimits(projectId: string, conversationId: string, agentLimits: AgentLimitsConfig): Promise<Project> {
+export function setConversationAgentLimits(projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
-    const normalized = normalizeAgentLimitsConfig(agentLimits)
-    if (!isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
+    const normalized = agentLimits === null
+      ? null
+      : normalizeAgentLimitsConfig(agentLimits)
+    if (normalized !== null && !isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     conversation.agentLimits = normalized
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setProjectAgentLimitsDefault(projectId: string, agentLimits: AgentLimitsConfig | null): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalized = agentLimits === null
+      ? null
+      : normalizeAgentLimitsConfig(agentLimits)
+    if (normalized !== null && !isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
+    const project = await findProject(projectId)
+    project.agentLimitsDefault = normalized
+    await persistProjectMetadata(project)
     return project
   })
 }

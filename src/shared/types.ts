@@ -339,6 +339,38 @@ export type CommandApprovalResponse = {
   memory?: CommandApprovalMemory
 }
 
+export type CommandInterpreter = 'pwsh51' | 'pwsh7' | 'bash'
+export type CommandEnvironment = 'bare' | 'wsl2' | 'docker' | 'windows-sandbox'
+
+/** Developer-mode command-execution settings. The interpreter/environment
+ *  matrix is constrained: v1 implements bare+bash; the remaining combos are
+ *  reserved architecture openings. */
+export type CommandExecutionConfig = {
+  enabled: boolean
+  /** Default interpreter/environment when the model does not override them. */
+  interpreter: CommandInterpreter
+  environment: CommandEnvironment
+  /** Which environments each interpreter may run in (per-interpreter allowlist).
+   *  The model may override interpreter/environment per call, but only within
+   *  these enabled combos. */
+  enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]>
+  /** Review settings for run_command; null = inherit the global review
+   *  defaults (AppConfig.commandReviewGlobal). */
+  review: CommandReviewConfig | null
+}
+
+export const defaultCommandExecutionConfig: CommandExecutionConfig = {
+  enabled: false,
+  interpreter: 'bash',
+  environment: 'bare',
+  enabledEnvironments: {
+    bash: ['bare'],
+    pwsh7: ['bare'],
+    pwsh51: ['bare'],
+  },
+  review: null,
+}
+
 export type AppConfig = {
   /** Legacy flat list — kept only for read-migration into the four-layer
    *  structure below; always empty after migration. */
@@ -358,6 +390,12 @@ export type AppConfig = {
   performanceTracingEnabled: boolean
   /** Global command-review defaults; projects and conversations may override. */
   commandReviewGlobal: CommandReviewConfig
+  /** Global command-execution defaults (interpreter, environment, enabled
+   *  combos); projects and conversations may override. Review stays null
+   *  here — the global review config above owns it. */
+  commandExecutionGlobal: CommandExecutionConfig
+  /** Global agent-limits defaults; projects and conversations may override. */
+  agentLimitsGlobal: AgentLimitsConfig
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -375,6 +413,8 @@ export const defaultAppConfig: AppConfig = {
   networkAccessEnabled: false,
   performanceTracingEnabled: false,
   commandReviewGlobal: { ...defaultCommandReviewConfig },
+  commandExecutionGlobal: { ...defaultCommandExecutionConfig, review: null },
+  agentLimitsGlobal: { ...defaultAgentLimitsConfig },
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -526,38 +566,6 @@ export type ContextDebugMessage = Omit<AgentContextMessage, 'role'> & {
   role: AgentContextMessage['role'] | 'system'
 }
 
-export type CommandInterpreter = 'pwsh51' | 'pwsh7' | 'bash'
-export type CommandEnvironment = 'bare' | 'wsl2' | 'docker' | 'windows-sandbox'
-
-/** Developer-mode command-execution settings. The interpreter/environment
- *  matrix is constrained: v1 implements bare+bash; the remaining combos are
- *  reserved architecture openings. */
-export type CommandExecutionConfig = {
-  enabled: boolean
-  /** Default interpreter/environment when the model does not override them. */
-  interpreter: CommandInterpreter
-  environment: CommandEnvironment
-  /** Which environments each interpreter may run in (per-interpreter allowlist).
-   *  The model may override interpreter/environment per call, but only within
-   *  these enabled combos. */
-  enabledEnvironments: Record<CommandInterpreter, CommandEnvironment[]>
-  /** Review settings for run_command; null = inherit the global review
-   *  defaults (AppConfig.commandReviewGlobal). */
-  review: CommandReviewConfig | null
-}
-
-export const defaultCommandExecutionConfig: CommandExecutionConfig = {
-  enabled: false,
-  interpreter: 'bash',
-  environment: 'bare',
-  enabledEnvironments: {
-    bash: ['bare'],
-    pwsh7: ['bare'],
-    pwsh51: ['bare'],
-  },
-  review: null,
-}
-
 /** Commands may request their own timeout (seconds); the hard bounds. */
 export const commandTimeoutMinSeconds = 1
 export const commandTimeoutMaxSeconds = 86_400
@@ -656,7 +664,8 @@ export type Conversation = {
   /** Hidden toolsets unlocked in this conversation (e.g. ["python"]); the
    *  matching tools are included in every model request once unlocked. */
   unlockedToolsets?: string[]
-  agentLimits: AgentLimitsConfig
+  /** Agent-limits override; null = inherit the project default. */
+  agentLimits: AgentLimitsConfig | null
   /** Full command-execution override; null = inherit the project default. */
   commandExecution: CommandExecutionConfig | null
   messages: ChatMessage[]
@@ -678,6 +687,8 @@ export type Project = {
   /** Project-level command-execution default; null = inherit the built-in
    *  defaults plus the global review config. */
   commandExecutionDefault: CommandExecutionConfig | null
+  /** Project-level agent-limits default; null = inherit the global default. */
+  agentLimitsDefault: AgentLimitsConfig | null
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

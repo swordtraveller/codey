@@ -96,7 +96,7 @@ contextBridge.exposeInMainWorld(
     setConversationAgentLimits: (
       projectId: string,
       conversationId: string,
-      agentLimits: AgentLimitsConfig,
+      agentLimits: AgentLimitsConfig | null,
     ) => ipcRenderer.invoke(
       'conversations:set-agent-limits',
       projectId,
@@ -120,6 +120,14 @@ contextBridge.exposeInMainWorld(
       'projects:set-command-execution-default',
       projectId,
       commandExecution,
+    ),
+    setProjectAgentLimitsDefault: (
+      projectId: string,
+      agentLimits: AgentLimitsConfig | null,
+    ) => ipcRenderer.invoke(
+      'projects:set-agent-limits-default',
+      projectId,
+      agentLimits,
     ),
     onCommandReviewRequest: (listener: (request: CommandApprovalRequest) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, request: CommandApprovalRequest) => listener(request)

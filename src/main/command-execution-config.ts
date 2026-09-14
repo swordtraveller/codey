@@ -164,15 +164,16 @@ export function isAuditModelAllowed(
 }
 
 /** Resolves the effective config: conversation override ?? project default ??
- *  built-in matrix, with review defaulting to the global review config
- *  whenever the winning layer did not define its own review. */
+ *  global execution default ?? built-in matrix, with review defaulting to
+ *  the global review config whenever the winning layer did not define its
+ *  own review. */
 export function resolveCommandExecutionConfig(
   project: ProjectLike,
   conversation: ConversationLike,
   appConfig: AppConfigLike,
 ): CommandExecutionConfig {
-  const base = conversation.commandExecution ?? project.commandExecutionDefault
-  const matrix = base ?? structuredClone(defaultCommandExecutionConfig)
+  const base = conversation.commandExecution ?? project.commandExecutionDefault ?? appConfig.commandExecutionGlobal
+  const matrix = base ? structuredClone(base) : structuredClone(defaultCommandExecutionConfig)
   return {
     ...matrix,
     review: matrix.review !== null ? matrix.review : structuredClone(appConfig.commandReviewGlobal),
@@ -181,4 +182,7 @@ export function resolveCommandExecutionConfig(
 
 type ProjectLike = { commandExecutionDefault: CommandExecutionConfig | null }
 type ConversationLike = { commandExecution?: CommandExecutionConfig | null }
-type AppConfigLike = { commandReviewGlobal: CommandReviewConfig }
+type AppConfigLike = {
+  commandReviewGlobal: CommandReviewConfig
+  commandExecutionGlobal?: CommandExecutionConfig | null
+}

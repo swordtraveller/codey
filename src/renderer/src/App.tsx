@@ -596,6 +596,149 @@ function formatCommandDuration(seconds: number): string {
   return `${rest}s`
 }
 
+/** Shared Agent-limits fields for the three settings surfaces (global,
+ *  project, conversation). */
+function AgentLimitsFields({ value, disabled, onChange }: {
+  value: AgentLimitsConfig
+  disabled?: boolean
+  onChange: (patch: Partial<AgentLimitsConfig>) => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <>
+      <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
+        <Input
+          disabled={disabled}
+          min={1}
+          max={maximumAgentLimit}
+          type="number"
+          value={String(value.modelRequestsPerRound)}
+          onChange={(_, data) => onChange({ modelRequestsPerRound: Number(data.value) })}
+        />
+      </Field>
+      <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
+        <Input
+          disabled={disabled}
+          min={1}
+          max={maximumAgentLimit}
+          type="number"
+          value={String(value.toolCallsPerRequest)}
+          onChange={(_, data) => onChange({ toolCallsPerRequest: Number(data.value) })}
+        />
+      </Field>
+    </>
+  )
+}
+
+/** Shared command-execution editor (flat: execution + review sections) for
+ *  the conversation dialog and the project settings dialog. The override
+ *  switch (null = inherit) lives in the caller. */
+function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs, sessionModel, globalReview, onOpenSyntaxHelp, showReview = true }: {
+  value: CommandExecutionConfig
+  onChange: (next: CommandExecutionConfig) => void
+  disabled?: boolean
+  modelConfigs: ModelConfig[]
+  sessionModel?: ModelConfig
+  globalReview: CommandReviewConfig
+  onOpenSyntaxHelp?: () => void
+  showReview?: boolean
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const setDraft = (next: CommandExecutionConfig): void => onChange(next)
+  return (
+    <>
+      <Switch
+        checked={value.enabled}
+        disabled={disabled}
+        label={t('commandExecutionEnabled')}
+        onChange={(_, data) => setDraft({ ...value, enabled: data.checked })}
+      />
+      <p className="settings-description">{t('commandExecutionDescription')}</p>
+      <Field label={t('commandInterpreter')}>
+        <Select
+          disabled={disabled || !value.enabled}
+          value={value.interpreter}
+          onChange={(_, data) => setDraft({ ...value, interpreter: data.value as CommandExecutionConfig['interpreter'] })}
+        >
+          <option value="bash">bash</option>
+          <option value="pwsh7">pwsh 7</option>
+          <option value="pwsh51">pwsh 5.1</option>
+        </Select>
+      </Field>
+      <Field label={t('commandEnvironment')}>
+        <Select
+          disabled={disabled || !value.enabled}
+          value={value.environment}
+          onChange={(_, data) => setDraft({ ...value, environment: data.value as CommandExecutionConfig['environment'] })}
+        >
+          <option value="bare">{t('commandEnvBare')}</option>
+          <option value="wsl2">wsl2</option>
+          <option value="docker">docker</option>
+          <option value="windows-sandbox">Windows Sandbox</option>
+        </Select>
+      </Field>
+      {!commandExecutionSupported(value.interpreter, value.environment) && (
+        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
+      )}
+      <div className="enabled-environments-group">
+        <p className="section-label">{t('enabledEnvironments')}</p>
+        <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
+        {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
+          <div className="enabled-environments-row" key={interpreter}>
+            <span className="enabled-environments-label">
+              {interpreterLabels[interpreter] ?? interpreter}
+            </span>
+            {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
+              <label className="enabled-environments-check" key={environment}>
+                <input
+                  type="checkbox"
+                  disabled={disabled || !value.enabled}
+                  checked={value.enabledEnvironments[interpreter]?.includes(environment) ?? false}
+                  onChange={(event) => {
+                    const current = value.enabledEnvironments[interpreter] ?? []
+                    const next = event.target.checked
+                      ? [...current, environment]
+                      : current.filter((entry) => entry !== environment)
+                    setDraft({ ...value, enabledEnvironments: { ...value.enabledEnvironments, [interpreter]: next } })
+                  }}
+                />
+                {environmentLabels[environment] ?? environment}
+              </label>
+            ))}
+          </div>
+        ))}
+      </div>
+      {showReview && (
+        <>
+          <Switch
+            checked={value.review !== null}
+            disabled={disabled}
+            label={t('reviewOverrideGlobal')}
+            onChange={(_, data) => setDraft({
+              ...value,
+              review: data.checked
+                ? structuredClone(value.review ?? globalReview)
+                : null,
+            })}
+          />
+          {value.review === null ? (
+            <p className="settings-description">{t('reviewFollowingGlobal')}</p>
+          ) : (
+            <CommandReviewEditor
+              value={value.review}
+              disabled={disabled}
+              modelConfigs={modelConfigs}
+              sessionModel={sessionModel}
+              onOpenSyntaxHelp={onOpenSyntaxHelp}
+              onChange={(next) => setDraft({ ...value, review: next })}
+            />
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
 /** Shared review editor for the three settings surfaces (global, project,
  *  conversation): duration gate, reviewer checkboxes, rule list. */
 function CommandReviewEditor({ value, onChange, disabled, modelConfigs, sessionModel, onOpenSyntaxHelp }: {
@@ -1794,12 +1937,22 @@ export function App(): React.JSX.Element {
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [agentLimitsOverride, setAgentLimitsOverride] = useState(false)
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
+  const [projectSettingsProjectId, setProjectSettingsProjectId] = useState('')
+  const [projectSettingsTab, setProjectSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context'>('model')
+  const [projectSettingsModelConfigId, setProjectSettingsModelConfigId] = useState('')
+  const [projectAgentLimitsOverride, setProjectAgentLimitsOverride] = useState(false)
+  const [projectAgentLimitsDraft, setProjectAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [projectCommandOverride, setProjectCommandOverride] = useState(false)
+  const [projectCommandDraft, setProjectCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
+  const [projectContextOverride, setProjectContextOverride] = useState(false)
+  const [projectContextDraft, setProjectContextDraft] = useState(defaultContextManagementConfig)
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
   const [commandProjectId, setCommandProjectId] = useState('')
   const [commandConversationId, setCommandConversationId] = useState('')
-  const [commandSettingsScope, setCommandSettingsScope] = useState<'conversation' | 'project'>('conversation')
-  const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig | null>(defaultCommandExecutionConfig)
-  const [commandTab, setCommandTab] = useState<'execution' | 'review'>('execution')
+  const [commandOverride, setCommandOverride] = useState(false)
+  const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
   const [approvalRequest, setApprovalRequest] = useState<CommandApprovalRequest | null>(null)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
@@ -1845,7 +1998,8 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer' | 'prompts'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'language' | 'power' | 'archive' | 'developer' | 'prompts'>('models')
+  const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -2404,13 +2558,16 @@ export function App(): React.JSX.Element {
     }
     setAgentLimitsProjectId(activeProject.id)
     setAgentLimitsConversationId(activeConversation.id)
-    setAgentLimitsDraft({ ...activeConversation.agentLimits })
+    // Three-level inheritance: conversation ?? project default ?? global.
+    const effective = activeConversation.agentLimits ?? activeProject.agentLimitsDefault ?? config.agentLimitsGlobal
+    setAgentLimitsOverride(activeConversation.agentLimits !== null)
+    setAgentLimitsDraft({ ...effective })
     setSettingsError('')
     setAgentLimitsDialogOpen(true)
   }
 
   async function saveAgentLimitsSettings(): Promise<void> {
-    if (interactionLocked || !isValidAgentLimits(agentLimitsDraft)) {
+    if (interactionLocked || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))) {
       return
     }
     setSaving(true)
@@ -2419,7 +2576,7 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.setConversationAgentLimits(
         agentLimitsProjectId,
         agentLimitsConversationId,
-        agentLimitsDraft,
+        agentLimitsOverride ? agentLimitsDraft : null,
       )
       replaceProject(updated)
       setAgentLimitsDialogOpen(false)
@@ -2430,26 +2587,75 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function openProjectSettings(project: Project): void {
+    if (interactionLocked) {
+      return
+    }
+    setProjectSettingsProjectId(project.id)
+    setProjectSettingsTab('model')
+    setProjectSettingsModelConfigId(project.defaultModelConfigId ?? '')
+    setProjectAgentLimitsOverride(project.agentLimitsDefault !== null)
+    setProjectAgentLimitsDraft({ ...(project.agentLimitsDefault ?? config.agentLimitsGlobal) })
+    setProjectCommandOverride(project.commandExecutionDefault !== null)
+    setProjectCommandDraft(project.commandExecutionDefault
+      ? structuredClone(project.commandExecutionDefault)
+      : { ...structuredClone(config.commandExecutionGlobal), review: structuredClone(config.commandReviewGlobal) })
+    setProjectContextOverride(project.contextConfigOverride !== null)
+    setProjectContextDraft({ ...(project.contextConfigOverride ?? config.contextManagement) })
+    setSettingsError('')
+    setProjectSettingsOpen(true)
+    setOpenProjectMenuId(null)
+    // Availability checks need a detection; run one if none is cached so the
+    // first save does not fail with "run environment detection".
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) {
+        setShellDetection(cached)
+        return
+      }
+      return runShellDetection()
+    }).catch(() => undefined)
+  }
+
+  async function saveProjectSettings(): Promise<void> {
+    const project = projects.find((entry) => entry.id === projectSettingsProjectId)
+    if (!project || interactionLocked) {
+      return
+    }
+    if (projectAgentLimitsOverride && !isValidAgentLimits(projectAgentLimitsDraft)) return
+    if (projectCommandOverride && !isValidCommandExecutionDraft(projectCommandDraft)) return
+    if (projectContextOverride && !isValidContextConfig(projectContextDraft)) return
+    setSaving(true)
+    setSettingsError('')
+    try {
+      await window.codey.setProjectModelConfig(project.id, projectSettingsModelConfigId || null)
+      await window.codey.setProjectAgentLimitsDefault(project.id, projectAgentLimitsOverride ? projectAgentLimitsDraft : null)
+      const updated = await window.codey.setProjectCommandExecutionDefault(project.id, projectCommandOverride ? projectCommandDraft : null)
+      const finalProject = await window.codey.setProjectContextConfig(project.id, projectContextOverride ? projectContextDraft : null)
+      replaceProject(finalProject ?? updated)
+      setProjectSettingsOpen(false)
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : t('unableChangeProjectSettings'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   /** Materializes the effective config for a conversation: its own override,
-   *  else the project default, else the built-in matrix — with review falling
-   *  back to the global review config. Used when a user turns off
-   *  "follow upper layer" and starts editing an override. */
+   *  else the project default, else the global execution default — with
+   *  review falling back to the global review config. */
   function effectiveConversationCommandConfig(): CommandExecutionConfig {
-    const base = activeConversation?.commandExecution ?? activeProject?.commandExecutionDefault ?? defaultCommandExecutionConfig
+    const base = activeConversation?.commandExecution ?? activeProject?.commandExecutionDefault ?? config.commandExecutionGlobal
     return { ...structuredClone(base), review: base.review ?? structuredClone(config.commandReviewGlobal) }
   }
 
-  function openCommandSettings(scope: 'conversation' | 'project'): void {
-    if (!activeProject || interactionLocked) return
-    const conversation = activeConversation
-    if (scope === 'conversation' && !conversation) return
+  function openCommandSettings(): void {
+    if (!activeProject || !activeConversation || interactionLocked) return
     setCommandProjectId(activeProject.id)
-    setCommandConversationId(scope === 'conversation' && conversation ? conversation.id : '')
-    setCommandSettingsScope(scope)
-    setCommandDraft(scope === 'conversation'
-      ? conversation?.commandExecution ? structuredClone(conversation.commandExecution) : null
-      : activeProject.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
-    setCommandTab('execution')
+    setCommandConversationId(activeConversation.id)
+    setCommandOverride(activeConversation.commandExecution !== null)
+    setCommandDraft(activeConversation.commandExecution
+      ? structuredClone(activeConversation.commandExecution)
+      : effectiveConversationCommandConfig())
     setSettingsError('')
     setCommandDialogOpen(true)
     // Availability checks need a detection; run one if none is cached so the
@@ -2463,28 +2669,18 @@ export function App(): React.JSX.Element {
     }).catch(() => undefined)
   }
 
-  /** Reloads the draft when the scope switch flips inside the dialog. */
-  function switchCommandSettingsScope(scope: 'conversation' | 'project'): void {
-    if (scope === commandSettingsScope) return
-    if (scope === 'conversation' && !activeConversation) return
-    setCommandSettingsScope(scope)
-    setCommandConversationId(scope === 'conversation' ? activeConversation?.id ?? '' : '')
-    setCommandDraft(scope === 'conversation'
-      ? activeConversation?.commandExecution ? structuredClone(activeConversation.commandExecution) : null
-      : activeProject?.commandExecutionDefault ? structuredClone(activeProject.commandExecutionDefault) : null)
-    setSettingsError('')
-  }
-
   async function saveCommandExecutionSettings(): Promise<void> {
-    if (interactionLocked || !isValidCommandExecutionDraft(commandDraft)) {
+    if (interactionLocked || (commandOverride && !isValidCommandExecutionDraft(commandDraft))) {
       return
     }
     setSaving(true)
     setSettingsError('')
     try {
-      const updated = commandSettingsScope === 'conversation'
-        ? await window.codey.setConversationCommandExecution(commandProjectId, commandConversationId, commandDraft)
-        : await window.codey.setProjectCommandExecutionDefault(commandProjectId, commandDraft)
+      const updated = await window.codey.setConversationCommandExecution(
+        commandProjectId,
+        commandConversationId,
+        commandOverride ? commandDraft : null,
+      )
       replaceProject(updated)
       setCommandDialogOpen(false)
     } catch (error) {
@@ -3257,7 +3453,22 @@ export function App(): React.JSX.Element {
   const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
+  const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
+  const invalidGlobalCommandExecution = !isValidCommandExecutionDraft(configDraft.commandExecutionGlobal)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
+  const projectSettingsTarget = projects.find((entry) => entry.id === projectSettingsProjectId)
+  const applicationDefaultTargetLabel = (() => {
+    const target = config.activeModelConfigId
+    if (!target) return t('notConfigured')
+    const model = config.models.find((entry) => entry.id === target)
+    if (model) return model.name || t('unnamedModel')
+    const group = config.modelGroups.find((entry) => entry.id === target)
+    return group ? t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) : t('notConfigured')
+  })()
+  const projectSettingsValid = Boolean(projectSettingsTarget) &&
+    (!projectAgentLimitsOverride || isValidAgentLimits(projectAgentLimitsDraft)) &&
+    (!projectCommandOverride || isValidCommandExecutionDraft(projectCommandDraft)) &&
+    (!projectContextOverride || isValidContextConfig(projectContextDraft))
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -3283,15 +3494,7 @@ export function App(): React.JSX.Element {
                   </div>
                   {openProjectMenuId === project.id && (
                     <div className="project-menu-panel">
-                      <label>
-                        <span>{t('projectDefaultModel')}</span>
-                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.models.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
-                          <option value="">{t('applicationDefault')}</option>
-                          {config.models.map((model) => <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>)}
-                          {config.modelGroups.map((group) => <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>)}
-                        </Select>
-                      </label>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>{t('contextSettings')}</Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openProjectSettings(project)}>{t('projectSettings')}</Button>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setProjectArchive(project, true)}>{t('archiveProject')}</Button>
                     </div>
                   )}
@@ -3410,7 +3613,7 @@ export function App(): React.JSX.Element {
                     {t('agentLimits')}
                   </Button>
                   {config.developerMode && activeProject && (
-                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openCommandSettings('conversation')}>
+                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandSettings}>
                       {t('commandAndReview')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault ?? defaultCommandExecutionConfig).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
                     </Button>
                   )}
@@ -3801,6 +4004,7 @@ export function App(): React.JSX.Element {
                 }}
               >
                 <Tab value="models">{t('models')}</Tab>
+                <Tab value="global">{t('globalSettings')}</Tab>
                 <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
                 <Tab value="archive">{t('archivedItems')}</Tab>
@@ -3809,30 +4013,6 @@ export function App(): React.JSX.Element {
               </TabList>
               {settingsTab === 'models' && (
               <section className="settings-group">
-                <div className="model-config-toolbar">
-                  <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
-                    <Select
-                      aria-label={t('defaultModelTarget')}
-                      value={configDraft.activeModelConfigId ?? ''}
-                      onChange={(_, data) => setConfigDraft((current) => ({
-                        ...current,
-                        activeModelConfigId: data.value || null,
-                      }))}
-                    >
-                      <option value="">{t('notConfigured')}</option>
-                      {configDraft.models.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name || t('unnamedModel')}
-                        </option>
-                      ))}
-                      {configDraft.modelGroups.map((group) => (
-                        <option key={group.id} value={group.id}>
-                          {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
-                        </option>
-                      ))}
-                    </Select>
-                  </Field>
-                </div>
                 <p className="model-config-status-line" role="status">
                   <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
                     {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
@@ -4169,8 +4349,185 @@ export function App(): React.JSX.Element {
                         {t('addSelectedGroupMembers')}
                       </Button>
                     </Field>
-                    <p className="settings-description">{t('groupEnvelopeNote')}</p>
+                     <p className="settings-description">{t('groupEnvelopeNote')}</p>
+                   </>
+                 )}
+               </section>
+               )}
+              {settingsTab === 'global' && (
+              <section className="settings-group">
+                <TabList
+                  selectedValue={globalSettingsTab}
+                  onTabSelect={(_, data) => setGlobalSettingsTab(data.value as typeof globalSettingsTab)}
+                >
+                  <Tab value="model">{t('globalTabModel')}</Tab>
+                  <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
+                  <Tab value="command">{t('globalTabCommand')}</Tab>
+                  <Tab value="context">{t('globalTabContext')}</Tab>
+                </TabList>
+                {globalSettingsTab === 'model' && (
+                  <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
+                    <Select
+                      aria-label={t('defaultModelTarget')}
+                      value={configDraft.activeModelConfigId ?? ''}
+                      onChange={(_, data) => setConfigDraft((current) => ({
+                        ...current,
+                        activeModelConfigId: data.value || null,
+                      }))}
+                    >
+                      <option value="">{t('notConfigured')}</option>
+                      {configDraft.models.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name || t('unnamedModel')}
+                        </option>
+                      ))}
+                      {configDraft.modelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+                {globalSettingsTab === 'agentLimits' && (
+                  <AgentLimitsFields
+                    value={configDraft.agentLimitsGlobal}
+                    disabled={interactionLocked}
+                    onChange={(patch) => setConfigDraft((current) => ({
+                      ...current,
+                      agentLimitsGlobal: { ...current.agentLimitsGlobal, ...patch },
+                    }))}
+                  />
+                )}
+                {globalSettingsTab === 'command' && (
+                  <>
+                    <div className="command-execution-global-group">
+                      <h3>{t('globalCommandExecution')}</h3>
+                      <CommandExecutionEditorFields
+                        value={configDraft.commandExecutionGlobal}
+                        onChange={(next) => setConfigDraft((current) => ({
+                          ...current,
+                          commandExecutionGlobal: next,
+                        }))}
+                        modelConfigs={flatDraftModelConfigs}
+                        globalReview={configDraft.commandReviewGlobal}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        showReview={false}
+                      />
+                    </div>
+                    <div className="command-review-global-group">
+                      <h3>{t('globalCommandReview')}</h3>
+                      <p className="settings-description">{t('globalCommandReviewDescription')}</p>
+                      <CommandReviewEditor
+                        value={configDraft.commandReviewGlobal}
+                        modelConfigs={flatDraftModelConfigs}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        onChange={(next) => setConfigDraft((current) => ({
+                          ...current,
+                          commandReviewGlobal: next,
+                        }))}
+                      />
+                    </div>
+                    <div className="shell-detection-group">
+                      <h3>{t('environmentDetection')}</h3>
+                      <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
+                        {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
+                      </Button>
+                      {shellDetection && (
+                        <div className="shell-detection-results">
+                          {shellDetection.interpreters.map((entry) => (
+                            <p key={entry.kind} className="shell-detection-item">
+                              <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
+                              <span className="shell-detection-detail">{entry.detail}</span>
+                            </p>
+                          ))}
+                          {shellDetection.environments.map((entry) => (
+                            <p key={entry.kind} className="shell-detection-item">
+                              <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
+                              <span className="shell-detection-detail">{entry.detail}</span>
+                            </p>
+                          ))}
+                          <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
+                            {t('pickBashExecutable')}
+                          </Button>
+                          <div className="wsl2-config-group">
+                            <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
+                              {t('configureWsl2')}
+                            </Button>
+                            {wsl2ConfigOpen && (
+                              <div className="wsl2-config-form">
+                                {wslDistros.length > 0 ? (
+                                  <Field label={t('wsl2Distro')}>
+                                    <Select
+                                      disabled={wsl2ConfigBusy}
+                                      value={wsl2Draft.distro}
+                                      onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
+                                    >
+                                      {wslDistros.map((distro) => (
+                                        <option key={distro} value={distro}>{distro}</option>
+                                      ))}
+                                    </Select>
+                                  </Field>
+                                ) : (
+                                  <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
+                                )}
+                                <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
+                                  <Input
+                                    disabled={wsl2ConfigBusy || wslDistros.length === 0}
+                                    value={wsl2Draft.sandboxUser}
+                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
+                                  />
+                                </Field>
+                                <div className="wsl2-config-actions">
+                                  <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
+                                    {t('save')}
+                                  </Button>
+                                  <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
+                                    {t('wsl2ClearConfig')}
+                                  </Button>
+                                  <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
+                                    {t('close')}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {shellDetection.wsl2Sandbox && (
+                            <div className="wsl2-sandbox-probe">
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
+                              </p>
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
+                              </p>
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
+                              </p>
+                              {shellDetection.wsl2Sandbox.interopEnabled && (
+                                <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
+                              )}
+                              {!shellDetection.wsl2Sandbox.socatAvailable && (
+                                <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </>
+                )}
+                {globalSettingsTab === 'context' && (
+                  <ContextSettingsFields
+                    value={configDraft.contextManagement}
+                    disabled={interactionLocked}
+                    onChange={(patch) => setConfigDraft((current) => ({
+                      ...current,
+                      contextManagement: { ...current.contextManagement, ...patch },
+                    }))}
+                  />
                 )}
               </section>
               )}
@@ -4225,119 +4582,16 @@ export function App(): React.JSX.Element {
                </section>
               )}
               {settingsTab === 'developer' && (
-               <section className="settings-group">
-                 <Switch
-                   checked={configDraft.developerMode}
-                  label={t('developerMode')}
-                  onChange={(_, data) => setConfigDraft((current) => ({
-                    ...current,
-                    developerMode: data.checked,
-                  }))}
-                />
-                <p className="settings-description">{t('developerModeDescription')}</p>
-                {configDraft.developerMode && (
-                  <div className="command-review-global-group">
-                    <h3>{t('globalCommandReview')}</h3>
-                    <p className="settings-description">{t('globalCommandReviewDescription')}</p>
-                    <CommandReviewEditor
-                      value={configDraft.commandReviewGlobal}
-                      modelConfigs={flatDraftModelConfigs}
-                      onOpenSyntaxHelp={openCommandRulesHelp}
-                      onChange={(next) => setConfigDraft((current) => ({ ...current, commandReviewGlobal: next }))}
-                    />
-                  </div>
-                )}
-                {configDraft.developerMode && (
-                  <div className="shell-detection-group">
-                    <h3>{t('environmentDetection')}</h3>
-                    <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
-                      {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
-                    </Button>
-                    {shellDetection && (
-                      <div className="shell-detection-results">
-                        {shellDetection.interpreters.map((entry) => (
-                          <p key={entry.kind} className="shell-detection-item">
-                            <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
-                            <span className="shell-detection-detail">{entry.detail}</span>
-                          </p>
-                        ))}
-                        {shellDetection.environments.map((entry) => (
-                          <p key={entry.kind} className="shell-detection-item">
-                            <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
-                            <span className="shell-detection-detail">{entry.detail}</span>
-                          </p>
-                        ))}
-                        <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
-                          {t('pickBashExecutable')}
-                        </Button>
-                        <div className="wsl2-config-group">
-                          <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
-                            {t('configureWsl2')}
-                          </Button>
-                          {wsl2ConfigOpen && (
-                            <div className="wsl2-config-form">
-                              {wslDistros.length > 0 ? (
-                                <Field label={t('wsl2Distro')}>
-                                  <Select
-                                    disabled={wsl2ConfigBusy}
-                                    value={wsl2Draft.distro}
-                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
-                                  >
-                                    {wslDistros.map((distro) => (
-                                      <option key={distro} value={distro}>{distro}</option>
-                                    ))}
-                                  </Select>
-                                </Field>
-                              ) : (
-                                <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
-                              )}
-                              <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
-                                <Input
-                                  disabled={wsl2ConfigBusy || wslDistros.length === 0}
-                                  value={wsl2Draft.sandboxUser}
-                                  onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
-                                />
-                              </Field>
-                              <div className="wsl2-config-actions">
-                                <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
-                                  {t('save')}
-                                </Button>
-                                <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
-                                  {t('wsl2ClearConfig')}
-                                </Button>
-                                <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
-                                  {t('close')}
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        {shellDetection.wsl2Sandbox && (
-                          <div className="wsl2-sandbox-probe">
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
-                            </p>
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
-                            </p>
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
-                            </p>
-                            {shellDetection.wsl2Sandbox.interopEnabled && (
-                              <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
-                            )}
-                            {!shellDetection.wsl2Sandbox.socatAvailable && (
-                              <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                   </div>
-                 )}
+                <section className="settings-group">
+                  <Switch
+                    checked={configDraft.developerMode}
+                    label={t('developerMode')}
+                    onChange={(_, data) => setConfigDraft((current) => ({
+                      ...current,
+                      developerMode: data.checked,
+                    }))}
+                  />
+                  <p className="settings-description">{t('developerModeDescription')}</p>
                 </section>
               )}
               {settingsTab === 'prompts' && (
@@ -4361,7 +4615,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
+                disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -4469,37 +4723,139 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog open={projectSettingsOpen} onOpenChange={(_, data) => setProjectSettingsOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('projectSettings')}{projectSettingsTarget ? ` · ${projectSettingsTarget.name}` : ''}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={projectSettingsTab}
+                onTabSelect={(_, data) => setProjectSettingsTab(data.value as typeof projectSettingsTab)}
+              >
+                <Tab value="model">{t('globalTabModel')}</Tab>
+                <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
+                <Tab value="command">{t('globalTabCommand')}</Tab>
+                <Tab value="context">{t('globalTabContext')}</Tab>
+              </TabList>
+              {projectSettingsTab === 'model' && (
+                <>
+                  <Field label={t('projectDefaultModel')}>
+                    <Select
+                      disabled={interactionLocked || config.models.length === 0}
+                      value={projectSettingsModelConfigId}
+                      onChange={(_, data) => setProjectSettingsModelConfigId(data.value)}
+                    >
+                      <option value="">{t('applicationDefault')}</option>
+                      {config.models.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>
+                      ))}
+                      {config.modelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  {projectSettingsModelConfigId === '' && (
+                    <p className="settings-description">{t('applicationDefault')} · {applicationDefaultTargetLabel}</p>
+                  )}
+                </>
+              )}
+              {projectSettingsTab === 'agentLimits' && (
+                <>
+                  <Switch
+                    checked={projectAgentLimitsOverride}
+                    disabled={interactionLocked}
+                    label={t('agentLimitsOverrideGlobal')}
+                    onChange={(_, data) => setProjectAgentLimitsOverride(data.checked)}
+                  />
+                  <AgentLimitsFields
+                    value={projectAgentLimitsDraft}
+                    disabled={interactionLocked || !projectAgentLimitsOverride}
+                    onChange={(patch) => setProjectAgentLimitsDraft((current) => ({ ...current, ...patch }))}
+                  />
+                </>
+              )}
+              {projectSettingsTab === 'command' && (
+                <>
+                  <Switch
+                    checked={projectCommandOverride}
+                    disabled={interactionLocked}
+                    label={t('commandOverrideDefault')}
+                    onChange={(_, data) => setProjectCommandOverride(data.checked)}
+                  />
+                  <CommandExecutionEditorFields
+                    value={projectCommandDraft}
+                    onChange={setProjectCommandDraft}
+                    disabled={interactionLocked || !projectCommandOverride}
+                    modelConfigs={flatModelConfigs}
+                    sessionModel={effectiveModelConfig}
+                    globalReview={config.commandReviewGlobal}
+                    onOpenSyntaxHelp={openCommandRulesHelp}
+                  />
+                </>
+              )}
+              {projectSettingsTab === 'context' && (
+                <>
+                  <Switch
+                    checked={projectContextOverride}
+                    disabled={interactionLocked}
+                    label={t('overrideApplicationContext')}
+                    onChange={(_, data) => {
+                      setProjectContextOverride(data.checked)
+                      if (data.checked) {
+                        setProjectContextDraft({ ...(projectSettingsTarget?.contextConfigOverride ?? config.contextManagement) })
+                      }
+                    }}
+                  />
+                  <ContextSettingsFields
+                    disabled={interactionLocked || !projectContextOverride}
+                    modelDisabled={interactionLocked}
+                    modelTargets={[
+                      ...config.models.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                      ...config.modelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                    ]}
+                    referenceModel={resolveModelTarget(config, projectSettingsModelConfigId || config.activeModelConfigId)}
+                    activeModelConfigId={projectSettingsModelConfigId}
+                    emptyModelOptionLabel={t('applicationDefault')}
+                    onModelConfigChange={(modelConfigId) => setProjectSettingsModelConfigId(modelConfigId)}
+                    value={projectContextDraft}
+                    onChange={(patch) => setProjectContextDraft((current) => ({ ...current, ...patch }))}
+                  />
+                </>
+              )}
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setProjectSettingsOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !projectSettingsValid}
+                onClick={() => void saveProjectSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={agentLimitsDialogOpen} onOpenChange={(_, data) => setAgentLimitsDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
             <DialogTitle>{t('conversationAgentLimits')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
-                <Input
-                  disabled={interactionLocked}
-                  min={1}
-                  max={maximumAgentLimit}
-                  type="number"
-                  value={String(agentLimitsDraft.modelRequestsPerRound)}
-                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
-                    ...current,
-                    modelRequestsPerRound: Number(data.value),
-                  }))}
-                />
-              </Field>
-              <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
-                <Input
-                  disabled={interactionLocked}
-                  min={1}
-                  max={maximumAgentLimit}
-                  type="number"
-                  value={String(agentLimitsDraft.toolCallsPerRequest)}
-                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
-                    ...current,
-                    toolCallsPerRequest: Number(data.value),
-                  }))}
-                />
-              </Field>
+              <Switch
+                checked={agentLimitsOverride}
+                disabled={interactionLocked}
+                label={t('agentLimitsOverrideProject')}
+                onChange={(_, data) => setAgentLimitsOverride(data.checked)}
+              />
+              <AgentLimitsFields
+                value={agentLimitsDraft}
+                disabled={interactionLocked || !agentLimitsOverride}
+                onChange={(patch) => setAgentLimitsDraft((current) => ({ ...current, ...patch }))}
+              />
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -4508,7 +4864,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={interactionLocked || saving || !isValidAgentLimits(agentLimitsDraft)}
+                disabled={interactionLocked || saving || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))}
                 onClick={() => void saveAgentLimitsSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -4523,148 +4879,21 @@ export function App(): React.JSX.Element {
           <DialogBody>
             <DialogTitle>{t('commandAndReviewSettings')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <TabList
-                selectedValue={commandSettingsScope}
-                onTabSelect={(_, data) => switchCommandSettingsScope(data.value as 'conversation' | 'project')}
-              >
-                <Tab value="conversation">{t('commandScopeConversation')}</Tab>
-                <Tab value="project">{t('commandScopeProject')}</Tab>
-              </TabList>
-              <TabList
-                selectedValue={commandTab}
-                onTabSelect={(_, data) => setCommandTab(data.value as typeof commandTab)}
-              >
-                <Tab value="execution">{t('commandTabExecution')}</Tab>
-                <Tab value="review">{t('commandTabReview')}</Tab>
-              </TabList>
-              {commandTab === 'execution' && (
-                <>
-                  <Switch
-                    checked={commandDraft !== null}
-                    disabled={interactionLocked}
-                    label={commandSettingsScope === 'conversation' ? t('commandOverrideProject') : t('commandOverrideDefault')}
-                    onChange={(_, data) => setCommandDraft(data.checked
-                      ? commandSettingsScope === 'conversation'
-                        ? effectiveConversationCommandConfig()
-                        : { ...defaultCommandExecutionConfig, review: structuredClone(config.commandReviewGlobal) }
-                      : null)}
-                  />
-                  {commandDraft === null ? (
-                    <p className="settings-description">
-                      {commandSettingsScope === 'conversation' ? t('commandFollowingProject') : t('commandFollowingDefault')}
-                    </p>
-                  ) : (
-                    <>
-                      <Switch
-                        checked={commandDraft.enabled}
-                        disabled={interactionLocked}
-                        label={t('commandExecutionEnabled')}
-                        onChange={(_, data) => setCommandDraft((current) => current && { ...current, enabled: data.checked })}
-                      />
-                      <p className="settings-description">{t('commandExecutionDescription')}</p>
-                      <Field label={t('commandInterpreter')}>
-                        <Select
-                          disabled={interactionLocked || !commandDraft.enabled}
-                          value={commandDraft.interpreter}
-                          onChange={(_, data) => setCommandDraft((current) => current && ({
-                            ...current,
-                            interpreter: data.value as CommandExecutionConfig['interpreter'],
-                          }))}
-                        >
-                          <option value="bash">bash</option>
-                          <option value="pwsh7">pwsh 7</option>
-                          <option value="pwsh51">pwsh 5.1</option>
-                        </Select>
-                      </Field>
-                      <Field label={t('commandEnvironment')}>
-                        <Select
-                          disabled={interactionLocked || !commandDraft.enabled}
-                          value={commandDraft.environment}
-                          onChange={(_, data) => setCommandDraft((current) => current && ({
-                            ...current,
-                            environment: data.value as CommandExecutionConfig['environment'],
-                          }))}
-                        >
-                          <option value="bare">{t('commandEnvBare')}</option>
-                          <option value="wsl2">wsl2</option>
-                          <option value="docker">docker</option>
-                          <option value="windows-sandbox">Windows Sandbox</option>
-                        </Select>
-                      </Field>
-                      {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
-                        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
-                      )}
-                      {commandDraft.enabled && (
-                        <div className="enabled-environments-group">
-                          <p className="section-label">{t('enabledEnvironments')}</p>
-                          <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
-                          {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
-                            <div className="enabled-environments-row" key={interpreter}>
-                              <span className="enabled-environments-label">
-                                {interpreterLabels[interpreter] ?? interpreter}
-                              </span>
-                              {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
-                                <label className="enabled-environments-check" key={environment}>
-                                  <input
-                                    type="checkbox"
-                                    checked={commandDraft.enabledEnvironments[interpreter]?.includes(environment) ?? false}
-                                    onChange={(event) => setCommandDraft((current) => {
-                                      if (!current) return current
-                                      const current2 = current.enabledEnvironments[interpreter] ?? []
-                                      const next = event.target.checked
-                                        ? [...current2, environment]
-                                        : current2.filter((entry) => entry !== environment)
-                                      return {
-                                        ...current,
-                                        enabledEnvironments: {
-                                          ...current.enabledEnvironments,
-                                          [interpreter]: next,
-                                        },
-                                      }
-                                    })}
-                                  />
-                                  {environmentLabels[environment] ?? environment}
-                                </label>
-                              ))}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
-              {commandTab === 'review' && (
-                commandDraft === null ? (
-                  <p className="settings-description">{t('reviewFollowingNote')}</p>
-                ) : (
-                  <>
-                    <Switch
-                      checked={commandDraft.review !== null}
-                      disabled={interactionLocked}
-                      label={t('reviewOverrideGlobal')}
-                      onChange={(_, data) => setCommandDraft((current) => current && ({
-                        ...current,
-                        review: data.checked
-                          ? structuredClone(current.review ?? config.commandReviewGlobal)
-                          : null,
-                      }))}
-                    />
-                    {commandDraft.review === null ? (
-                      <p className="settings-description">{t('reviewFollowingGlobal')}</p>
-                    ) : (
-                      <CommandReviewEditor
-                        value={commandDraft.review}
-                        disabled={interactionLocked}
-                        modelConfigs={flatModelConfigs}
-                        sessionModel={effectiveModelConfig}
-                        onOpenSyntaxHelp={openCommandRulesHelp}
-                        onChange={(next) => setCommandDraft((current) => current && ({ ...current, review: next }))}
-                      />
-                    )}
-                  </>
-                )
-              )}
+              <Switch
+                checked={commandOverride}
+                disabled={interactionLocked}
+                label={t('commandOverrideProject')}
+                onChange={(_, data) => setCommandOverride(data.checked)}
+              />
+              <CommandExecutionEditorFields
+                value={commandDraft}
+                onChange={setCommandDraft}
+                disabled={interactionLocked || !commandOverride}
+                modelConfigs={flatModelConfigs}
+                sessionModel={effectiveModelConfig}
+                globalReview={config.commandReviewGlobal}
+                onOpenSyntaxHelp={openCommandRulesHelp}
+              />
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>

@@ -104,6 +104,7 @@ import {
   unlockConversationToolset,
   setConversationContextConfig,
   setConversationModelConfig,
+  setProjectAgentLimitsDefault,
   setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
@@ -356,6 +357,7 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
     defaultModelConfigId: null,
     contextConfigOverride: null,
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    agentLimitsDefault: null,
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -395,6 +397,7 @@ function buildPromptSnapshot(): PromptSnapshot {
     defaultModelConfigId: null,
     contextConfigOverride: null,
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    agentLimitsDefault: null,
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -628,7 +631,10 @@ async function developProject(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
-  const agentLimits = structuredClone(conversation.agentLimits)
+  // Three-level inheritance: conversation ?? project default ?? global default.
+  const agentLimits = structuredClone(
+    conversation.agentLimits ?? project.agentLimitsDefault ?? appConfig.agentLimitsGlobal,
+  )
   const commandExecution = appConfig.developerMode
     ? structuredClone(resolveCommandExecutionConfig(project, conversation, appConfig))
     : { ...defaultCommandExecutionConfig }
@@ -1180,7 +1186,7 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationContextConfig(projectId, conversationId, contextConfig)
   })
-  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
+  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
@@ -1197,6 +1203,10 @@ app.whenReady().then(() => {
       await validateCommandExecution(commandExecution)
     }
     return setProjectCommandExecutionDefault(projectId, commandExecution)
+  })
+  ipcMain.handle('projects:set-agent-limits-default', (_event, projectId: string, agentLimits: AgentLimitsConfig | null) => {
+    ensureProjectIdle(projectId)
+    return setProjectAgentLimitsDefault(projectId, agentLimits)
   })
   ipcMain.handle('shells:detect', () => detectShells())
   ipcMain.handle('shells:cached', () => getCachedShellDetection())

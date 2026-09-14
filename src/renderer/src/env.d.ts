@@ -82,7 +82,7 @@ declare global {
       setConversationAgentLimits(
         projectId: string,
         conversationId: string,
-        agentLimits: AgentLimitsConfig,
+        agentLimits: AgentLimitsConfig | null,
       ): Promise<Project>
       setConversationCommandExecution(
         projectId: string,
@@ -92,6 +92,10 @@ declare global {
       setProjectCommandExecutionDefault(
         projectId: string,
         commandExecution: CommandExecutionConfig | null,
+      ): Promise<Project>
+      setProjectAgentLimitsDefault(
+        projectId: string,
+        agentLimits: AgentLimitsConfig | null,
       ): Promise<Project>
       onCommandReviewRequest(listener: (request: CommandApprovalRequest) => void): () => void
       respondCommandReview(requestId: string, response: CommandApprovalResponse): Promise<boolean>

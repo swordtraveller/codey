@@ -33,6 +33,7 @@ describe('agent tools', () => {
       defaultModelConfigId: null,
       contextConfigOverride: null,
       commandExecutionDefault: { ...defaultCommandExecutionConfig },
+      agentLimitsDefault: null,
       folders: [{ id: 'root', path: root }],
       pythonEnvironmentFolderId: 'root',
       conversations: [],

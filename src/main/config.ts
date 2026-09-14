@@ -3,9 +3,12 @@ import { app, safeStorage } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
+  defaultAgentLimitsConfig,
   defaultAppConfig,
+  type AgentLimitsConfig,
   type AppConfig,
   type AppLanguage,
+  type CommandExecutionConfig,
   type CommandReviewConfig,
   type ContextManagementConfig,
   type ModelConfig,
@@ -15,7 +18,13 @@ import {
   type ProviderConfig,
 } from '../shared/types'
 import { modelGroupDefaultRetries, modelGroupMaxRetries, modelGroupMinRetries } from '../shared/types'
-import { isValidCommandReviewConfig, normalizeCommandReviewConfig } from './command-execution-config'
+import { normalizeAgentLimitsConfig, isValidAgentLimitsConfig } from './agent-limits'
+import {
+  isValidCommandExecutionConfig,
+  isValidCommandReviewConfig,
+  normalizeCommandExecutionConfig,
+  normalizeCommandReviewConfig,
+} from './command-execution-config'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 
 type LegacyStoredModel = Partial<ModelConfig> & {
@@ -42,6 +51,8 @@ type StoredAppConfig = {
   networkAccessEnabled?: boolean
   performanceTracingEnabled?: boolean
   commandReview?: Partial<CommandReviewConfig>
+  agentLimits?: Partial<AgentLimitsConfig>
+  commandExecutionGlobal?: Partial<CommandExecutionConfig> | null
 }
 
 type LegacyStoredConfig = LegacyStoredModel & {
@@ -242,6 +253,7 @@ async function writeConfig(config: AppConfig): Promise<void> {
     ...config,
     modelConfigs: undefined,
     commandReview: config.commandReviewGlobal,
+    agentLimits: config.agentLimitsGlobal,
     providers: config.providers.map((provider) => ({
       ...provider,
       apiKey: encrypted
@@ -252,6 +264,7 @@ async function writeConfig(config: AppConfig): Promise<void> {
   }
   delete (stored as Record<string, unknown>).modelConfigs
   delete (stored as Record<string, unknown>).commandReviewGlobal
+  delete (stored as Record<string, unknown>).agentLimitsGlobal
 
   await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
 }
@@ -288,6 +301,20 @@ function repairActiveTarget(layers: { models: ModelLink[]; modelGroups: ModelGro
   return layers.models[0]?.id ?? layers.modelGroups[0]?.id ?? null
 }
 
+function readAgentLimitsGlobal(stored: StoredAppConfig): AgentLimitsConfig {
+  const normalized = normalizeAgentLimitsConfig(stored.agentLimits)
+  return isValidAgentLimitsConfig(normalized)
+    ? normalized
+    : { ...defaultAgentLimitsConfig }
+}
+
+function readCommandExecutionGlobal(stored: StoredAppConfig): CommandExecutionConfig {
+  const normalized = { ...normalizeCommandExecutionConfig(stored.commandExecutionGlobal ?? undefined), review: null }
+  return isValidCommandExecutionConfig(normalized)
+    ? normalized
+    : { ...defaultAppConfig.commandExecutionGlobal }
+}
+
 export async function readConfig(): Promise<AppConfig> {
   try {
     const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredAppConfig & LegacyStoredConfig
@@ -309,6 +336,8 @@ export async function readConfig(): Promise<AppConfig> {
       const commandReviewGlobal = stored.commandReview === undefined
         ? { ...defaultAppConfig.commandReviewGlobal }
         : normalizeCommandReviewConfig(stored.commandReview)
+      const agentLimitsGlobal = readAgentLimitsGlobal(stored)
+      const commandExecutionGlobal = readCommandExecutionGlobal(stored)
       const activeModelConfigId = repairActiveTarget(layers, stored.activeModelConfigId ?? null)
       const config: AppConfig = {
         modelConfigs: [],
@@ -325,6 +354,8 @@ export async function readConfig(): Promise<AppConfig> {
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
         commandReviewGlobal,
+        agentLimitsGlobal,
+        commandExecutionGlobal,
       }
       const legacyMargin = stored.contextManagement?.safeOutputMargin
       const needsMigration = layers.migrated ||
@@ -335,6 +366,8 @@ export async function readConfig(): Promise<AppConfig> {
         stored.networkAccessEnabled === undefined ||
         stored.performanceTracingEnabled === undefined ||
         stored.commandReview === undefined ||
+        stored.agentLimits === undefined ||
+        stored.commandExecutionGlobal === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || (stored.modelConfigs ?? []).some((model) =>
           !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -358,6 +391,8 @@ export async function readConfig(): Promise<AppConfig> {
         commandReviewGlobal: stored.commandReview === undefined
           ? { ...defaultAppConfig.commandReviewGlobal }
           : normalizeCommandReviewConfig(stored.commandReview),
+        agentLimitsGlobal: readAgentLimitsGlobal(stored),
+        commandExecutionGlobal: readCommandExecutionGlobal(stored),
       }
     }
 
@@ -379,6 +414,8 @@ export async function readConfig(): Promise<AppConfig> {
       commandReviewGlobal: stored.commandReview === undefined
         ? { ...defaultAppConfig.commandReviewGlobal }
         : normalizeCommandReviewConfig(stored.commandReview),
+      agentLimitsGlobal: readAgentLimitsGlobal(stored),
+      commandExecutionGlobal: readCommandExecutionGlobal(stored),
     }
     await writeConfig(migrated)
     return migrated
@@ -397,6 +434,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const modelGroups = config.modelGroups.map(normalizeModelGroup)
   const contextManagement = normalizeContextManagementConfig(config.contextManagement)
   const commandReviewGlobal = normalizeCommandReviewConfig(config.commandReviewGlobal)
+  const agentLimitsGlobal = normalizeAgentLimitsConfig(config.agentLimitsGlobal)
+  const commandExecutionGlobal = { ...normalizeCommandExecutionConfig(config.commandExecutionGlobal), review: null }
   const activeModelConfigId = repairActiveTarget(
     { models, modelGroups },
     config.activeModelConfigId ?? models[0]?.id ?? null,
@@ -413,7 +452,9 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     !layersValid ||
     providers.length === 0 ||
     !isValidContextManagementConfig(contextManagement) ||
-    !isValidCommandReviewConfig(commandReviewGlobal)
+    !isValidCommandReviewConfig(commandReviewGlobal) ||
+    !isValidAgentLimitsConfig(agentLimitsGlobal) ||
+    !isValidCommandExecutionConfig(commandExecutionGlobal)
   ) {
     throw new Error('Enter valid model and context settings')
   }
@@ -433,6 +474,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     networkAccessEnabled: config.networkAccessEnabled === true,
     performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
     commandReviewGlobal,
+    agentLimitsGlobal,
+    commandExecutionGlobal,
   }
   await writeConfig(normalized)
   return normalized
