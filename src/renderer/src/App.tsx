@@ -1766,6 +1766,9 @@ export function App(): React.JSX.Element {
   const [selectedDefinitionId, setSelectedDefinitionId] = useState('')
   const [selectedLinkId, setSelectedLinkId] = useState('')
   const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [groupMemberProviderFilter, setGroupMemberProviderFilter] = useState('')
+  const [groupMemberModelFilter, setGroupMemberModelFilter] = useState('')
+  const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<string[]>([])
   const [modelCombos, setModelCombos] = useState<Array<{
     key: string
     providerId: string
@@ -2824,15 +2827,16 @@ export function App(): React.JSX.Element {
     }))
   }
 
-  function addGroupMember(groupId: string, modelId: string): void {
+  function addSelectedGroupMembers(groupId: string): void {
+    if (selectedGroupMemberIds.length === 0) return
     setConfigDraft((current) => ({
       ...current,
-      modelGroups: current.modelGroups.map((group) =>
-        group.id === groupId && !group.modelIds.includes(modelId)
-          ? { ...group, modelIds: [...group.modelIds, modelId] }
-          : group,
+      modelGroups: current.modelGroups.map((group) => group.id === groupId
+        ? { ...group, modelIds: [...group.modelIds, ...selectedGroupMemberIds.filter((id) => !group.modelIds.includes(id))] }
+        : group,
       ),
     }))
+    setSelectedGroupMemberIds([])
   }
 
   async function testSelectedProviderConnectivity(): Promise<void> {
@@ -3204,6 +3208,17 @@ export function App(): React.JSX.Element {
   const selectedDefinitionDraft = configDraft.modelDefinitions.find((definition) => definition.id === selectedDefinitionId) ?? configDraft.modelDefinitions[0]
   const selectedModelLinkDraft = configDraft.models.find((model) => model.id === selectedLinkId) ?? configDraft.models[0]
   const selectedGroupDraft = configDraft.modelGroups.find((group) => group.id === selectedGroupId) ?? configDraft.modelGroups[0]
+  const availableGroupMembers = selectedGroupDraft
+    ? configDraft.models.filter((model) => {
+      if (selectedGroupDraft.modelIds.includes(model.id)) return false
+      const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
+      const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
+      const providerName = (provider?.name || provider?.baseUrl || '').toLowerCase()
+      const modelName = (definition?.modelName || model.name || '').toLowerCase()
+      return providerName.includes(groupMemberProviderFilter.trim().toLowerCase())
+        && modelName.includes(groupMemberModelFilter.trim().toLowerCase())
+    })
+    : []
   const invalidModelConfig = (() => {
     if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
     if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
@@ -3777,33 +3792,28 @@ export function App(): React.JSX.Element {
               {settingsTab === 'models' && (
               <section className="settings-group">
                 <div className="model-config-toolbar">
-                  <Select
-                    aria-label={t('defaultModelTarget')}
-                    value={configDraft.activeModelConfigId ?? ''}
-                    onChange={(_, data) => setConfigDraft((current) => ({
-                      ...current,
-                      activeModelConfigId: data.value || null,
-                    }))}
-                  >
-                    <option value="">{t('notConfigured')}</option>
-                    {configDraft.models.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name || t('unnamedModel')}
-                      </option>
-                    ))}
-                    {configDraft.modelGroups.map((group) => (
-                      <option key={group.id} value={group.id}>
-                        {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button
-                    appearance="primary"
-                    disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || interactionLocked || saving}
-                    onClick={() => void saveSettings()}
-                  >
-                    {saving ? t('saving') : t('save')}
-                  </Button>
+                  <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
+                    <Select
+                      aria-label={t('defaultModelTarget')}
+                      value={configDraft.activeModelConfigId ?? ''}
+                      onChange={(_, data) => setConfigDraft((current) => ({
+                        ...current,
+                        activeModelConfigId: data.value || null,
+                      }))}
+                    >
+                      <option value="">{t('notConfigured')}</option>
+                      {configDraft.models.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name || t('unnamedModel')}
+                        </option>
+                      ))}
+                      {configDraft.modelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
                 </div>
                 <p className="model-config-status-line" role="status">
                   <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
@@ -4047,7 +4057,10 @@ export function App(): React.JSX.Element {
                   <Select
                     aria-label={t('groupsSection')}
                     value={selectedGroupDraft?.id ?? ''}
-                    onChange={(_, data) => setSelectedGroupId(data.value)}
+                    onChange={(_, data) => {
+                      setSelectedGroupId(data.value)
+                      setSelectedGroupMemberIds([])
+                    }}
                   >
                     {configDraft.modelGroups.map((group) => (
                       <option key={group.id} value={group.id}>
@@ -4095,16 +4108,48 @@ export function App(): React.JSX.Element {
                       })}
                     </div>
                     <Field label={t('addGroupMember')}>
-                      <Select value="" onChange={(_, data) => data.value && addGroupMember(selectedGroupDraft.id, data.value)}>
-                        <option value="">{t('addGroupMemberPlaceholder')}</option>
-                        {configDraft.models
-                          .filter((model) => !selectedGroupDraft.modelIds.includes(model.id))
-                          .map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.name || t('unnamedModel')}
-                            </option>
-                          ))}
-                      </Select>
+                      <div className="group-member-filters">
+                        <Input
+                          aria-label={t('groupMemberProviderFilter')}
+                          placeholder={t('groupMemberProviderFilter')}
+                          value={groupMemberProviderFilter}
+                          onChange={(_, data) => setGroupMemberProviderFilter(data.value)}
+                        />
+                        <Input
+                          aria-label={t('groupMemberModelFilter')}
+                          placeholder={t('groupMemberModelFilter')}
+                          value={groupMemberModelFilter}
+                          onChange={(_, data) => setGroupMemberModelFilter(data.value)}
+                        />
+                      </div>
+                      <div className="group-member-picker" role="listbox" aria-label={t('addGroupMember')}>
+                        {availableGroupMembers.length === 0 && (
+                          <p className="settings-description">{t('groupMemberNoMatches')}</p>
+                        )}
+                        {availableGroupMembers.map((model) => {
+                          const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
+                          const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
+                          const checked = selectedGroupMemberIds.includes(model.id)
+                          return (
+                            <label className="group-member-option" key={model.id}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => setSelectedGroupMemberIds((current) => checked ? current.filter((id) => id !== model.id) : [...current, model.id])}
+                              />
+                              <span>{provider?.name || provider?.baseUrl || t('unnamedProvider')}</span>
+                              <span>{definition?.modelName || model.name || t('unnamedModel')}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <Button
+                        appearance="secondary"
+                        disabled={selectedGroupMemberIds.length === 0}
+                        onClick={() => addSelectedGroupMembers(selectedGroupDraft.id)}
+                      >
+                        {t('addSelectedGroupMembers')}
+                      </Button>
                     </Field>
                     <p className="settings-description">{t('groupEnvelopeNote')}</p>
                   </>

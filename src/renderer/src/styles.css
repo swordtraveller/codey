@@ -2074,6 +2074,29 @@ h1 {
   gap: 6px;
 }
 
+.group-member-filters {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 8px;
+}
+
+.group-member-picker {
+  border: 1px solid var(--colorNeutralStroke2);
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+
+.group-member-option {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  padding: 6px 0;
+}
+
 .group-member-index {
   min-width: 18px;
   text-align: right;
