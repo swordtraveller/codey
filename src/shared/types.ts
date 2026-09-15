@@ -575,12 +575,13 @@ export const commandTimeoutMaxSeconds = 86_400
 
 export const supportedCommandCombos: Array<{ interpreter: CommandInterpreter; environment: CommandEnvironment }> = [
   { interpreter: 'bash', environment: 'bare' },
-  { interpreter: 'pwsh7', environment: 'bare' },
-  { interpreter: 'pwsh51', environment: 'bare' },
-  { interpreter: 'bash', environment: 'wsl2' },
   { interpreter: 'bash', environment: 'docker' },
-  { interpreter: 'pwsh51', environment: 'docker' },
+  { interpreter: 'bash', environment: 'wsl2' },
+  { interpreter: 'pwsh7', environment: 'bare' },
   { interpreter: 'pwsh7', environment: 'docker' },
+  { interpreter: 'pwsh7', environment: 'wsl2' },
+  { interpreter: 'pwsh51', environment: 'bare' },
+  { interpreter: 'pwsh51', environment: 'docker' },
 ]
 
 /** Docker images used for sandboxed command execution. */

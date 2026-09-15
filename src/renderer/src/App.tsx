@@ -1,4 +1,4 @@
-﻿import {
+import {
   Button,
   Dialog,
   DialogActions,
@@ -691,7 +691,9 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
             <span className="enabled-environments-label">
               {interpreterLabels[interpreter] ?? interpreter}
             </span>
-            {(['bare', 'wsl2', 'docker'] as const).map((environment) => (
+            {(['bare', 'wsl2', 'docker'] as const).map((environment) => {
+              if (interpreter === 'pwsh51' && environment === 'wsl2') return null
+              return (
               <label className="enabled-environments-check" key={environment}>
                 <input
                   type="checkbox"
@@ -707,7 +709,8 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
                 />
                 {environmentLabels[environment] ?? environment}
               </label>
-            ))}
+              )
+            })}
           </div>
         ))}
       </div>
