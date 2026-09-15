@@ -28,6 +28,8 @@ import type {
   ScreenshotSource,
   Wsl2ManualConfig,
   Conversation,
+  NotificationOptions,
+  NotificationSettings,
   Project,
 } from '../shared/types'
 import { defaultCommandExecutionConfig, defaultStrategyPrompt, layeredStrategyPrompt } from '../shared/types'
@@ -104,6 +106,7 @@ import {
   unlockConversationToolset,
   setConversationContextConfig,
   setConversationModelConfig,
+  setConversationReadState,
   setProjectAgentLimitsDefault,
   setProjectCommandExecutionDefault,
   setProjectContextConfig,
@@ -116,6 +119,7 @@ import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-ex
 import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
 import { isContextConfigValidForModel } from './context-config'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
+import { notificationManager } from './notification-manager'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
@@ -497,6 +501,13 @@ function requestCommandApproval(
       }
       resolve({ approved: response.approved, timeoutSeconds: request.timeoutSeconds })
     })
+    notificationManager.showNotification({
+      type: 'needs-confirmation',
+      title: 'Confirmation required',
+      body: request.command,
+      projectId: context.projectId,
+      conversationId: context.conversationId,
+    })
     targetWindow.webContents.send('command-review:request', {
       requestId,
       command: request.command,
@@ -816,6 +827,23 @@ async function developProject(
     durationMs: performance.now() - totalStartedAt,
     data: { result: turn.result, timelineItems: result.timeline.length },
   })
+  if (turn.result === 'normal') {
+    notificationManager.showNotification({
+      type: 'task-complete',
+      title: 'Task completed',
+      body: conversation.title || 'Development finished',
+      projectId,
+      conversationId,
+    })
+  } else if (result.error && turn.result !== 'stopped') {
+    notificationManager.showNotification({
+      type: 'task-failed',
+      title: 'Task failed',
+      body: result.error,
+      projectId,
+      conversationId,
+    })
+  }
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -891,6 +919,7 @@ function createMainWindow(): void {
     },
   })
   mainWindow = window
+  notificationManager.setMainWindow(window)
   const webContentsId = window.webContents.id
   window.on('closed', () => {
     developmentProgressSubscriptions.delete(webContentsId)
@@ -1134,6 +1163,13 @@ app.whenReady().then(() => {
   ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
   ipcMain.handle('models:test-provider', (_event, provider: { baseUrl: string; apiKey: string }) => testProviderConnectivity(provider))
   ipcMain.handle('models:list-provider-models', (_event, provider: { baseUrl: string; apiKey: string }) => listProviderModels(provider))
+  ipcMain.handle('notifications:show', (_event, payload: NotificationOptions) => {
+    notificationManager.showNotification(payload)
+  })
+  ipcMain.handle('notifications:get-settings', () => notificationManager.getSettings())
+  ipcMain.handle('notifications:set-settings', (_event, settings: Partial<NotificationSettings>) => {
+    notificationManager.updateSettings(settings)
+  })
   ipcMain.handle('projects:get', () => getProjects())
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
@@ -1177,6 +1213,9 @@ app.whenReady().then(() => {
     return setProjectArchived(projectId, archived)
   })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId))
+  ipcMain.handle('conversations:set-read-state', (_event, projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) => {
+    return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt)
+  })
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
     await validateModelConfigId(modelConfigId)

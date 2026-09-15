@@ -671,6 +671,10 @@ export type Conversation = {
   messages: ChatMessage[]
   agentMessages: AgentContextMessage[]
   context?: ContextMetrics
+  /** ID of the last message the user has read in this conversation. */
+  lastReadMessageId?: string
+  /** Timestamp when the conversation was last read (Unix timestamp in ms). */
+  lastReadAt?: number
 }
 
 export type ProjectFolder = {
@@ -885,4 +889,45 @@ export type ScreenshotSelection = {
   y: number
   width: number
   height: number
+}
+
+
+// --- System notifications ---
+
+/** System notification category */
+export type NotificationType =
+  | 'task-complete'
+  | 'task-failed'
+  | 'needs-confirmation'
+  | 'connection-error'
+  | 'model-error'
+
+export type NotificationOptions = {
+  type: NotificationType
+  title: string
+  body: string
+  conversationId?: string
+  projectId?: string
+  messageId?: string
+  silent?: boolean
+}
+
+export type NotificationSettings = {
+  enabled: boolean
+  taskComplete: boolean
+  taskFailed: boolean
+  needsConfirmation: boolean
+  connectionError: boolean
+  modelError: boolean
+  onlyWhenUnfocused: boolean
+}
+
+export const defaultNotificationSettings: NotificationSettings = {
+  enabled: true,
+  taskComplete: true,
+  taskFailed: true,
+  needsConfirmation: true,
+  connectionError: true,
+  modelError: true,
+  onlyWhenUnfocused: true,
 }

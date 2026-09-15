@@ -28,6 +28,8 @@ import type {
   ScreenshotSelection,
   ScreenshotSource,
   TokenLimitSimulation,
+  NotificationOptions,
+  NotificationSettings,
 } from '../../shared/types'
 
 interface RuntimeInfo {
@@ -108,6 +110,7 @@ declare global {
       getPromptSnapshot(): Promise<PromptSnapshot>
       getToolHelpSnapshot(): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
+      setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project>
       develop(
         projectId: string,
         conversationId: string,
@@ -152,6 +155,10 @@ declare global {
         conversationId: string,
         requestTokens: number,
       ): Promise<TokenLimitSimulation>
+      showNotification(payload: NotificationOptions): Promise<void>
+      getNotificationSettings(): Promise<NotificationSettings>
+      setNotificationSettings(settings: Partial<NotificationSettings>): Promise<void>
+      onNotificationClicked(callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void): () => void
     }
   }
 }

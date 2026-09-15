@@ -146,6 +146,8 @@ contextBridge.exposeInMainWorld(
     getToolHelpSnapshot: (): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot'),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
+    setConversationReadState: (projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) =>
+      ipcRenderer.invoke('conversations:set-read-state', projectId, conversationId, lastReadMessageId, lastReadAt),
     develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>
       ipcRenderer.invoke('development:send', projectId, conversationId, content, images, traceId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
@@ -207,5 +209,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:unpin-lowest', projectId, conversationId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
       ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
+    showNotification: (payload: { type: string; title: string; body: string; projectId?: string; conversationId?: string; messageId?: string }) =>
+      ipcRenderer.invoke('notifications:show', payload),
+    getNotificationSettings: () => ipcRenderer.invoke('notifications:get-settings'),
+    setNotificationSettings: (settings: any) => ipcRenderer.invoke('notifications:set-settings', settings),
+    onNotificationClicked: (callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data)
+      ipcRenderer.on('notification:clicked', handler)
+      return () => ipcRenderer.removeListener('notification:clicked', handler)
+    },
   }),
 )

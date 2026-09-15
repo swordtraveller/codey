@@ -630,6 +630,18 @@ export function setConversationArchived(projectId: string, conversationId: strin
   })
 }
 
+/** Marks a conversation as read up to a given message id and persists it. */
+export function setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.lastReadMessageId = lastReadMessageId ?? undefined
+    conversation.lastReadAt = lastReadAt ?? undefined
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
 export function setConversationAgentLimits(projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const normalized = agentLimits === null
