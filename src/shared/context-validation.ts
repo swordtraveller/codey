@@ -13,6 +13,7 @@ export function normalizeContextManagementConfig(
     ? Math.floor(merged.maxInputTokens)
     : 0
   return {
+    autoBudgetEnabled: merged.autoBudgetEnabled === undefined ? true : Boolean(merged.autoBudgetEnabled),
     layeredEnabled: Boolean(merged.layeredEnabled),
     filterEnabled: Boolean(merged.filterEnabled),
     rewriteEnabled: Boolean(merged.rewriteEnabled),

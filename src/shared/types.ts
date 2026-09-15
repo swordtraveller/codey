@@ -142,6 +142,8 @@ export type ContextManagementConfig = {
   filterEnabled: boolean
   rewriteEnabled: boolean
   truncateEnabled: boolean
+  /** Automatically derive tokens budget using formula when true. */
+  autoBudgetEnabled?: boolean
   /** Default mode: hard cap on model input tokens (compression trigger line). */
   maxInputTokens: number
   recentKeepRounds: number
@@ -174,6 +176,7 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   filterEnabled: true,
   rewriteEnabled: true,
   truncateEnabled: true,
+  autoBudgetEnabled: true,
   maxInputTokens: 0,
   recentKeepRounds: 5,
   hotTokenBudget: 64_000,

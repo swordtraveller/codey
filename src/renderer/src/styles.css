@@ -1207,6 +1207,14 @@ h1 {
   }
 }
 
+
+.model-context-info {
+  font-size: 12px;
+  color: #64748B;
+  margin-top: -6px;
+  margin-bottom: 8px;
+  padding-left: 2px;
+}
 .context-settings-fields {
   display: grid;
   gap: 10px;

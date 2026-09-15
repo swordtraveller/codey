@@ -1,4 +1,4 @@
-import {
+﻿import {
   Button,
   Dialog,
   DialogActions,
@@ -1446,6 +1446,8 @@ function ContextSettingsFields({
   onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
+  const autoBudget = value.autoBudgetEnabled !== false
+  const fieldsDisabled = disabled || autoBudget
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
 
@@ -1460,12 +1462,16 @@ function ContextSettingsFields({
     })
   }
 
-  function applyExperiencedBudgets(): void {
-    if (!referenceModel) {
-      return
+  // Auto-apply formula budgets when model changes and autoBudget is enabled
+  useEffect(() => {
+    if (autoBudget && referenceModel) {
+      const budgets = deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens)
+      onChange({
+        ...budgets,
+        ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
+      })
     }
-    onChange(deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens))
-  }
+  }, [autoBudget, referenceModel?.id, referenceModel?.modelMaxContext, referenceModel?.modelMaxOutputTokens, strategyMode])
 
   return (
     <div className="context-settings-fields">
@@ -1480,6 +1486,30 @@ function ContextSettingsFields({
           {showCustomStrategy && <option value="custom">{t('contextStrategyCustom')}</option>}
         </Select>
       </Field>
+
+      {modelTargets !== undefined && modelTargets.length > 0 && (
+        <>
+          <Field label={t('modelConfiguration')}>
+            <Select
+              disabled={modelDisabled ?? disabled}
+              value={activeModelConfigId ?? referenceModel?.id ?? ''}
+              onChange={(_, data) => onModelConfigChange?.(data.value)}
+            >
+              {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
+              {modelTargets.map((target) => (
+                <option key={target.id} value={target.id}>
+                  {target.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {referenceModel && (
+            <div className="model-context-info">
+              {t('modelMaxContext', { tokens: referenceModel.modelMaxContext.toLocaleString() })}
+            </div>
+          )}
+        </>
+      )}
 
       {strategyMode === 'custom' ? (
         <>
@@ -1522,25 +1552,25 @@ function ContextSettingsFields({
         <>
           <Switch
             checked={value.filterEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextFilter')}
             onChange={(_, data) => onChange({ filterEnabled: data.checked })}
           />
           <Switch
             checked={value.rewriteEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextRewrite')}
             onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
           />
           <Switch
             checked={value.truncateEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextTruncate')}
             onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
           />
           <Field label={t('recentRounds')} required>
             <Input
-              disabled={disabled}
+              disabled={fieldsDisabled}
               max={20}
               min={1}
               type="number"
@@ -1548,33 +1578,27 @@ function ContextSettingsFields({
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
             />
           </Field>
-          {modelTargets !== undefined && modelTargets.length > 0 && (
-            <Field label={t('modelConfiguration')}>
-              <Select
-                disabled={modelDisabled ?? disabled}
-                value={activeModelConfigId ?? referenceModel?.id ?? ''}
-                onChange={(_, data) => onModelConfigChange?.(data.value)}
-              >
-                {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
-                {modelTargets.map((target) => (
-                  <option key={target.id} value={target.id}>
-                    {target.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
-          <Button
-            appearance="secondary"
-            disabled={disabled || !referenceModel}
-            onClick={applyExperiencedBudgets}
-          >
-            {t('generateExperiencedConfig')}
-          </Button>
+          <Switch
+            checked={autoBudget}
+            disabled={disabled}
+            label={t('contextUseRecommendedValues')}
+            onChange={(_, data) => {
+              if (data.checked) {
+                const budgets = referenceModel ? deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens) : {}
+                onChange({ 
+                  autoBudgetEnabled: true,
+                  ...budgets,
+                  ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
+                })
+              } else {
+                onChange({ autoBudgetEnabled: false })
+              }
+            }}
+          />
           {strategyMode === 'default' && (
             <Field label={t('maxInputTokens')} hint={t('maxInputTokensHint')}>
               <Input
-                disabled={disabled}
+                disabled={fieldsDisabled}
                 min={0}
                 step={1000}
                 type="number"
@@ -1591,7 +1615,7 @@ function ContextSettingsFields({
             <div className="context-budgets">
               <Field label={t('hotTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={1000}
                   step={1000}
                   type="number"
@@ -1601,7 +1625,7 @@ function ContextSettingsFields({
               </Field>
               <Field label={t('warmTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={0}
                   step={1000}
                   type="number"
@@ -1611,7 +1635,7 @@ function ContextSettingsFields({
               </Field>
               <Field label={t('coldRecallTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={0}
                   step={1000}
                   type="number"
@@ -3548,7 +3572,9 @@ export function App(): React.JSX.Element {
   })()
   const settingsDirty = configDraft !== config
   const sortedConversationModelGroups = [...config.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
-  const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
+  const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
+  const sortedConfigDraftModelGroups = [...configDraft.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
+  const sortedConfigDraftModels = [...configDraft.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
@@ -4488,14 +4514,14 @@ export function App(): React.JSX.Element {
                       }))}
                     >
                       <option value="">{t('notConfigured')}</option>
-                      {configDraft.models.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name || t('unnamedModel')}
+                      {sortedConfigDraftModelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
                         </option>
                       ))}
-                      {configDraft.modelGroups.map((group) => (
-                        <option key={group.id} value={group.id}>
-                          {t('modelGroupOption', { name: group.name || t('unnamedModel') })}
+                      {sortedConfigDraftModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name || t('unnamedModel')}
                         </option>
                       ))}
                     </Select>
@@ -4633,6 +4659,13 @@ export function App(): React.JSX.Element {
                 )}
                 {globalSettingsTab === 'context' && (
                   <ContextSettingsFields
+                    modelTargets={[
+                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                    ]}
+                    activeModelConfigId={configDraft.activeModelConfigId}
+                    referenceModel={resolveModelTarget(configDraft, configDraft.activeModelConfigId)}
+                    onModelConfigChange={(id) => setConfigDraft((current) => ({ ...current, activeModelConfigId: id }))}
                     value={configDraft.contextManagement}
                     disabled={interactionLocked}
                     onChange={(patch) => setConfigDraft((current) => ({
@@ -4858,11 +4891,11 @@ export function App(): React.JSX.Element {
                       onChange={(_, data) => setProjectSettingsModelConfigId(data.value)}
                     >
                       <option value="">{t('applicationDefault')}</option>
-                      {config.models.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>
-                      ))}
-                      {config.modelGroups.map((group) => (
+                      {sortedConversationModelGroups.map((group) => (
                         <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>
+                      ))}
+                      {sortedConversationModels.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>
                       ))}
                     </Select>
                   </Field>
@@ -4922,8 +4955,8 @@ export function App(): React.JSX.Element {
                     disabled={interactionLocked || !projectContextOverride}
                     modelDisabled={interactionLocked}
                     modelTargets={[
-                      ...config.models.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
-                      ...config.modelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
                     ]}
                     referenceModel={resolveModelTarget(config, projectSettingsModelConfigId || config.activeModelConfigId)}
                     activeModelConfigId={projectSettingsModelConfigId}

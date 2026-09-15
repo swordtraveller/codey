@@ -32,7 +32,7 @@ import type {
   NotificationSettings,
   Project,
 } from '../shared/types'
-import { defaultCommandExecutionConfig, defaultStrategyPrompt, layeredStrategyPrompt } from '../shared/types'
+import { defaultCommandExecutionConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
 import {
   applyDevelopmentProgressUpdate,
@@ -1011,6 +1011,14 @@ async function initializeContextDebugContext(
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  // Apply formula budgets when autoBudgetEnabled is true
+  if (contextConfig.autoBudgetEnabled) {
+    const budgets = deriveContextBudgets(modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens)
+    contextConfig.hotTokenBudget = budgets.hotTokenBudget
+    contextConfig.warmTokenBudget = budgets.warmTokenBudget
+    contextConfig.coldRecallTokenBudget = budgets.coldRecallTokenBudget
+    contextConfig.maxInputTokens = budgets.maxInputTokens
+  }
   const history = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
