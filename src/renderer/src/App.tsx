@@ -1628,6 +1628,7 @@ function ContextSettingsFields({
 }
 type ComposerProps = {
   canSend: boolean
+  supportsImageInput: boolean
   configured: boolean
   conversationWorking: boolean
   hasActiveConversation: boolean
@@ -1643,6 +1644,7 @@ type ComposerProps = {
 
 const Composer = memo(function Composer({
   canSend,
+  supportsImageInput,
   configured,
   conversationWorking,
   hasActiveConversation,
@@ -1809,7 +1811,7 @@ const Composer = memo(function Composer({
             <div className="attachment-menu-popover" role="menu">
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   void captureScreen(false)
@@ -1821,7 +1823,7 @@ const Composer = memo(function Composer({
               </Button>
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   void captureScreen(true)
@@ -1833,7 +1835,7 @@ const Composer = memo(function Composer({
               </Button>
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   imageInputRef.current?.click()
@@ -3849,6 +3851,7 @@ export function App(): React.JSX.Element {
           <Composer
             key={activeConversationKey || 'no-conversation'}
             canSend={canSend}
+            supportsImageInput={effectiveModelConfig?.supportsImageInput ?? false}
             configured={configured}
             conversationWorking={conversationWorking}
             hasActiveConversation={Boolean(activeConversation)}

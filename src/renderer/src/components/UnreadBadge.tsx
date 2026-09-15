@@ -14,7 +14,6 @@ export const UnreadBadge = memo(({ count, error }: UnreadBadgeProps) => {
         style={{
           display: 'inline-flex',
         flexShrink: 0,
-          flexShrink: 0,
           alignItems: 'center',
           justifyContent: 'center',
           width: '18px',
