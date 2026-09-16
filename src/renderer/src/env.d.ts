@@ -13,6 +13,7 @@ import type {
   DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
+  MediaAttachment,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -116,6 +117,7 @@ declare global {
         conversationId: string,
         content: string,
         images?: ImageAttachment[],
+        attachments?: MediaAttachment[],
         traceId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>

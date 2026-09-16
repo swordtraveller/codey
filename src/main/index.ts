@@ -21,6 +21,7 @@ import type {
   DevelopmentProgressUpdate,
   DevelopmentResult,
   ImageAttachment,
+  MediaAttachment,
   ModelConfig,
   PromptSnapshot,
   ToolHelpSnapshot,
@@ -34,6 +35,7 @@ import type {
 } from '../shared/types'
 import { defaultCommandExecutionConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
+import { validateMediaAttachments } from '../shared/media-attachments'
 import {
   applyDevelopmentProgressUpdate,
   compactDevelopmentProgressUpdate,
@@ -614,6 +616,7 @@ async function developProject(
   conversationId: string,
   content: string,
   images: ImageAttachment[] = [],
+  attachments: MediaAttachment[] = [],
   onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
@@ -624,7 +627,9 @@ async function developProject(
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
   if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
-  if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
+  const attachmentError = validateMediaAttachments(attachments)
+  if (attachmentError) return { writtenFiles: [], error: 'Invalid media attachment' }
+  if (!normalizedContent && images.length === 0 && attachments.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
   let project = await getProjectLive(projectId)
   if (project.folders.length === 0) {
@@ -693,6 +698,7 @@ async function developProject(
     role: 'user' as const,
     content: normalizedContent,
     images,
+    attachments,
   }
   const memoryWriteStartedAt = performance.now()
   project = await addMessageImmediately(
@@ -706,12 +712,13 @@ async function developProject(
     contextConfig,
     { startedAt, result: 'processing' },
     images,
+    attachments,
     userMessageId,
   )
   recordPerformanceTrace({
     traceId, scope: 'main', phase: 'user-message-memory-write', projectId, conversationId,
     durationMs: performance.now() - memoryWriteStartedAt,
-    data: { contentChars: normalizedContent.length, imageCount: images.length },
+    data: { contentChars: normalizedContent.length, imageCount: images.length, attachmentCount: attachments.length },
   })
   // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
   onProjectUpdated?.(project)
@@ -866,6 +873,7 @@ async function processBridgeMessage(message: import('../shared/bridge').Handover
       message.projectId,
       message.conversationId,
       message.content,
+      [],
       [],
       undefined,
       controller.signal,
@@ -1311,7 +1319,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -1322,7 +1330,7 @@ app.whenReady().then(() => {
     publishDevelopmentProgress(event.sender, projectId, conversationId, { type: 'reset' })
     setConversationState(projectId, conversationId, 'running')
     try {
-      const result = await developProject(projectId, conversationId, content, images, (update) => {
+      const result = await developProject(projectId, conversationId, content, images, attachments, (update) => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt, (project) => {
         if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)

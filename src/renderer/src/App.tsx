@@ -35,10 +35,17 @@ import type {
   ConversationTurnRecord,
   ImageAttachment,
   ImageMediaType,
+  MediaAttachment,
+  MediaKind,
   PerformanceTraceFile,
   PerformanceTraceStatus,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
+import {
+  maximumMediaAttachmentBytes,
+  maximumMediaAttachments,
+  supportedMediaTypes,
+} from '../../shared/media-attachments'
 import {
   clearDevelopmentProgress,
   getDevelopmentProgress,
@@ -90,6 +97,10 @@ import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } 
 
 const markdownPlugins = [remarkGfm]
 
+/** Media upload menu entries (video/audio/PDF) are hidden until provider
+ *  support stabilizes; the full pipeline stays wired behind this flag. */
+const mediaUploadMenuEnabled = false
+
 function readImage(file: File): Promise<ImageAttachment> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -98,6 +109,21 @@ function readImage(file: File): Promise<ImageAttachment> {
       id: crypto.randomUUID(),
       name: file.name || `clipboard-${crypto.randomUUID()}.${file.type.split('/')[1] ?? 'png'}`,
       mediaType: file.type as ImageMediaType,
+      dataUrl: String(reader.result),
+    })
+    reader.readAsDataURL(file)
+  })
+}
+
+function readMedia(file: File, kind: MediaKind): Promise<MediaAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => resolve({
+      id: crypto.randomUUID(),
+      name: file.name || `${kind}-${crypto.randomUUID()}`,
+      kind,
+      mediaType: file.type as MediaAttachment['mediaType'],
       dataUrl: String(reader.result),
     })
     reader.readAsDataURL(file)
@@ -243,6 +269,12 @@ function formatTurnForCopy(
     lines.push(t('copyTurnImages'))
     for (const image of userMessage.images) {
       lines.push(`[${image.name} (${image.mediaType})]`)
+    }
+  }
+  if (userMessage.attachments?.length) {
+    lines.push(t('copyTurnAttachments'))
+    for (const attachment of userMessage.attachments) {
+      lines.push(`[${attachment.name} (${attachment.mediaType})]`)
     }
   }
   for (const message of turnMessages) {
@@ -590,6 +622,15 @@ const ConversationMessage = memo(function ConversationMessage({
               <div className="message-images">
                 {message.images.map((image) => (
                   <img alt={image.name} key={image.id} src={image.dataUrl} />
+                ))}
+              </div>
+            ) : null}
+            {message.attachments?.length ? (
+              <div className="message-attachments">
+                {message.attachments.map((attachment) => (
+                  <span className={`message-attachment message-attachment-${attachment.kind}`} key={attachment.id}>
+                    {attachment.name}
+                  </span>
                 ))}
               </div>
             ) : null}
@@ -1682,6 +1723,9 @@ function ContextSettingsFields({
 type ComposerProps = {
   canSend: boolean
   supportsImageInput: boolean
+  supportsVideoInput: boolean
+  supportsAudioInput: boolean
+  supportsPdfInput: boolean
   configured: boolean
   conversationWorking: boolean
   hasActiveConversation: boolean
@@ -1692,12 +1736,15 @@ type ComposerProps = {
   onError: (message: string) => void
   onNetworkAccessChange: (enabled: boolean) => void
   onStop: () => void
-  onSubmit: (content: string, images: ImageAttachment[]) => boolean
+  onSubmit: (content: string, images: ImageAttachment[], attachments: MediaAttachment[]) => boolean
 }
 
 const Composer = memo(function Composer({
   canSend,
   supportsImageInput,
+  supportsVideoInput,
+  supportsAudioInput,
+  supportsPdfInput,
   configured,
   conversationWorking,
   hasActiveConversation,
@@ -1713,10 +1760,15 @@ const Composer = memo(function Composer({
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [draftAttachments, setDraftAttachments] = useState<MediaAttachment[]>([])
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const pdfInputRef = useRef<HTMLInputElement>(null)
   const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const draftImagesRef = useRef<ImageAttachment[]>([])
+  const draftAttachmentsRef = useRef<MediaAttachment[]>([])
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -1747,6 +1799,11 @@ const Composer = memo(function Composer({
     setDraftImages(images)
   }
 
+  function replaceDraftAttachments(attachments: MediaAttachment[]): void {
+    draftAttachmentsRef.current = attachments
+    setDraftAttachments(attachments)
+  }
+
   function appendImageAttachments(attachments: ImageAttachment[]): void {
     const current = draftImagesRef.current
     if (current.length + attachments.length > maximumImageAttachments) {
@@ -1754,6 +1811,16 @@ const Composer = memo(function Composer({
       return
     }
     replaceDraftImages([...current, ...attachments])
+    onError('')
+  }
+
+  function appendMediaAttachments(attachments: MediaAttachment[]): void {
+    const current = draftAttachmentsRef.current
+    if (current.length + attachments.length > maximumMediaAttachments) {
+      onError(t('tooManyAttachments', { count: maximumMediaAttachments }))
+      return
+    }
+    replaceDraftAttachments([...current, ...attachments])
     onError('')
   }
 
@@ -1780,10 +1847,41 @@ const Composer = memo(function Composer({
     }
   }
 
+  async function addMediaFiles(files: File[], kind: MediaKind): Promise<void> {
+    if (files.length === 0) return
+    if (draftAttachmentsRef.current.length + files.length > maximumMediaAttachments) {
+      onError(t('tooManyAttachments', { count: maximumMediaAttachments }))
+      return
+    }
+    const allowed = supportedMediaTypes[kind]
+    if (files.some((file) => !(allowed as readonly string[]).includes(file.type))) {
+      onError(t(`unsupportedAttachment_${kind}`))
+      return
+    }
+    const maximumBytes = maximumMediaAttachmentBytes[kind]
+    if (files.some((file) => file.size > maximumBytes)) {
+      onError(t('attachmentTooLarge', { size: maximumBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map((file) => readMedia(file, kind)))
+      if (mountedRef.current) appendMediaAttachments(attachments)
+    } catch {
+      if (mountedRef.current) onError(t('attachmentReadFailed'))
+    }
+  }
+
   async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const files = [...(event.target.files ?? [])]
     event.target.value = ''
     await addImageFiles(files)
+  }
+
+  async function selectMedia(kind: MediaKind, event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addMediaFiles(files, kind)
   }
 
   async function captureScreen(hideWindow: boolean): Promise<void> {
@@ -1810,10 +1908,12 @@ const Composer = memo(function Composer({
     event.preventDefault()
     const content = draft.trim()
     const images = draftImages
-    if ((!content && images.length === 0) || !canSend || interactionLocked) return
-    if (!onSubmit(content, images)) return
+    const attachments = draftAttachments
+    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || interactionLocked) return
+    if (!onSubmit(content, images, attachments)) return
     setDraft('')
     replaceDraftImages([])
+    replaceDraftAttachments([])
     setAttachmentMenuOpen(false)
   }
 
@@ -1825,6 +1925,30 @@ const Composer = memo(function Composer({
         multiple
         onChange={(event) => void selectImages(event)}
         ref={imageInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.video.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('video', event)}
+        ref={videoInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.audio.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('audio', event)}
+        ref={audioInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.pdf.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('pdf', event)}
+        ref={pdfInputRef}
         type="file"
       />
       {draftImages.length > 0 && (
@@ -1844,6 +1968,26 @@ const Composer = memo(function Composer({
                 ×
               </Button>
             </div>
+          ))}
+        </div>
+      )}
+      {draftAttachments.length > 0 && (
+        <div className="draft-attachments">
+          {draftAttachments.map((attachment) => (
+            <span className={`draft-attachment draft-attachment-${attachment.kind}`} key={attachment.id}>
+              <span>{attachment.name}</span>
+              <Button
+                aria-label={t('removeAttachment')}
+                appearance="subtle"
+                onClick={() => replaceDraftAttachments(draftAttachmentsRef.current.filter((item) => item.id !== attachment.id))}
+                shape="circular"
+                size="small"
+                title={t('removeAttachment')}
+                type="button"
+              >
+                ×
+              </Button>
+            </span>
           ))}
         </div>
       )}
@@ -1898,6 +2042,46 @@ const Composer = memo(function Composer({
               >
                 {t('uploadImage')}
               </Button>
+              {mediaUploadMenuEnabled && (
+                <>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsVideoInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      videoInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadVideo')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsAudioInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      audioInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadAudio')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsPdfInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      pdfInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadPdf')}
+                  </Button>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -1945,7 +2129,7 @@ const Composer = memo(function Composer({
       ) : (
         <Button
           appearance="primary"
-          disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
+          disabled={!canSend || (!draft.trim() && draftImages.length === 0 && draftAttachments.length === 0) || interactionLocked}
           size="large"
           type="submit"
         >
@@ -2190,7 +2374,7 @@ export function App(): React.JSX.Element {
       : lastTurn?.result === 'normal'
         ? prompts[1]
         : prompts[0]
-    void sendMessage(content, [])
+    void sendMessage(content, [], [])
   }
 
   useEffect(() => {
@@ -3422,8 +3606,8 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[]): Promise<void> {
-    if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[]): Promise<void> {
+    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -3443,7 +3627,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: userMessageId, role: 'user', content, images, createdAt: new Date().toISOString() },
+                { id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() },
               ],
             }
           : conversation,
@@ -3452,7 +3636,7 @@ export function App(): React.JSX.Element {
     replaceProject(optimisticProject)
     window.codey.recordPerformanceTrace({
       traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
-      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length },
+      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
     })
     resetDevelopmentProgress(conversationKey)
     setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
@@ -3470,7 +3654,7 @@ export function App(): React.JSX.Element {
 
     try {
       window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, traceId)
+      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
@@ -3478,7 +3662,8 @@ export function App(): React.JSX.Element {
         const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
           .reverse()
           .find((message) => message.role === 'user' && message.content === content &&
-            (images.length === 0 || message.images?.[0]?.id === images[0].id))
+            (images.length === 0 || message.images?.[0]?.id === images[0].id) &&
+            (attachments.length === 0 || message.attachments?.[0]?.id === attachments[0].id))
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -3907,6 +4092,9 @@ export function App(): React.JSX.Element {
             key={activeConversationKey || 'no-conversation'}
             canSend={canSend}
             supportsImageInput={effectiveModelConfig?.supportsImageInput ?? false}
+            supportsVideoInput={effectiveModelConfig?.supportsVideoInput ?? false}
+            supportsAudioInput={effectiveModelConfig?.supportsAudioInput ?? false}
+            supportsPdfInput={effectiveModelConfig?.supportsPdfInput ?? false}
             configured={configured}
             conversationWorking={conversationWorking}
             hasActiveConversation={Boolean(activeConversation)}
@@ -3917,13 +4105,13 @@ export function App(): React.JSX.Element {
             onError={setError}
             onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
             onStop={() => void stopMessage()}
-            onSubmit={(content, images) => {
+            onSubmit={(content, images, attachments) => {
               if (maxInputTokensError) {
                 setError(maxInputTokensError)
                 return false
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
-              void sendMessage(content, images)
+              void sendMessage(content, images, attachments)
               return true
             }}
           />

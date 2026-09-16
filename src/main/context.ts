@@ -1,4 +1,5 @@
 import type { ImageAttachment } from '../shared/image-attachments'
+import type { MediaAttachment } from '../shared/media-attachments'
 import type { ContextAction, ContextManagementConfig, ContextMetrics, ContextRepresentation, ContextSummaryArtifact, ModelConfig } from '../shared/types'
 import { resolveMaxInputTokens } from '../shared/types'
 import type { ToolCall } from './tools'
@@ -12,6 +13,7 @@ export type ContextMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null
   images?: ImageAttachment[]
+  attachments?: MediaAttachment[]
   tool_calls?: ToolCall[]
   tool_call_id?: string
   pinnedToHot?: boolean

@@ -15,6 +15,7 @@ import {
   type ConversationTurnRecord,
   type Conversation,
   type ImageAttachment,
+  type MediaAttachment,
   type ModelConfigSnapshot,
   type Project,
   type ProjectFolder,
@@ -29,12 +30,20 @@ import {
   persistImageAttachments,
   type StoredImageReference,
 } from './image-store'
+import {
+  hydrateMediaAttachments,
+  mediaReferences,
+  persistMediaAttachments,
+  type StoredMediaReference,
+} from './media-store'
 
-type PersistedChatMessage = Omit<ChatMessage, 'images'> & {
+type PersistedChatMessage = Omit<ChatMessage, 'images' | 'attachments'> & {
   images?: ImageAttachment[] | StoredImageReference[]
+  attachments?: MediaAttachment[] | StoredMediaReference[]
 }
-type PersistedAgentMessage = Omit<AgentContextMessage, 'images'> & {
+type PersistedAgentMessage = Omit<AgentContextMessage, 'images' | 'attachments'> & {
   images?: ImageAttachment[] | StoredImageReference[]
+  attachments?: MediaAttachment[] | StoredMediaReference[]
 }
 type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits' | 'commandExecution'> & {
   messages: PersistedChatMessage[]
@@ -228,11 +237,13 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   const messages = await Promise.all(value.messages.map(async (message) => ({
     ...message,
     images: await hydrateImageAttachments(message.images),
+    attachments: await hydrateMediaAttachments(message.attachments),
   })))
-  const storedAgentMessages = value.agentMessages ?? value.messages.map(({ role, content, images }) => ({ role, content, images }))
+  const storedAgentMessages = value.agentMessages ?? value.messages.map(({ role, content, images, attachments }) => ({ role, content, images, attachments }))
   const agentMessages = await Promise.all(storedAgentMessages.map(async (message) => ({
     ...message,
     images: await hydrateImageAttachments(message.images),
+    attachments: await hydrateMediaAttachments(message.attachments),
   })))
   return {
     ...value,
@@ -273,9 +284,10 @@ async function normalizeProjectMetadata(
   }
 }
 
-async function persistImagesForConversation(projectId: string, conversation: Conversation): Promise<void> {
+async function persistAttachmentsForConversation(projectId: string, conversation: Conversation): Promise<void> {
   for (const message of [...conversation.messages, ...conversation.agentMessages]) {
     await persistImageAttachments(projectId, conversation.id, message.images)
+    await persistMediaAttachments(projectId, conversation.id, message.attachments)
   }
 }
 
@@ -285,10 +297,12 @@ function storedConversation(projectId: string, conversation: Conversation): Stor
     messages: conversation.messages.map((message) => ({
       ...message,
       images: imageReferences(projectId, conversation.id, message.images),
+      attachments: mediaReferences(projectId, conversation.id, message.attachments),
     })),
     agentMessages: conversation.agentMessages.map((message) => ({
       ...message,
       images: imageReferences(projectId, conversation.id, message.images),
+      attachments: mediaReferences(projectId, conversation.id, message.attachments),
     })),
   }
 }
@@ -320,7 +334,7 @@ async function migrateLegacyProjects(stored: LegacyStoredProject[]): Promise<Pro
       conversationIds: conversations.map((conversation) => conversation.id),
     }, conversations)
     for (const conversation of project.conversations) {
-      await persistImagesForConversation(project.id, conversation)
+      await persistAttachmentsForConversation(project.id, conversation)
       await persistConversation(project.id, conversation)
     }
     await persistProjectMetadata(project)
@@ -727,6 +741,7 @@ export async function addMessageImmediately(
   contextConfig?: ContextManagementConfig,
   turn?: ConversationTurnRecord,
   images?: ImageAttachment[],
+  attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
 ): Promise<Project> {
@@ -738,6 +753,7 @@ export async function addMessageImmediately(
     role,
     content,
     images,
+    attachments,
     blocks,
     compression,
     modelConfig,
@@ -746,7 +762,7 @@ export async function addMessageImmediately(
   }
   conversation.messages.push(message)
   if (role === 'user' && conversation.messages.length === 1) {
-    const title = content || images?.[0]?.name || 'Image request'
+    const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
   }
 
@@ -754,6 +770,7 @@ export async function addMessageImmediately(
     // Yield once so the caller can publish the in-memory snapshot first.
     await new Promise<void>((resolve) => setImmediate(resolve))
     await persistImageAttachments(projectId, conversationId, message.images)
+    await persistMediaAttachments(projectId, conversationId, message.attachments)
     await persistConversation(projectId, conversation)
   }).catch((error) => {
     log.error('workspace.message.persist.failed', {
@@ -778,6 +795,7 @@ export function addMessage(
   contextConfig?: ContextManagementConfig,
   turn?: ConversationTurnRecord,
   images?: ImageAttachment[],
+  attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
 ): Promise<Project> {
@@ -785,12 +803,14 @@ export function addMessage(
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     await persistImageAttachments(projectId, conversationId, images)
+    await persistMediaAttachments(projectId, conversationId, attachments)
     conversation.messages.push({
       id: messageId ?? randomUUID(),
       createdAt: createdAt ?? new Date().toISOString(),
       role,
       content,
       images,
+      attachments,
       blocks,
       compression,
       modelConfig,
@@ -798,7 +818,7 @@ export function addMessage(
       turn,
     })
     if (role === 'user' && conversation.messages.length === 1) {
-      const title = content || images?.[0]?.name || 'Image request'
+      const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
       conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
     }
     await persistConversation(projectId, conversation)
@@ -827,7 +847,10 @@ export function saveConversationContext(
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
-    for (const message of agentMessages) await persistImageAttachments(projectId, conversationId, message.images)
+    for (const message of agentMessages) {
+      await persistImageAttachments(projectId, conversationId, message.images)
+      await persistMediaAttachments(projectId, conversationId, message.attachments)
+    }
     conversation.agentMessages = agentMessages
     conversation.context = context
     await persistConversation(projectId, conversation)

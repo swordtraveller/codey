@@ -47,7 +47,7 @@ describe('immediate workspace message publication', () => {
     let persistenceStarted = false
     persistence.started = () => { persistenceStarted = true }
 
-    const published = await addMessageImmediately(project.id, conversation.id, 'user', 'Send now', undefined, undefined, undefined, undefined, undefined, undefined, 'message-1')
+    const published = await addMessageImmediately(project.id, conversation.id, 'user', 'Send now', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'message-1')
 
     expect(persistenceStarted).toBe(false)
     expect(published.conversations[0].messages.at(-1)).toEqual(expect.objectContaining({ id: 'message-1', content: 'Send now' }))

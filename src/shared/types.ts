@@ -1,5 +1,7 @@
 import type { ImageAttachment } from './image-attachments'
+import type { MediaAttachment, MediaAttachmentMediaType, MediaKind } from './media-attachments'
 export type { ImageAttachment, ImageMediaType } from './image-attachments'
+export type { MediaAttachment, MediaAttachmentMediaType, MediaKind, AudioMediaType, VideoMediaType, PdfMediaType } from './media-attachments'
 
 export type AppLanguage = 'system' | 'en' | 'zh-CN'
 
@@ -504,6 +506,7 @@ export type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
   images?: ImageAttachment[]
+  attachments?: MediaAttachment[]
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
   modelConfig?: ModelConfigSnapshot
@@ -532,6 +535,7 @@ export type AgentContextMessage = {
   role: ChatMessage['role'] | 'tool'
   content: string | null
   images?: ImageAttachment[]
+  attachments?: MediaAttachment[]
   toolCalls?: unknown[]
   toolCallId?: string
   pinnedToHot?: boolean
