@@ -77,6 +77,21 @@ function runtime(overrides: Partial<CommandExecutorRuntime> = {}): CommandExecut
 }
 
 describe('command execution config', () => {
+  it('preserves an explicitly emptied environment row instead of restoring defaults', () => {
+    const normalized = normalizeCommandExecutionConfig({
+      enabled: true,
+      interpreter: 'bash',
+      environment: 'bare',
+      enabledEnvironments: { bash: ['bare'], pwsh7: [], pwsh51: [] },
+    })
+    expect(normalized.enabledEnvironments.bash).toEqual(['bare'])
+    expect(normalized.enabledEnvironments.pwsh7).toEqual([])
+    expect(normalized.enabledEnvironments.pwsh51).toEqual([])
+    // A missing field (legacy data) still falls back to the defaults.
+    const legacy = normalizeCommandExecutionConfig({ enabled: true })
+    expect(legacy.enabledEnvironments).toEqual(defaultCommandExecutionConfig.enabledEnvironments)
+  })
+
   it('normalizes unknown values back to defaults', () => {
     const normalized = normalizeCommandExecutionConfig({
       interpreter: 'pwsh7',

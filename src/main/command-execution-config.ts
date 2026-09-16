@@ -123,9 +123,12 @@ function normalizeEnvironmentList(
   value: unknown,
   fallback: CommandEnvironment[],
 ): CommandEnvironment[] {
+  // An explicitly stored list — even an empty one — is the user's choice;
+  // only a missing/malformed field falls back to the defaults. Returning the
+  // fallback for an empty list silently resurrected rows the user had
+  // unchecked when the config was saved.
   if (!Array.isArray(value)) return fallback
-  const valid = value.filter((env): env is CommandEnvironment => isEnvironment(env))
-  return valid.length > 0 ? valid : fallback
+  return value.filter((env): env is CommandEnvironment => isEnvironment(env))
 }
 
 function isInterpreter(value: unknown): value is CommandInterpreter {

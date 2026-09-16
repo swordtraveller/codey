@@ -178,6 +178,18 @@ const environmentLabels: Record<string, string> = {
   docker: 'docker',
   'windows-sandbox': 'Windows Sandbox',
 }
+
+function listEnabledCombos(enabledEnvironments: CommandExecutionConfig['enabledEnvironments']): Array<{
+  interpreter: CommandExecutionConfig['interpreter']
+  environment: CommandExecutionConfig['environment']
+}> {
+  return (['bash', 'pwsh7', 'pwsh51'] as const).flatMap((interpreter) =>
+    (['bare', 'wsl2', 'docker'] as const)
+      .filter((environment) => enabledEnvironments[interpreter]?.includes(environment) ?? false)
+      .map((environment) => ({ interpreter, environment })),
+  )
+}
+
 function isValidAgentLimits(value: AgentLimitsConfig): boolean {
   return Number.isInteger(value.modelRequestsPerRound) &&
     value.modelRequestsPerRound >= 1 && value.modelRequestsPerRound <= maximumAgentLimit &&
@@ -648,6 +660,10 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
 }): React.JSX.Element {
   const { t } = useTranslation()
   const setDraft = (next: CommandExecutionConfig): void => onChange(next)
+  const enabledCombos = listEnabledCombos(value.enabledEnvironments)
+  const defaultInEnabled = enabledCombos.some(
+    (combo) => combo.interpreter === value.interpreter && combo.environment === value.environment,
+  )
   return (
     <>
       <Switch
@@ -657,32 +673,6 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
         onChange={(_, data) => setDraft({ ...value, enabled: data.checked })}
       />
       <p className="settings-description">{t('commandExecutionDescription')}</p>
-      <Field label={t('commandInterpreter')}>
-        <Select
-          disabled={disabled || !value.enabled}
-          value={value.interpreter}
-          onChange={(_, data) => setDraft({ ...value, interpreter: data.value as CommandExecutionConfig['interpreter'] })}
-        >
-          <option value="bash">bash</option>
-          <option value="pwsh7">pwsh 7</option>
-          <option value="pwsh51">pwsh 5.1</option>
-        </Select>
-      </Field>
-      <Field label={t('commandEnvironment')}>
-        <Select
-          disabled={disabled || !value.enabled}
-          value={value.environment}
-          onChange={(_, data) => setDraft({ ...value, environment: data.value as CommandExecutionConfig['environment'] })}
-        >
-          <option value="bare">{t('commandEnvBare')}</option>
-          <option value="wsl2">wsl2</option>
-          <option value="docker">docker</option>
-          <option value="windows-sandbox">Windows Sandbox</option>
-        </Select>
-      </Field>
-      {!commandExecutionSupported(value.interpreter, value.environment) && (
-        <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
-      )}
       <div className="enabled-environments-group">
         <p className="section-label">{t('enabledEnvironments')}</p>
         <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
@@ -704,7 +694,17 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
                     const next = event.target.checked
                       ? [...current, environment]
                       : current.filter((entry) => entry !== environment)
-                    setDraft({ ...value, enabledEnvironments: { ...value.enabledEnvironments, [interpreter]: next } })
+                    const enabledEnvironments = { ...value.enabledEnvironments, [interpreter]: next }
+                    const draft: CommandExecutionConfig = { ...value, enabledEnvironments }
+                    // Keep the default combo inside the enabled set.
+                    if (!(enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) {
+                      const fallback = listEnabledCombos(enabledEnvironments)[0]
+                      if (fallback) {
+                        draft.interpreter = fallback.interpreter
+                        draft.environment = fallback.environment
+                      }
+                    }
+                    setDraft(draft)
                   }}
                 />
                 {environmentLabels[environment] ?? environment}
@@ -714,6 +714,32 @@ function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs,
           </div>
         ))}
       </div>
+      <Field label={t('commandDefaultCombo')}>
+        <Select
+          disabled={disabled || !value.enabled || enabledCombos.length === 0}
+          value={defaultInEnabled ? `${value.interpreter}|${value.environment}` : ''}
+          onChange={(_, data) => {
+            const [interpreter, environment] = String(data.value ?? '').split('|')
+            if (!interpreter || !environment) return
+            setDraft({
+              ...value,
+              interpreter: interpreter as CommandExecutionConfig['interpreter'],
+              environment: environment as CommandExecutionConfig['environment'],
+            })
+          }}
+        >
+          {!defaultInEnabled && <option value="" disabled>{t('commandDefaultComboNone')}</option>}
+          {enabledCombos.map((combo) => (
+            <option key={`${combo.interpreter}|${combo.environment}`} value={`${combo.interpreter}|${combo.environment}`}>
+              {`${interpreterLabels[combo.interpreter] ?? combo.interpreter} / ${environmentLabels[combo.environment] ?? combo.environment}`}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <p className="settings-description">{t('commandDefaultComboHint')}</p>
+      {value.enabled && !defaultInEnabled && (
+        <p className="settings-warning" role="alert">{t('commandDefaultComboInvalid')}</p>
+      )}
       {showReview && (
         <>
           <Switch
