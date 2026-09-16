@@ -298,14 +298,23 @@ async function runBare(
 }
 
 /** WSL accepts Windows paths and translates them itself; quoting guards
- *  paths with spaces. The 8-second grace handles a distro being started. */
+ *  paths with spaces. The 8-second grace handles a distro being started.
+ *  `-e` (exec) hands the argv straight to the interpreter: the `--` form
+ *  instead re-parses the rejoined command line through the distro's default
+ *  shell, which would expand $vars/backticks and misread redirects before
+ *  the real interpreter ever sees them. pwsh7 runs PowerShell 7 installed
+ *  inside the distro (Linux pwsh, same flavor as the docker combo). */
 async function runWsl2(
+  interpreter: CommandInterpreter,
   command: string,
   windowsWorkspacePath: string,
   timeoutSeconds: number,
   signal?: AbortSignal,
 ): Promise<RawRunResult> {
-  return runProcess('wsl.exe', ['--', 'bash', '-c', command], windowsWorkspacePath, Math.max(timeoutSeconds, 8), signal)
+  const wslArgs = interpreter === 'pwsh7'
+    ? ['-e', 'pwsh', '-NoProfile', '-NonInteractive', '-Command', command]
+    : ['-e', 'bash', '-c', command]
+  return runProcess('wsl.exe', wslArgs, windowsWorkspacePath, Math.max(timeoutSeconds, 8), signal)
 }
 
 /** Docker: mounts the workspace at /work inside a disposable container.
@@ -528,7 +537,7 @@ export async function executeCommand(options: {
     let result: RawRunResult
     try {
       if (effectiveEnvironment === 'wsl2') {
-        result = await runWsl2(trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+        result = await runWsl2(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       } else if (effectiveEnvironment === 'docker') {
         result = await runDocker(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       } else {

@@ -992,13 +992,27 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   const interpreters = shellDetection?.interpreters ?? []
   const environments = shellDetection?.environments ?? []
   const availableCombos: string[] = []
+  const wsl2Interpreters = shellDetection?.wsl2Interpreters
   for (const combo of supportedCommandCombos) {
+    const environmentOk = environments.some((entry) => entry.kind === combo.environment && entry.available)
+    // wsl2 runs the interpreter inside the distro; when the detection probed
+    // it, the in-distro result replaces the host interpreter check.
+    if (combo.environment === 'wsl2' && wsl2Interpreters) {
+      const inDistro = combo.interpreter === 'bash'
+        ? wsl2Interpreters.bash
+        : combo.interpreter === 'pwsh7'
+          ? wsl2Interpreters.pwsh7
+          : false
+      if (environmentOk && inDistro) {
+        availableCombos.push(`${combo.interpreter} (${combo.environment})`)
+      }
+      continue
+    }
     const interpreterOk = interpreters.some((entry) => entry.kind === combo.interpreter && entry.available)
     // Docker provides bash/pwsh inside containers; the host interpreter is irrelevant there.
     const interpreterRelevant = combo.environment !== 'docker'
       || combo.interpreter === 'bash'
       || interpreters.length > 0
-    const environmentOk = environments.some((entry) => entry.kind === combo.environment && entry.available)
     if (interpreterOk && environmentOk && interpreterRelevant) {
       availableCombos.push(`${combo.interpreter} (${combo.environment})`)
     }
@@ -1020,6 +1034,9 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   const pwshEnvNotes: string[] = []
   if (availableCombos.includes('pwsh7 (bare)') || availableCombos.includes('pwsh51 (bare)') || (interpreters.length === 0 && environments.length === 0)) {
     pwshEnvNotes.push('pwsh7/bare, pwsh51/bare: runs on the host; Windows paths with backslashes or forward slashes both work.')
+  }
+  if (availableCombos.includes('pwsh7 (wsl2)')) {
+    pwshEnvNotes.push('pwsh7/wsl2: PowerShell 7 inside the Linux distro; host paths under /mnt/<drive>/. PowerShell syntax with POSIX paths and Linux tools.')
   }
   if (availableCombos.includes('pwsh7 (docker)') || availableCombos.includes('pwsh51 (docker)')) {
     pwshEnvNotes.push('pwsh7/docker, pwsh51/docker: runs on the Linux container image (pwsh on Linux); the project folder is mounted read-write at /work.')

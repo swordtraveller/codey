@@ -17,7 +17,7 @@ import {
   type CommandReviewConfig,
   type CommandReviewRule,
 } from '../src/shared/types'
-import { decodeWslOutput, parseWslConfInterop, parseWslDistros, shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
+import { commandComboUsable, decodeWslOutput, parseWslConfInterop, parseWslDistros, shellDetectTestHooks, translateGitBashLauncher } from '../src/main/shell-detect'
 import { parseAuditVerdict, executeCommand, type CommandExecutorRuntime } from '../src/main/command-executor'
 import {
   buildMemoryPattern,
@@ -335,6 +335,50 @@ describe('wsl distro parsing', () => {
   })
 })
 
+describe('commandComboUsable wsl2 gating', () => {
+  function detection(overrides: {
+    wsl2Interpreters?: { bash: boolean; pwsh7: boolean }
+    hostPwsh7?: boolean
+  } = {}) {
+    return {
+      interpreters: [
+        { kind: 'bash' as const, available: true, detail: 'ok' },
+        { kind: 'pwsh7' as const, available: overrides.hostPwsh7 ?? false, detail: 'pwsh7' },
+        { kind: 'pwsh51' as const, available: false, detail: 'missing' },
+      ],
+      environments: [
+        { kind: 'bare' as const, available: true, detail: 'host' },
+        { kind: 'wsl2' as const, available: true, detail: 'wsl2' },
+        { kind: 'docker' as const, available: false, detail: 'no' },
+        { kind: 'windows-sandbox' as const, available: false, detail: 'no' },
+      ],
+      wsl2Interpreters: overrides.wsl2Interpreters,
+      detectedAt: new Date().toISOString(),
+    }
+  }
+
+  it('gates wsl2 combos on the in-distro interpreter, not the host one', () => {
+    // Host pwsh7 is missing, but pwsh 7 exists in the distro: pwsh7/wsl2 is usable.
+    expect(commandComboUsable('pwsh7', 'wsl2', detection({ wsl2Interpreters: { bash: false, pwsh7: true } }))).toBe(true)
+    // The distro lacks bash: bash/wsl2 is unusable even though host bash exists.
+    expect(commandComboUsable('bash', 'wsl2', detection({ wsl2Interpreters: { bash: false, pwsh7: true } }))).toBe(false)
+    // Mirror case: bash in the distro, no pwsh.
+    expect(commandComboUsable('bash', 'wsl2', detection({ wsl2Interpreters: { bash: true, pwsh7: false } }))).toBe(true)
+    expect(commandComboUsable('pwsh7', 'wsl2', detection({ wsl2Interpreters: { bash: true, pwsh7: false }, hostPwsh7: true }))).toBe(false)
+  })
+
+  it('falls back to the host interpreter check when the distro was not probed', () => {
+    expect(commandComboUsable('bash', 'wsl2', detection())).toBe(true)
+    expect(commandComboUsable('pwsh7', 'wsl2', detection())).toBe(false)
+    expect(commandComboUsable('pwsh7', 'wsl2', detection({ hostPwsh7: true }))).toBe(true)
+  })
+
+  it('still rejects unsupported combos and missing detection', () => {
+    expect(commandComboUsable('pwsh51', 'wsl2', detection({ wsl2Interpreters: { bash: true, pwsh7: true } }))).toBe(false)
+    expect(commandComboUsable('bash', 'wsl2', null)).toBe(false)
+  })
+})
+
 describe('executeCommand', () => {
   const bashAvailable = (() => {
     try {
@@ -355,12 +399,20 @@ describe('executeCommand', () => {
   const dockerIt = dockerAvailable ? it : it.skip
   const wslBashAvailable = (() => {
     try {
-      return spawnSync('wsl.exe', ['--', 'bash', '-c', 'echo ok'], { windowsHide: true, timeout: 15_000 }).status === 0
+      return spawnSync('wsl.exe', ['-e', 'bash', '-c', 'echo ok'], { windowsHide: true, timeout: 15_000 }).status === 0
     } catch {
       return false
     }
   })()
   const wslIt = wslBashAvailable ? it : it.skip
+  const wslPwshAvailable = (() => {
+    try {
+      return spawnSync('wsl.exe', ['-e', 'pwsh', '-NoProfile', '-NonInteractive', '-Command', 'echo ok'], { windowsHide: true, timeout: 15_000 }).status === 0
+    } catch {
+      return false
+    }
+  })()
+  const wslPwshIt = wslPwshAvailable ? it : it.skip
 
   beforeEach(() => {
     shellDetectTestHooks.setBashOverride(bashAvailable ? 'bash' : null)
@@ -408,6 +460,24 @@ describe('executeCommand', () => {
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('wsl-ok')
   })
+
+  wslPwshIt('runs pwsh7 inside wsl2', async () => {
+    const outcome = await executeCommand({
+      project: { folders: [{ id: 'f', path: process.cwd() }] },
+      conversationId: `wsl-pwsh-${Math.random()}`,
+      config: config({ enabled: true, interpreter: 'pwsh7', environment: 'wsl2' }),
+      command: '"wsl-pwsh-ok"; $PSVersionTable.PSEdition; (Get-Location).Path',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime(),
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.output).toContain('wsl-pwsh-ok')
+    // Linux pwsh inside the distro, not Windows PowerShell.
+    expect(outcome.output).toContain('Core')
+    // wsl.exe translates the Windows cwd into a /mnt/<drive>/ path.
+    expect(outcome.output).toContain('/mnt/')
+  }, 30_000)
 
   it('refuses to run when disabled', async () => {
     const outcome = await executeCommand({

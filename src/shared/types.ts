@@ -627,6 +627,9 @@ export type ShellDetectionResult = {
   }>
   /** wsl2 sandbox details (bwrap/socat/interop) when a manual config exists. */
   wsl2Sandbox?: Wsl2SandboxProbe
+  /** Interpreter availability inside the probed wsl2 distro (wsl2 runs the
+   *  interpreter in-distro, so the host interpreter check does not apply). */
+  wsl2Interpreters?: { bash: boolean; pwsh7: boolean }
   detectedAt: string
 }
 
