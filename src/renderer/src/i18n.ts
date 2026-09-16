@@ -692,7 +692,7 @@ void i18n.use(initReactI18next).init({
         projects: '项目',
         conversations: '对话',
         new: '新建',
-        handover: 'Handover',
+        handover: '遥控同步',
         handoverChannelTitle: 'Handover 频道',
         bridgeAddress: 'Bridge 地址',
         bridgeAddressHint: '本机可用 HTTP；远程 Bridge 必须使用 HTTPS。',
