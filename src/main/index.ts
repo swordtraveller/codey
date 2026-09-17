@@ -32,6 +32,7 @@ import type {
   NotificationOptions,
   NotificationSettings,
   Project,
+  ResourceSelectionOverride,
 } from '../shared/types'
 import { defaultCommandExecutionConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
@@ -109,11 +110,13 @@ import {
   setConversationContextConfig,
   setConversationModelConfig,
   setConversationReadState,
+  setConversationSkillSelection,
   setProjectAgentLimitsDefault,
   setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
   setProjectModelConfig,
+  setProjectSkillSelection,
   updateConversationAgentMessages,
   updateConversationTurn,
 } from './workspace'
@@ -122,6 +125,16 @@ import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rul
 import { isContextConfigValidForModel } from './context-config'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
 import { notificationManager } from './notification-manager'
+import {
+  getInstalledSkillsByIds,
+  installSkillPreview,
+  listInstalledSkills,
+  previewGitHubSkill,
+  removeInstalledSkill,
+  resolveSkillSelection,
+  sanitizeResourceSelection,
+  validateResourceSelection,
+} from './skills'
 
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
@@ -364,6 +377,7 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
     contextConfigOverride: null,
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
     agentLimitsDefault: null,
+    skillSelection: { enabledIds: [], disabledIds: [] },
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -404,6 +418,7 @@ function buildPromptSnapshot(): PromptSnapshot {
     contextConfigOverride: null,
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
     agentLimitsDefault: null,
+    skillSelection: { enabledIds: [], disabledIds: [] },
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -639,6 +654,12 @@ async function developProject(
   if (!conversation) return { project, writtenFiles: [], error: 'Conversation not found' }
 
   const appConfig = await readConfig()
+  const effectiveSkillIds = resolveSkillSelection(
+    appConfig.defaultSkillIds,
+    project.skillSelection,
+    conversation.skillSelection,
+  )
+  const enabledSkills = await getInstalledSkillsByIds(effectiveSkillIds)
   const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) {
     return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
@@ -779,6 +800,7 @@ async function developProject(
       commandExecution,
       commandRuntime,
       shellDetection: getCachedShellDetection(),
+      enabledSkills,
       unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
       onToolsetUnlocked: (keyword: string) => {
         // Persist the unlock so it survives app restarts and conversation
@@ -1040,11 +1062,16 @@ async function initializeContextDebugContext(
     : await readConversationMessages(projectId, conversationId)
   const initializationRoundId = randomUUID()
   const initializationRoundCount = conversation.agentMessages.filter((message) => message.role === 'user').length
+  const enabledSkills = await getInstalledSkillsByIds(resolveSkillSelection(
+    appConfig.defaultSkillIds,
+    project.skillSelection,
+    conversation.skillSelection,
+  ))
   const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, {
     allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
     roundId: initializationRoundId,
     roundCount: initializationRoundCount,
-  })
+  }, enabledSkills)
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
   rememberInitializedSnapshot(
     projectId,
@@ -1187,6 +1214,41 @@ app.whenReady().then(() => {
     notificationManager.updateSettings(settings)
   })
   ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('skills:list', () => listInstalledSkills())
+  ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))
+  ipcMain.handle('skills:install-preview', async (_event, previewId: string, selectedCandidateIds: string[]) => {
+    ensureAllIdle()
+    return installSkillPreview(previewId, selectedCandidateIds)
+  })
+  ipcMain.handle('skills:remove', async (_event, skillId: string) => {
+    ensureAllIdle()
+    await removeInstalledSkill(skillId)
+    const config = await readConfig()
+    if (config.defaultSkillIds.includes(skillId)) {
+      await saveConfig({ ...config, defaultSkillIds: config.defaultSkillIds.filter((id) => id !== skillId) })
+    }
+    const projects = await getProjects()
+    for (const project of projects) {
+      const projectSelection = sanitizeResourceSelection({
+        enabledIds: project.skillSelection.enabledIds.filter((id) => id !== skillId),
+        disabledIds: project.skillSelection.disabledIds.filter((id) => id !== skillId),
+      })
+      if (projectSelection.enabledIds.length !== project.skillSelection.enabledIds.length
+        || projectSelection.disabledIds.length !== project.skillSelection.disabledIds.length) {
+        await setProjectSkillSelection(project.id, projectSelection)
+      }
+      for (const conversation of project.conversations) {
+        const conversationSelection = sanitizeResourceSelection({
+          enabledIds: conversation.skillSelection.enabledIds.filter((id) => id !== skillId),
+          disabledIds: conversation.skillSelection.disabledIds.filter((id) => id !== skillId),
+        })
+        if (conversationSelection.enabledIds.length !== conversation.skillSelection.enabledIds.length
+          || conversationSelection.disabledIds.length !== conversation.skillSelection.disabledIds.length) {
+          await setConversationSkillSelection(project.id, conversation.id, conversationSelection)
+        }
+      }
+    }
+  })
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
   ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
@@ -1224,6 +1286,10 @@ app.whenReady().then(() => {
     ensureAllIdle()
     return setProjectContextConfig(projectId, contextConfig)
   })
+  ipcMain.handle('projects:set-skill-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
+    ensureProjectIdle(projectId)
+    return setProjectSkillSelection(projectId, validateResourceSelection(selection))
+  })
   ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
     ensureProjectIdle(projectId)
     return setProjectArchived(projectId, archived)
@@ -1240,6 +1306,10 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-context-config', (_event, projectId: string, conversationId: string, contextConfig: ContextManagementConfig | null) => {
     ensureIdle(projectId, conversationId)
     return setConversationContextConfig(projectId, conversationId, contextConfig)
+  })
+  ipcMain.handle('conversations:set-skill-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationSkillSelection(projectId, conversationId, validateResourceSelection(selection))
   })
   ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureIdle(projectId, conversationId)

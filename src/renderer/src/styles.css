@@ -118,7 +118,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 148px;
+  min-height: 176px;
   border-bottom: 1px solid #e0e0e0;
   padding: 0 32px;
   background: #fff;
@@ -2221,4 +2221,136 @@ h1 {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+}
+
+
+.skill-management {
+  min-width: 0;
+}
+
+.skill-management input,
+.skill-metadata dd {
+  overflow-wrap: anywhere;
+}
+
+.skill-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.skill-preview,
+.skill-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--colorNeutralStroke2, #d1d1d1);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--colorNeutralBackground1, #fff);
+}
+
+.skill-preview h3,
+.skill-preview h4,
+.skill-card h3,
+.skill-list h2 {
+  margin: 0;
+}
+
+.skill-preview p,
+.skill-card p {
+  margin: 0;
+}
+
+.skill-candidate-list,
+.skill-list,
+.skill-selection-list {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.skill-candidate-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--colorNeutralStroke2, #d1d1d1);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--colorNeutralBackground1, #fff);
+}
+
+.skill-candidate-row span,
+.skill-selection-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.skill-candidate-row small,
+.skill-selection-row small {
+  color: var(--colorNeutralForeground3, #616161);
+  overflow-wrap: anywhere;
+}
+
+.skill-card-header,
+.skill-selection-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.skill-card-header > div:first-child {
+  min-width: 0;
+}
+
+.skill-metadata {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.skill-metadata dt {
+  color: var(--colorNeutralForeground3, #616161);
+  font-weight: 600;
+}
+
+.skill-metadata dd {
+  margin: 0;
+  font-family: var(--fontFamilyMonospace, monospace);
+}
+
+.skill-selection-row {
+  align-items: center;
+  border-bottom: 1px solid var(--colorNeutralStroke2, #d1d1d1);
+  padding: 8px 0 12px;
+}
+
+.skill-selection-row:last-child {
+  border-bottom: 0;
+}
+
+.skill-selection-row select {
+  min-width: 150px;
+}
+
+.skill-selection-dialog {
+  max-width: min(680px, calc(100vw - 32px));
+}
+
+.resource-effective,
+.resource-unavailable {
+  font-size: 12px;
+}
+
+.resource-effective {
+  color: var(--colorPaletteGreenForeground1, #107c10);
+}
+
+.resource-unavailable {
+  color: var(--colorNeutralForeground3, #707070);
 }

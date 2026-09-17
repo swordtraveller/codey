@@ -32,6 +32,7 @@ describe('agent tools', () => {
       archived: false,
       defaultModelConfigId: null,
       contextConfigOverride: null,
+      skillSelection: { enabledIds: [], disabledIds: [] },
       commandExecutionDefault: { ...defaultCommandExecutionConfig },
       agentLimitsDefault: null,
       folders: [{ id: 'root', path: root }],

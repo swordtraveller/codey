@@ -72,6 +72,7 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     commandReviewGlobal: { ...defaultCommandReviewConfig, contentRules: [] },
     agentLimitsGlobal: { ...defaultAgentLimitsConfig },
     commandExecutionGlobal: { ...defaultCommandExecutionConfig },
+    defaultSkillIds: [],
   }
 }
 
@@ -81,6 +82,7 @@ const project: Project = {
   archived: false,
   defaultModelConfigId: 'project',
   contextConfigOverride: null,
+  skillSelection: { enabledIds: [], disabledIds: [] },
   commandExecutionDefault: { ...defaultCommandExecutionConfig },
   agentLimitsDefault: null,
   folders: [],
@@ -93,6 +95,7 @@ const conversation: Conversation = {
   archived: false,
   modelConfigId: null,
   contextConfigOverride: null,
+  skillSelection: { enabledIds: [], disabledIds: [] },
   agentLimits: defaultAgentLimitsConfig,
   commandExecution: { ...defaultCommandExecutionConfig },
   messages: [],

@@ -19,6 +19,9 @@ import type {
   ShellDetectionResult,
   Wsl2ManualConfig,
   Project,
+  InstalledSkill,
+  SkillImportPreview,
+  ResourceSelectionOverride,
   PerformanceTraceEvent,
   PerformanceTraceFile,
   PerformanceTraceStatus,
@@ -54,6 +57,11 @@ contextBridge.exposeInMainWorld(
     listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
       ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),
+    previewGitHubSkill: (url: string): Promise<SkillImportPreview> => ipcRenderer.invoke('skills:preview-github', url),
+    installSkillPreview: (previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill> =>
+      ipcRenderer.invoke('skills:install-preview', previewId, selectedCandidateIds),
+    removeSkill: (skillId: string): Promise<void> => ipcRenderer.invoke('skills:remove', skillId),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
     approveBridgeRequest: (channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:approve', channelId, requestId, devicePublicKey),
@@ -70,6 +78,8 @@ contextBridge.exposeInMainWorld(
       projectId: string,
       contextConfig: ContextManagementConfig | null,
     ) => ipcRenderer.invoke('projects:set-context-config', projectId, contextConfig),
+    setProjectSkillSelection: (projectId: string, selection: ResourceSelectionOverride): Promise<Project> =>
+      ipcRenderer.invoke('projects:set-skill-selection', projectId, selection),
     setProjectArchived: (projectId: string, archived: boolean) =>
       ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
@@ -93,6 +103,16 @@ contextBridge.exposeInMainWorld(
       projectId,
       conversationId,
       contextConfig,
+    ),
+    setConversationSkillSelection: (
+      projectId: string,
+      conversationId: string,
+      selection: ResourceSelectionOverride,
+    ): Promise<Project> => ipcRenderer.invoke(
+      'conversations:set-skill-selection',
+      projectId,
+      conversationId,
+      selection,
     ),
     setConversationAgentLimits: (
       projectId: string,
