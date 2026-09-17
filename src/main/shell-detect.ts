@@ -273,7 +273,12 @@ function pwsh51Path(): string {
   return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
-async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
+async function detectWsl2(): Promise<{
+  available: boolean
+  detail: string
+  /** Interpreter availability inside the probed distro. */
+  interpreters?: { bash: boolean; pwsh7: boolean }
+}> {
   const list = await probeWsl(['--list', '--verbose'])
   if (list === null) {
     return { available: false, detail: 'wsl is not installed or no distribution exists' }
@@ -283,23 +288,33 @@ async function detectWsl2(): Promise<{ available: boolean; detail: string }> {
     return { available: false, detail: 'wsl is installed but has no user distribution (only system distros)' }
   }
   const config = await getWsl2ManualConfig()
-  // If a manual config exists, check bash in that specific distro.
-  const bashCheck = config
-    ? await probeWsl(['-d', config.distro, '--', 'bash', '-c', 'echo ok'])
-    : await probeWsl(['--', 'bash', '-c', 'echo ok'])
+  // If a manual config exists, check the interpreters in that specific distro.
+  // `-e` execs directly (no default-shell re-parse), mirroring runWsl2.
+  const inDistro = (args: string[]): Promise<string | null> =>
+    config ? probeWsl(['-d', config.distro, '-e', ...args]) : probeWsl(['-e', ...args])
+  const [bashCheck, pwshCheck] = await Promise.all([
+    inDistro(['bash', '-c', 'echo ok']),
+    inDistro(['pwsh', '-NoProfile', '-NonInteractive', '-Command', 'echo ok']),
+  ])
+  const interpreters = { bash: Boolean(bashCheck), pwsh7: Boolean(pwshCheck) }
   const describe = (distro: WslDistro): string =>
     `${distro.name} (${distro.running ? 'Running' : 'Stopped'}${distro.default ? ', default' : ''})`
-  if (!bashCheck) {
-    const target = config ? `${config.distro} (manual config)` : `the default distribution`
+  const target = config ? `${config.distro} (manual config)` : 'default distro'
+  if (!interpreters.bash && !interpreters.pwsh7) {
     return {
       available: false,
-      detail: `bash is unavailable in ${target}. Available distros: ${userDistros.map(describe).join(', ')}`,
+      detail: `neither bash nor pwsh is available in ${target}. Available distros: ${userDistros.map(describe).join(', ')}`,
+      interpreters,
     }
   }
-  const target = config ? `${config.distro} (manual config)` : 'default distro'
+  const join = (items: Array<string | null>): string =>
+    items.filter((item): item is string => item !== null).join(' and ')
+  const present = join([interpreters.bash ? 'bash' : null, interpreters.pwsh7 ? 'pwsh 7' : null])
+  const missing = join([interpreters.bash ? null : 'bash', interpreters.pwsh7 ? null : 'pwsh 7'])
   return {
     available: true,
-    detail: `bash available in ${target}. Distros: ${userDistros.map(describe).join(', ')}`,
+    detail: `${present} available in ${target}${missing ? `; ${missing} not found in the distro` : ''}. Distros: ${userDistros.map(describe).join(', ')}`,
+    interpreters,
   }
 }
 
@@ -363,6 +378,7 @@ export async function detectShells(): Promise<ShellDetectionResult> {
       { kind: 'windows-sandbox' satisfies CommandEnvironment, available: false, detail: 'not implemented yet' },
     ],
     wsl2Sandbox,
+    wsl2Interpreters: wsl2.interpreters,
     detectedAt: new Date().toISOString(),
   }
   cachedDetection = result
@@ -395,7 +411,12 @@ export function commandComboUsable(
 ): boolean {
   if (!commandExecutionSupported(interpreter, environment)) return false
   if (!detection) return false
-  const interpreterOk = detection.interpreters.some((entry) => entry.kind === interpreter && entry.available)
+  // wsl2 runs the interpreter inside the distro: when the detection probed
+  // the distro, the in-distro result replaces the host interpreter check.
+  const inDistro = detection.wsl2Interpreters
+  const interpreterOk = environment === 'wsl2' && inDistro
+    ? (interpreter === 'bash' ? inDistro.bash : interpreter === 'pwsh7' ? inDistro.pwsh7 : false)
+    : detection.interpreters.some((entry) => entry.kind === interpreter && entry.available)
   const environmentOk = detection.environments.some((entry) => entry.kind === environment && entry.available)
   return interpreterOk && environmentOk
 }

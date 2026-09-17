@@ -2,11 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
   AppConfig,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentProgressState,
   ImageAttachment,
+  MediaAttachment,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -46,6 +49,10 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
     testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
       ipcRenderer.invoke('models:test-connectivity', model),
+    testProviderConnectivity: (provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-provider', provider),
+    listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
+      ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
@@ -90,7 +97,7 @@ contextBridge.exposeInMainWorld(
     setConversationAgentLimits: (
       projectId: string,
       conversationId: string,
-      agentLimits: AgentLimitsConfig,
+      agentLimits: AgentLimitsConfig | null,
     ) => ipcRenderer.invoke(
       'conversations:set-agent-limits',
       projectId,
@@ -100,7 +107,7 @@ contextBridge.exposeInMainWorld(
     setConversationCommandExecution: (
       projectId: string,
       conversationId: string,
-      commandExecution: CommandExecutionConfig,
+      commandExecution: CommandExecutionConfig | null,
     ) => ipcRenderer.invoke(
       'conversations:set-command-execution',
       projectId,
@@ -109,12 +116,27 @@ contextBridge.exposeInMainWorld(
     ),
     setProjectCommandExecutionDefault: (
       projectId: string,
-      commandExecution: CommandExecutionConfig,
+      commandExecution: CommandExecutionConfig | null,
     ) => ipcRenderer.invoke(
       'projects:set-command-execution-default',
       projectId,
       commandExecution,
     ),
+    setProjectAgentLimitsDefault: (
+      projectId: string,
+      agentLimits: AgentLimitsConfig | null,
+    ) => ipcRenderer.invoke(
+      'projects:set-agent-limits-default',
+      projectId,
+      agentLimits,
+    ),
+    onCommandReviewRequest: (listener: (request: CommandApprovalRequest) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, request: CommandApprovalRequest) => listener(request)
+      ipcRenderer.on('command-review:request', handler)
+      return () => ipcRenderer.removeListener('command-review:request', handler)
+    },
+    respondCommandReview: (requestId: string, response: CommandApprovalResponse) =>
+      ipcRenderer.invoke('command-review:respond', requestId, response),
     detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
     getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
     pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),
@@ -125,8 +147,10 @@ contextBridge.exposeInMainWorld(
     getToolHelpSnapshot: (): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot'),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
-    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, traceId),
+    setConversationReadState: (projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) =>
+      ipcRenderer.invoke('conversations:set-read-state', projectId, conversationId, lastReadMessageId, lastReadAt),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, attachments, traceId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
     onScreenshotSource: (listener: (source: ScreenshotSource) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, source: ScreenshotSource) => listener(source)
@@ -186,5 +210,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:unpin-lowest', projectId, conversationId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
       ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
+    showNotification: (payload: { type: string; title: string; body: string; projectId?: string; conversationId?: string; messageId?: string }) =>
+      ipcRenderer.invoke('notifications:show', payload),
+    getNotificationSettings: () => ipcRenderer.invoke('notifications:get-settings'),
+    setNotificationSettings: (settings: any) => ipcRenderer.invoke('notifications:set-settings', settings),
+    onNotificationClicked: (callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data)
+      ipcRenderer.on('notification:clicked', handler)
+      return () => ipcRenderer.removeListener('notification:clicked', handler)
+    },
   }),
 )

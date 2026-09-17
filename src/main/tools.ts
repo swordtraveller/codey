@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { commandExecutionSupported, supportedCommandCombos, type CommandExecutionConfig, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
+import { commandExecutionSupported, defaultCommandReviewConfig, supportedCommandCombos, type CommandEnvironment, type CommandExecutionConfig, type CommandInterpreter, type CommandReviewStep, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
 import { executeCommand, type CommandExecutorRuntime } from './command-executor'
 import { readContextRecords, searchConversationContext } from './conversation-store'
 import {
@@ -62,6 +62,9 @@ type ToolArguments = {
   package_manager?: 'npm' | 'pnpm'
   command?: 'install' | 'ci' | 'update' | 'list' | 'outdated'
   timeout_seconds?: number
+  interpreter?: string
+  environment?: string
+  keyword?: string
   script?: string
   checks?: NodeValidationCheckInput[]
   server_id?: string
@@ -611,7 +614,12 @@ export async function runAgentTool(
   project: Project,
   toolCall: ToolCall,
   writtenFiles: string[],
-  runtime?: { conversationId: string; signal?: AbortSignal },
+  runtime?: {
+    conversationId: string
+    signal?: AbortSignal
+    onToolsetUnlocked?: (keyword: string) => void
+    onReviewTrail?: (toolCallId: string, steps: CommandReviewStep[]) => void
+  },
   networkAccessEnabled = false,
   commandExecution?: CommandExecutionConfig,
   commandRuntime?: CommandExecutorRuntime,
@@ -626,7 +634,30 @@ export async function runAgentTool(
   if ((toolCall.function.name === 'web_search' || toolCall.function.name === 'web_open') && !networkAccessEnabled) {
     throw new Error('Network access is disabled')
   }
-  if (toolCall.function.name === 'run_command') {
+  if (toolCall.function.name === 'find_hidden_toolset') {
+    if (typeof args.keyword !== 'string' || args.keyword.trim().length === 0) {
+      throw new Error('keyword is required')
+    }
+    const keyword = args.keyword.trim().toLowerCase()
+    const knownToolsets: Record<string, string> = {
+      python: 'Python execution, script running, package installation, environment info, and symbol listing tools',
+      node: 'npm/pnpm package operations, package.json script running, and multi-script validation tools',
+      frontend: 'Development server lifecycle tools: start, status, logs, and stop',
+      git: 'Git repository tools: status, diff, add, unstage, commit, log, and branch',
+    }
+    if (knownToolsets[keyword]) {
+      runtime?.onToolsetUnlocked?.(keyword)
+      return stringifyResult({
+        found: [keyword],
+        description: `${knownToolsets[keyword]} unlocked. The tools are appended to your tool list from the next request onward and stay unlocked for the whole conversation.`,
+      })
+    }
+    return stringifyResult({
+      found: [],
+      description: `No hidden toolset matches "${keyword}". Available toolsets: ${Object.keys(knownToolsets).join(', ')}.`,
+    })
+  }
+  if (toolCall.function.name === 'command_run') {
     if (!commandExecution?.enabled) {
       throw new Error('Command execution is disabled')
     }
@@ -635,6 +666,12 @@ export async function runAgentTool(
     }
     if (typeof args.folder_id !== 'string') {
       throw new Error('folder_id is required')
+    }
+    if (args.interpreter !== undefined && !['bash', 'pwsh7', 'pwsh51'].includes(args.interpreter)) {
+      throw new Error(`interpreter must be one of: bash, pwsh7, pwsh51`)
+    }
+    if (args.environment !== undefined && !['bare', 'wsl2', 'docker'].includes(args.environment)) {
+      throw new Error(`environment must be one of: bare, wsl2, docker`)
     }
     if (args.timeout_seconds !== undefined && (typeof args.timeout_seconds !== 'number' || !Number.isInteger(args.timeout_seconds))) {
       throw new Error('timeout_seconds must be an integer')
@@ -648,6 +685,8 @@ export async function runAgentTool(
       conversationId: runtime?.conversationId ?? 'unknown',
       config: commandExecution,
       command: args.command,
+      overrideInterpreter: args.interpreter as CommandInterpreter | undefined,
+      overrideEnvironment: args.environment as CommandEnvironment | undefined,
       requestedTimeoutSeconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
       workspaceFolderId: folder.id,
       workspacePath: folder.path,
@@ -656,6 +695,7 @@ export async function runAgentTool(
     for (const entry of outcome.audit) {
       commandRuntime.recordAudit?.(entry)
     }
+    runtime?.onReviewTrail?.(toolCall.id, outcome.steps)
     return stringifyResult({ ok: outcome.ok, output: outcome.output })
   }
   if (toolCall.function.name === 'web_search') {
@@ -878,7 +918,7 @@ export async function runAgentTool(
   const { folderId, path } = requirePathArguments(args)
   const folder = getFolder(project, folderId)
 
-  if (toolCall.function.name === 'list_directory') {
+  if (toolCall.function.name === 'directory_list') {
     const target = await resolveFolderPath(folder, path, false)
     const entries = await readdir(target, { withFileTypes: true })
     return stringifyResult(
@@ -891,12 +931,12 @@ export async function runAgentTool(
         })),
     )
   }
-  if (toolCall.function.name === 'read_file') {
+  if (toolCall.function.name === 'file_read') {
     const target = await resolveFolderPath(folder, path, false)
     if ((await stat(target)).size > maxFileSize) throw new Error('File is too large to read')
     return truncateOutput(await readFile(target, 'utf8'))
   }
-  if (toolCall.function.name === 'write_file') {
+  if (toolCall.function.name === 'file_write') {
     if (typeof args.content !== 'string' || Buffer.byteLength(args.content, 'utf8') > maxWriteSize) {
       throw new Error('File content is missing or too large')
     }
@@ -952,54 +992,82 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   const interpreters = shellDetection?.interpreters ?? []
   const environments = shellDetection?.environments ?? []
   const availableCombos: string[] = []
+  const wsl2Interpreters = shellDetection?.wsl2Interpreters
   for (const combo of supportedCommandCombos) {
+    const environmentOk = environments.some((entry) => entry.kind === combo.environment && entry.available)
+    // wsl2 runs the interpreter inside the distro; when the detection probed
+    // it, the in-distro result replaces the host interpreter check.
+    if (combo.environment === 'wsl2' && wsl2Interpreters) {
+      const inDistro = combo.interpreter === 'bash'
+        ? wsl2Interpreters.bash
+        : combo.interpreter === 'pwsh7'
+          ? wsl2Interpreters.pwsh7
+          : false
+      if (environmentOk && inDistro) {
+        availableCombos.push(`${combo.interpreter} (${combo.environment})`)
+      }
+      continue
+    }
     const interpreterOk = interpreters.some((entry) => entry.kind === combo.interpreter && entry.available)
     // Docker provides bash/pwsh inside containers; the host interpreter is irrelevant there.
     const interpreterRelevant = combo.environment !== 'docker'
       || combo.interpreter === 'bash'
       || interpreters.length > 0
-    const environmentOk = environments.some((entry) => entry.kind === combo.environment && entry.available)
     if (interpreterOk && environmentOk && interpreterRelevant) {
       availableCombos.push(`${combo.interpreter} (${combo.environment})`)
     }
   }
   const comboLine = availableCombos.length
-    ? `Available interpreter/environment combos on this machine: ${availableCombos.join(', ')}.`
-    : 'Available interpreter/environment combos: unknown (run environment detection in settings).'
-  const notes: string[] = []
-  const interpreter = config.interpreter
-  const environment = config.environment
-  const environmentNote = environment === 'docker'
-    ? 'The command runs inside a disposable Linux container (the project folder is mounted read-write at /work and /work is the working directory; nothing else on the host is mounted).'
-    : environment === 'wsl2'
-      ? 'The command runs inside WSL2 (the project folder is the working directory; access host paths under /mnt/<drive>/).'
-      : 'The command runs directly on the host (bare environment).'
-  if (interpreter === 'bash') {
-    notes.push(environment === 'bare'
-      ? 'You are writing bash (Git Bash / MSYS on Windows): prefer relative paths; when a Windows path is unavoidable use forward slashes (D:/path) or single quotes, never raw backslashes (bash treats them as escapes). MSYS rewrites arguments that look like paths — prefix Windows-native tools taking /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Some Windows tools emit UTF-16 output that looks like garbage here (e.g. wsl.exe --list) — pipe through iconv -f UTF-16LE -t UTF-8 to read it. Linux-style tools and pipelines (ls, grep, |) are available.'
-      : 'You are writing bash in a Linux environment: standard POSIX paths and tools (ls, grep, awk, |). Use relative paths from the working directory.')
-  } else {
-    notes.push(`You are writing ${interpreter === 'pwsh7' ? 'PowerShell 7' : 'Windows PowerShell 5.1'}${environment === 'docker' ? ' (Linux container image)' : ''}: use PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. Avoid bash-isms (ls -la flags differ). PowerShell 5.1 lacks some pwsh 7 features (e.g. ?? operator, ternary); prefer simple, version-safe syntax.`)
+    ? `Enabled combos on this machine: ${availableCombos.join(', ')}.`
+    : 'Enabled combos on this machine: unknown (run environment detection in settings).'
+
+  const bashEnvNotes: string[] = []
+  if (availableCombos.includes('bash (bare)') || (interpreters.length === 0 && environments.length === 0)) {
+    bashEnvNotes.push('bash/bare (Git Bash on Windows): Windows paths use forward slashes (D:/path) or single quotes — raw backslashes are escapes. MSYS rewrites path-like arguments — prefix /v or /s style flags with MSYS_NO_PATHCONV=1 (e.g. MSYS_NO_PATHCONV=1 reg query ...). Windows tools may emit UTF-16 output (e.g. wsl.exe --list) — pipe through iconv -f UTF-16LE -t UTF-8, or tr -d \'\\0\' when iconv is unavailable.')
   }
-  notes.push('Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.')
-  notes.push('Timeout rules: most commands need only a small timeout (30s is typical); requesting more than 60 seconds requires user approval per command; when manual confirmation is disabled, any request is capped at 600 seconds.')
+  if (availableCombos.includes('bash (wsl2)')) {
+    bashEnvNotes.push('bash/wsl2: true Linux environment; host paths under /mnt/<drive>/. POSIX paths and tools.')
+  }
+  if (availableCombos.includes('bash (docker)')) {
+    bashEnvNotes.push('bash/docker: disposable Linux container; the project folder is mounted read-write at /work (nothing else on the host is mounted).')
+  }
+  const pwshEnvNotes: string[] = []
+  if (availableCombos.includes('pwsh7 (bare)') || availableCombos.includes('pwsh51 (bare)') || (interpreters.length === 0 && environments.length === 0)) {
+    pwshEnvNotes.push('pwsh7/bare, pwsh51/bare: runs on the host; Windows paths with backslashes or forward slashes both work.')
+  }
+  if (availableCombos.includes('pwsh7 (wsl2)')) {
+    pwshEnvNotes.push('pwsh7/wsl2: PowerShell 7 inside the Linux distro; host paths under /mnt/<drive>/. PowerShell syntax with POSIX paths and Linux tools.')
+  }
+  if (availableCombos.includes('pwsh7 (docker)') || availableCombos.includes('pwsh51 (docker)')) {
+    pwshEnvNotes.push('pwsh7/docker, pwsh51/docker: runs on the Linux container image (pwsh on Linux); the project folder is mounted read-write at /work.')
+  }
+
+  const durationGateSeconds = config.review?.durationAllowSeconds ?? defaultCommandReviewConfig.durationAllowSeconds
   const description = [
-    'Run a shell command in the configured project workspace (developer mode).',
-    `The command runs with the ${interpreter} interpreter in the ${environment === 'bare' ? 'bare environment' : environment === 'wsl2' ? 'wsl2 environment' : 'docker environment'}, using the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.`,
-    environmentNote,
+    'Run a shell command in the project workspace (developer mode).',
+    'The command runs in the selected project folder as the working directory, subject to rule interception, model audit, and manual confirmation as configured. Output is truncated to 2000 characters.',
+    `Default combo for this session: ${config.interpreter}/${config.environment}. You may override the interpreter and environment per call via the interpreter/environment parameters, but only within the enabled combos; other combos are rejected with the available list.`,
     comboLine,
-    ...notes,
-  ].join(' ')
+    'Writing rules per interpreter — write the command natively for the chosen interpreter; never nest one shell inside another (e.g. do NOT invoke pwsh from bash or bash from pwsh):',
+    '- bash: standard POSIX syntax (ls, grep, awk, |). Relative paths preferred.',
+    ...bashEnvNotes.map((note) => `  - ${note}`),
+    '- pwsh7 / pwsh51: PowerShell cmdlets and syntax (Get-ChildItem, Test-Path, $env:NAME). Quote paths with spaces. PowerShell 5.1 lacks some pwsh 7 features (?? operator, ternary) — prefer version-safe syntax.',
+    ...pwshEnvNotes.map((note) => `  - ${note}`),
+    'Prefer one command per call; chained commands may be harder to audit. Commands are denied with a reason — adjust based on the feedback instead of repeating the same command.',
+    `Timeout rules: declare an honest timeout (30s is typical); it must be an integer between 1 and 86400 seconds — an illegal duration is rejected even for whitelisted commands. Commands that do not match a whitelist rule always go through command review (rule check, then the optional audit model and manual approval) regardless of the declared duration; the audit model judges whether your requested duration is reasonable (reference: ${durationGateSeconds} seconds). Execution is terminated as soon as the declared timeout is exceeded, so declare enough time for the command to finish.`,
+  ].join('\n')
   return {
     type: 'function',
     function: {
-      name: 'run_command',
+      name: 'command_run',
       description,
       parameters: {
         type: 'object',
         properties: {
           folder_id: { type: 'string', enum: folderIds, description: 'Project folder to use as the working directory.' },
-          command: { type: 'string', minLength: 1, maxLength: 10_000, description: 'The shell command to execute, written for the configured interpreter.' },
+          command: { type: 'string', minLength: 1, maxLength: 10_000, description: 'The shell command to execute, written natively for the chosen interpreter.' },
+          interpreter: { type: 'string', enum: ['bash', 'pwsh7', 'pwsh51'], description: 'Optional. Override the session interpreter for this call; must be one of the enabled combos.' },
+          environment: { type: 'string', enum: ['bare', 'wsl2', 'docker'], description: 'Optional. Override the session environment for this call; must be one of the enabled combos.' },
           timeout_seconds: { type: 'integer', minimum: 1, maximum: 86_400, description: 'Requested timeout in seconds; 30 is typical. Above 60 requires user approval (denied if the user rejects); capped at 600 when manual confirmation is disabled.' },
         },
         required: ['folder_id', 'command'],
@@ -1009,7 +1077,7 @@ export function buildRunCommandTool(project: Project, config: CommandExecutionCo
   }
 }
 
-export function createAgentTools(project: Project, networkAccessEnabled = false, commandExecution?: CommandExecutionConfig, shellDetection?: ShellDetectionResult | null): object[] {
+export function createAgentTools(project: Project, networkAccessEnabled = false, commandExecution?: CommandExecutionConfig, shellDetection?: ShellDetectionResult | null, activeToolsets?: string[]): object[] {
   const folderId = {
     type: 'string',
     enum: project.folders.map((folder) => folder.id),
@@ -1042,29 +1110,29 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
     ? [buildRunCommandTool(project, commandExecution, shellDetection ?? null)]
     : []
 
-  return [
-    ...webTools,
-    ...commandTools,
-    { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'list_directory', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
-    { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
-    { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'node_package_command', description: 'Run a safe npm or pnpm package-manager operation in a project package root. Install, CI, and update always disable package lifecycle scripts.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, command: { type: 'string', enum: ['install', 'ci', 'update', 'list', 'outdated'] }, packages: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'command', 'timeout'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'node_package_script', description: 'Run a package.json script that is explicitly defined in the selected package root, with a timeout and workspace write guard.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'script', 'timeout'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'node_validate', description: 'Run up to five package.json validation scripts sequentially in the Node sandbox and return structured pass, failure, timeout, duration, and bounded log results.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, checks: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'object', properties: { script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 } }, required: ['script'], additionalProperties: false } }, timeout }, required: ['folder_id', 'package_manager', 'checks', 'timeout'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'frontend_start_dev_server', description: 'Start a long-running package.json development script in the project sandbox. The script must be explicitly defined in package.json.', parameters: { type: 'object', properties: { ...pathProperties, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 20 } }, required: ['folder_id', 'package_manager', 'script'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'frontend_get_dev_server_status', description: 'Get the status and bounded output of a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'frontend_get_dev_server_logs', description: 'Get bounded stdout and stderr from a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'frontend_stop_dev_server', description: 'Stop a development server started by this conversation and its child process tree.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+  // Hidden toolsets: unlocked per conversation via find_hidden_toolset.
+  const pythonTools = activeToolsets?.includes('python') ? [
     { type: 'function', function: { name: 'python_execute', description: 'Execute an in-memory Python code snippet without allowing file writes.', parameters: { type: 'object', properties: { code: { type: 'string' }, timeout, folder_id: { ...folderId, description: 'Optional project folder to use as the working directory.' } }, required: ['code', 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_run_script', description: 'Run an existing project Python script using the project agent_venv.', parameters: { type: 'object', properties: { ...pathProperties, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: [...pathRequired, 'timeout'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_install_package', description: 'Install packages into the project agent_venv environment.', parameters: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['packages'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'file_patch', description: 'Replace one exact text snippet in an existing project file.', parameters: { type: 'object', properties: { ...pathProperties, old_snippet: { type: 'string' }, new_snippet: { type: 'string' } }, required: [...pathRequired, 'old_snippet', 'new_snippet'], additionalProperties: false } } },
     { type: 'function', function: { name: 'python_env_info', description: 'Get structured information about the project Python environment.', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
     { type: 'function', function: { name: 'python_list_symbols', description: 'Statically list classes and functions in a project Python file.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
-    { type: 'function', function: { name: 'project_tree', description: 'Return a filtered directory tree from one project folder.', parameters: { type: 'object', properties: { ...pathProperties, max_depth: { type: 'integer', minimum: 0, maximum: 8 } }, required: [...pathRequired, 'max_depth'], additionalProperties: false } } },
-    { type: 'function', function: { name: 'project_search_text', description: 'Search text across all or selected project folders using a JavaScript regular expression.', parameters: { type: 'object', properties: { query: { type: 'string' }, file_pattern: { type: ['string', 'null'], description: 'Optional relative glob such as **/*.py.' }, case_sensitive: { type: 'boolean' }, folder_ids: { type: 'array', items: folderId, uniqueItems: true, description: 'Optional folder IDs. Omit to search all project folders.' } }, required: ['query', 'case_sensitive'], additionalProperties: false } } },
+  ] : []
+
+  const nodeTools = activeToolsets?.includes('node') ? [
+    { type: 'function', function: { name: 'node_package_command', description: 'Run a safe npm or pnpm package-manager operation in a project package root. Install, CI, and update always disable package lifecycle scripts.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, command: { type: 'string', enum: ['install', 'ci', 'update', 'list', 'outdated'] }, packages: { type: 'array', items: { type: 'string' }, maxLength: 500, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'command', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'node_package_script', description: 'Run a package.json script that is explicitly defined in the selected package root, with a timeout and workspace write guard.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 }, timeout }, required: ['folder_id', 'package_manager', 'script', 'timeout'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'node_validate', description: 'Run up to five package.json validation scripts sequentially in the Node sandbox and return structured pass, failure, timeout, duration, and bounded log results.', parameters: { type: 'object', properties: { folder_id: folderId, path: { type: 'string', description: 'Optional package directory relative to the selected project folder.' }, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, checks: { type: 'array', minItems: 1, maxItems: 5, items: { type: 'object', properties: { script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 } }, required: ['script'], additionalProperties: false } }, timeout }, required: ['folder_id', 'package_manager', 'checks', 'timeout'], additionalProperties: false } } },
+  ] : []
+
+  const frontendTools = activeToolsets?.includes('frontend') ? [
+    { type: 'function', function: { name: 'frontend_start_dev_server', description: 'Start a long-running package.json development script in the project sandbox. The script must be explicitly defined in package.json.', parameters: { type: 'object', properties: { ...pathProperties, package_manager: { type: 'string', enum: ['npm', 'pnpm'] }, script: { type: 'string', minLength: 1, maxLength: 100 }, argv: { type: 'array', items: { type: 'string' }, maxItems: 20 } }, required: ['folder_id', 'package_manager', 'script'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_get_dev_server_status', description: 'Get the status and bounded output of a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_get_dev_server_logs', description: 'Get bounded stdout and stderr from a development server started by this conversation.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'frontend_stop_dev_server', description: 'Stop a development server started by this conversation and its child process tree.', parameters: { type: 'object', properties: { server_id: { type: 'string' } }, required: ['server_id'], additionalProperties: false } } },
+  ] : []
+
+  const gitTools = activeToolsets?.includes('git') ? [
     { type: 'function', function: { name: 'git_status', description: 'Show the concise working tree and staging status for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_diff', description: 'Show unstaged or staged changes for a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, staged: { type: 'boolean', description: 'True to show staged changes; false to show unstaged changes.' } }, required: ['folder_id', 'staged'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_add', description: 'Stage an explicit list of project files. Repository-wide paths and directories are rejected.', parameters: { type: 'object', properties: { folder_id: gitFolderId, paths: { type: 'array', items: { type: 'string', maxLength: 500, description: 'A file path relative to the repository root.' }, minItems: 1, maxItems: 100, uniqueItems: true } }, required: ['folder_id', 'paths'], additionalProperties: false } } },
@@ -1072,5 +1140,23 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
     { type: 'function', function: { name: 'git_commit', description: 'Commit currently staged changes. Fails when the staging area is empty.', parameters: { type: 'object', properties: { folder_id: gitFolderId, message: { type: 'string', minLength: 1, maxLength: 5000 } }, required: ['folder_id', 'message'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_log', description: 'Show recent commits from a project Git repository.', parameters: { type: 'object', properties: { folder_id: gitFolderId, max_count: { type: 'integer', minimum: 1, maximum: 50 } }, required: ['folder_id', 'max_count'], additionalProperties: false } } },
     { type: 'function', function: { name: 'git_get_current_branch', description: 'Return the current branch or report a detached HEAD.', parameters: { type: 'object', properties: { folder_id: gitFolderId }, required: ['folder_id'], additionalProperties: false } } },
+  ] : []
+
+  return [
+    ...webTools,
+    ...commandTools,
+    { type: 'function', function: { name: 'find_hidden_toolset', description: 'Unlock a hidden toolset by keyword. Hidden toolsets contain specialized tools (currently: python, node, frontend, git). The unlocked tools are appended to your tool list from the next request onward and stay unlocked for the whole conversation. Call this before attempting work that needs a specialized tool; the returned JSON lists matched toolsets.', parameters: { type: 'object', properties: { keyword: { type: 'string', minLength: 1, maxLength: 100, description: 'The toolset keyword to unlock, e.g. "python".' } }, required: ['keyword'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'directory_list', description: 'List files and directories in a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+    { type: 'function', function: { name: 'file_read', description: 'Read a UTF-8 text file from a project folder.', parameters: { type: 'object', properties: pathProperties, required: pathRequired, additionalProperties: false } } },
+    { type: 'function', function: { name: 'file_write', description: 'Create or replace a UTF-8 code file in a project folder.', parameters: { type: 'object', properties: { ...pathProperties, content: { type: 'string', description: 'Complete file content.' } }, required: [...pathRequired, 'content'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'file_patch', description: 'Replace one exact text snippet in an existing project file.', parameters: { type: 'object', properties: { ...pathProperties, old_snippet: { type: 'string' }, new_snippet: { type: 'string' } }, required: [...pathRequired, 'old_snippet', 'new_snippet'], additionalProperties: false } } },
+    ...pythonTools,
+    ...nodeTools,
+    ...frontendTools,
+    ...gitTools,
+    { type: 'function', function: { name: 'project_tree', description: 'Return a filtered directory tree from one project folder.', parameters: { type: 'object', properties: { ...pathProperties, max_depth: { type: 'integer', minimum: 0, maximum: 8 } }, required: [...pathRequired, 'max_depth'], additionalProperties: false } } },
+    { type: 'function', function: { name: 'project_search_text', description: 'Search text across all or selected project folders using a JavaScript regular expression.', parameters: { type: 'object', properties: { query: { type: 'string' }, file_pattern: { type: ['string', 'null'], description: 'Optional relative glob such as **/*.py.' }, case_sensitive: { type: 'boolean' }, folder_ids: { type: 'array', items: folderId, uniqueItems: true, description: 'Optional folder IDs. Omit to search all project folders.' } }, required: ['query', 'case_sensitive'], additionalProperties: false } } },
   ]
 }

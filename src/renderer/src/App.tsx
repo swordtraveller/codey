@@ -35,10 +35,17 @@ import type {
   ConversationTurnRecord,
   ImageAttachment,
   ImageMediaType,
+  MediaAttachment,
+  MediaKind,
   PerformanceTraceFile,
   PerformanceTraceStatus,
 } from '../../shared/types'
 import { maximumImageAttachmentBytes, maximumImageAttachments, supportedImageMediaTypes } from '../../shared/image-attachments'
+import {
+  maximumMediaAttachmentBytes,
+  maximumMediaAttachments,
+  supportedMediaTypes,
+} from '../../shared/media-attachments'
 import {
   clearDevelopmentProgress,
   getDevelopmentProgress,
@@ -56,21 +63,43 @@ import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
   defaultCommandExecutionConfig,
+  defaultCommandReviewConfig,
   defaultContextManagementConfig,
-  defaultModelConfig,
+  defaultModelDefinition,
+  defaultModelLink,
+  defaultNotificationSettings,
+  defaultProviderConfig,
+  modelGroupDefaultRetries,
   commandExecutionSupported,
   deriveContextBudgets,
   maximumAgentLimit,
+  type CommandApprovalMemory,
+  type CommandApprovalRequest,
   type CommandExecutionConfig,
+  type CommandReviewConfig,
+  type CommandReviewRule,
   type ModelConfig,
+  type ModelDefinition,
+  type RuntimeModelConfig,
+  type ModelGroupConfig,
+  type ModelLink,
   type Project,
+  type ProviderConfig,
   type PromptSnapshot,
   type ToolHelpSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
+  type NotificationSettings,
 } from '../../shared/types'
+import { UnreadBadge } from './components/UnreadBadge'
+import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
+import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
 const markdownPlugins = [remarkGfm]
+
+/** Media upload menu entries (video/audio/PDF) are hidden until provider
+ *  support stabilizes; the full pipeline stays wired behind this flag. */
+const mediaUploadMenuEnabled = false
 
 function readImage(file: File): Promise<ImageAttachment> {
   return new Promise((resolve, reject) => {
@@ -80,6 +109,21 @@ function readImage(file: File): Promise<ImageAttachment> {
       id: crypto.randomUUID(),
       name: file.name || `clipboard-${crypto.randomUUID()}.${file.type.split('/')[1] ?? 'png'}`,
       mediaType: file.type as ImageMediaType,
+      dataUrl: String(reader.result),
+    })
+    reader.readAsDataURL(file)
+  })
+}
+
+function readMedia(file: File, kind: MediaKind): Promise<MediaAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => resolve({
+      id: crypto.randomUUID(),
+      name: file.name || `${kind}-${crypto.randomUUID()}`,
+      kind,
+      mediaType: file.type as MediaAttachment['mediaType'],
       dataUrl: String(reader.result),
     })
     reader.readAsDataURL(file)
@@ -160,6 +204,18 @@ const environmentLabels: Record<string, string> = {
   docker: 'docker',
   'windows-sandbox': 'Windows Sandbox',
 }
+
+function listEnabledCombos(enabledEnvironments: CommandExecutionConfig['enabledEnvironments']): Array<{
+  interpreter: CommandExecutionConfig['interpreter']
+  environment: CommandExecutionConfig['environment']
+}> {
+  return (['bash', 'pwsh7', 'pwsh51'] as const).flatMap((interpreter) =>
+    (['bare', 'wsl2', 'docker'] as const)
+      .filter((environment) => enabledEnvironments[interpreter]?.includes(environment) ?? false)
+      .map((environment) => ({ interpreter, environment })),
+  )
+}
+
 function isValidAgentLimits(value: AgentLimitsConfig): boolean {
   return Number.isInteger(value.modelRequestsPerRound) &&
     value.modelRequestsPerRound >= 1 && value.modelRequestsPerRound <= maximumAgentLimit &&
@@ -215,9 +271,20 @@ function formatTurnForCopy(
       lines.push(`[${image.name} (${image.mediaType})]`)
     }
   }
+  if (userMessage.attachments?.length) {
+    lines.push(t('copyTurnAttachments'))
+    for (const attachment of userMessage.attachments) {
+      lines.push(`[${attachment.name} (${attachment.mediaType})]`)
+    }
+  }
   for (const message of turnMessages) {
     if (message.compression) continue
     const toolCalls = (message.blocks ?? []).filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> => block.type === 'function_call')
+    // Text first regardless of raw block order: content is finalized output
+    // for the reader, while tool calls are pending requests awaiting results.
+    if (blockHasContent(message)) {
+      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
+    }
     let toolIndex = 0
     for (const block of message.blocks ?? []) {
       if (block.type === 'function_call') {
@@ -228,9 +295,6 @@ function formatTurnForCopy(
           lines.push(block.resultError ? t('copyTurnToolError') : t('copyTurnToolResultLabel'), block.result)
         }
       }
-    }
-    if (blockHasContent(message)) {
-      lines.push('', `# ${formatMessageTime(message.createdAt)} [assistant]`, message.content || '')
     }
   }
   return lines.join('\n')
@@ -435,6 +499,20 @@ function FunctionCallMessage({
         <span>{t('toolParameters')}</span>
         <pre>{formatToolOutput(block.parameters)}</pre>
       </div>
+      {block.review && block.review.length > 0 && (
+        <div className="tool-output-section tool-review-section">
+          <span>{t('toolReviewChain')}</span>
+          <ul className="tool-review-steps">
+            {block.review.map((step, index) => (
+              <li key={index} className={`review-step review-${step.outcome}`}>
+                <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
+                <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
+                {step.detail && <span className="review-detail">{step.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {block.result !== undefined && (
         <div className="tool-output-section">
           <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
@@ -465,12 +543,16 @@ const ConversationMessage = memo(function ConversationMessage({
   projectId,
   conversationId,
   conversationTurn,
+  showContinue,
+  onContinue,
 }: {
   message: ChatMessage
   messages: ChatMessage[]
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
+  showContinue?: boolean
+  onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const messageTurn = message.turn ?? (
@@ -504,6 +586,17 @@ const ConversationMessage = memo(function ConversationMessage({
           <div className="user-message-content">
             <div className="message-card-header">
               {formatMessageTime(message.createdAt) && <time>{formatMessageTime(message.createdAt)}</time>}
+              {showContinue && onContinue && (
+                <Button
+                  aria-label={t('continue')}
+                  appearance="subtle"
+                  size="small"
+                  title={t('continue')}
+                  onClick={onContinue}
+                >
+                  {t('continue')}
+                </Button>
+              )}
               {turnCompleted && messageTurn && (
                 <Button
                   aria-label={t('copyTurn')}
@@ -532,6 +625,15 @@ const ConversationMessage = memo(function ConversationMessage({
                 ))}
               </div>
             ) : null}
+            {message.attachments?.length ? (
+              <div className="message-attachments">
+                {message.attachments.map((attachment) => (
+                  <span className={`message-attachment message-attachment-${attachment.kind}`} key={attachment.id}>
+                    {attachment.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             {message.content && <p>{message.content}</p>}
           </div>
         )}
@@ -541,9 +643,444 @@ const ConversationMessage = memo(function ConversationMessage({
   )
 })
 
+function formatCommandDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const rest = seconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${rest}s`
+}
+
+/** Shared Agent-limits fields for the three settings surfaces (global,
+ *  project, conversation). */
+function AgentLimitsFields({ value, disabled, onChange }: {
+  value: AgentLimitsConfig
+  disabled?: boolean
+  onChange: (patch: Partial<AgentLimitsConfig>) => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <>
+      <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
+        <Input
+          disabled={disabled}
+          min={1}
+          max={maximumAgentLimit}
+          type="number"
+          value={String(value.modelRequestsPerRound)}
+          onChange={(_, data) => onChange({ modelRequestsPerRound: Number(data.value) })}
+        />
+      </Field>
+      <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
+        <Input
+          disabled={disabled}
+          min={1}
+          max={maximumAgentLimit}
+          type="number"
+          value={String(value.toolCallsPerRequest)}
+          onChange={(_, data) => onChange({ toolCallsPerRequest: Number(data.value) })}
+        />
+      </Field>
+    </>
+  )
+}
+
+/** Shared command-execution editor (flat: execution + review sections) for
+ *  the conversation dialog and the project settings dialog. The override
+ *  switch (null = inherit) lives in the caller. */
+function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs, sessionModel, globalReview, onOpenSyntaxHelp, showReview = true }: {
+  value: CommandExecutionConfig
+  onChange: (next: CommandExecutionConfig) => void
+  disabled?: boolean
+  modelConfigs: ModelConfig[]
+  sessionModel?: ModelConfig
+  globalReview: CommandReviewConfig
+  onOpenSyntaxHelp?: () => void
+  showReview?: boolean
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const setDraft = (next: CommandExecutionConfig): void => onChange(next)
+  const enabledCombos = listEnabledCombos(value.enabledEnvironments)
+  const defaultInEnabled = enabledCombos.some(
+    (combo) => combo.interpreter === value.interpreter && combo.environment === value.environment,
+  )
+  return (
+    <>
+      <Switch
+        checked={value.enabled}
+        disabled={disabled}
+        label={t('commandExecutionEnabled')}
+        onChange={(_, data) => setDraft({ ...value, enabled: data.checked })}
+      />
+      <p className="settings-description">{t('commandExecutionDescription')}</p>
+      <div className="enabled-environments-group">
+        <p className="section-label">{t('enabledEnvironments')}</p>
+        <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
+        {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
+          <div className="enabled-environments-row" key={interpreter}>
+            <span className="enabled-environments-label">
+              {interpreterLabels[interpreter] ?? interpreter}
+            </span>
+            {(['bare', 'wsl2', 'docker'] as const).map((environment) => {
+              if (interpreter === 'pwsh51' && environment === 'wsl2') return null
+              return (
+              <label className="enabled-environments-check" key={environment}>
+                <input
+                  type="checkbox"
+                  disabled={disabled || !value.enabled}
+                  checked={value.enabledEnvironments[interpreter]?.includes(environment) ?? false}
+                  onChange={(event) => {
+                    const current = value.enabledEnvironments[interpreter] ?? []
+                    const next = event.target.checked
+                      ? [...current, environment]
+                      : current.filter((entry) => entry !== environment)
+                    const enabledEnvironments = { ...value.enabledEnvironments, [interpreter]: next }
+                    const draft: CommandExecutionConfig = { ...value, enabledEnvironments }
+                    // Keep the default combo inside the enabled set.
+                    if (!(enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) {
+                      const fallback = listEnabledCombos(enabledEnvironments)[0]
+                      if (fallback) {
+                        draft.interpreter = fallback.interpreter
+                        draft.environment = fallback.environment
+                      }
+                    }
+                    setDraft(draft)
+                  }}
+                />
+                {environmentLabels[environment] ?? environment}
+              </label>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+      <Field label={t('commandDefaultCombo')}>
+        <Select
+          disabled={disabled || !value.enabled || enabledCombos.length === 0}
+          value={defaultInEnabled ? `${value.interpreter}|${value.environment}` : ''}
+          onChange={(_, data) => {
+            const [interpreter, environment] = String(data.value ?? '').split('|')
+            if (!interpreter || !environment) return
+            setDraft({
+              ...value,
+              interpreter: interpreter as CommandExecutionConfig['interpreter'],
+              environment: environment as CommandExecutionConfig['environment'],
+            })
+          }}
+        >
+          {!defaultInEnabled && <option value="" disabled>{t('commandDefaultComboNone')}</option>}
+          {enabledCombos.map((combo) => (
+            <option key={`${combo.interpreter}|${combo.environment}`} value={`${combo.interpreter}|${combo.environment}`}>
+              {`${interpreterLabels[combo.interpreter] ?? combo.interpreter} / ${environmentLabels[combo.environment] ?? combo.environment}`}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <p className="settings-description">{t('commandDefaultComboHint')}</p>
+      {value.enabled && !defaultInEnabled && (
+        <p className="settings-warning" role="alert">{t('commandDefaultComboInvalid')}</p>
+      )}
+      {showReview && (
+        <>
+          <Switch
+            checked={value.review !== null}
+            disabled={disabled}
+            label={t('reviewOverrideGlobal')}
+            onChange={(_, data) => setDraft({
+              ...value,
+              review: data.checked
+                ? structuredClone(value.review ?? globalReview)
+                : null,
+            })}
+          />
+          {value.review === null ? (
+            <p className="settings-description">{t('reviewFollowingGlobal')}</p>
+          ) : (
+            <CommandReviewEditor
+              value={value.review}
+              disabled={disabled}
+              modelConfigs={modelConfigs}
+              sessionModel={sessionModel}
+              onOpenSyntaxHelp={onOpenSyntaxHelp}
+              onChange={(next) => setDraft({ ...value, review: next })}
+            />
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
+/** Shared review editor for the three settings surfaces (global, project,
+ *  conversation): duration gate, reviewer checkboxes, rule list. */
+function CommandReviewEditor({ value, onChange, disabled, modelConfigs, sessionModel, onOpenSyntaxHelp }: {
+  value: CommandReviewConfig
+  onChange: (next: CommandReviewConfig) => void
+  disabled?: boolean
+  modelConfigs: ModelConfig[]
+  sessionModel?: ModelConfig
+  onOpenSyntaxHelp?: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [newPattern, setNewPattern] = useState('')
+  const [newList, setNewList] = useState<'allow' | 'deny'>('deny')
+  const newPatternInvalid = newPattern.trim() !== '' && !isValidGlobPattern(newPattern)
+  const newPatternConflict = newPattern.trim() !== '' && Boolean(findConflictingRule(value.contentRules, { pattern: newPattern, list: newList }))
+  const auditModel = value.reviewers.auditModelConfigId
+    ? modelConfigs.find((model) => model.id === value.reviewers.auditModelConfigId)
+    : undefined
+  const updateRule = (id: string, patch: Partial<CommandReviewRule>): void => {
+    onChange({ ...value, contentRules: value.contentRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) })
+  }
+  const removeRule = (id: string): void => {
+    onChange({ ...value, contentRules: value.contentRules.filter((rule) => rule.id !== id) })
+  }
+  const addRule = (): void => {
+    const pattern = newPattern.trim()
+    if (!pattern || newPatternInvalid) return
+    onChange({
+      ...value,
+      contentRules: [
+        ...value.contentRules.filter((rule) => rule.pattern.trim().toLowerCase() !== pattern.toLowerCase()),
+        { id: crypto.randomUUID(), pattern, patternType: 'glob', list: newList, source: 'user', enabled: true, createdAt: new Date().toISOString() },
+      ],
+    })
+    setNewPattern('')
+  }
+  return (
+    <div className="command-review-editor">
+      <Field label={t('reviewDurationGate')} hint={t('reviewDurationGateHint')}>
+        <Input
+          type="number"
+          min={1}
+          max={1_440}
+          disabled={disabled}
+          value={String(Math.round(value.durationAllowSeconds / 60))}
+          onChange={(_, data) => {
+            const minutes = Math.floor(Number(data.value))
+            if (!Number.isFinite(minutes)) return
+            onChange({ ...value, durationAllowSeconds: Math.min(1_440, Math.max(1, minutes)) * 60 })
+          }}
+        />
+      </Field>
+      <p className="settings-description">{t('reviewDurationGateUnit')}</p>
+
+      <p className="section-label">{t('reviewReviewers')}</p>
+      <Switch checked disabled label={t('reviewProgramRules')} />
+      <p className="settings-description">{t('reviewProgramRulesNote')}</p>
+      <Switch
+        checked={value.reviewers.auditModel}
+        disabled={disabled}
+        label={t('commandModelAudit')}
+        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModel: data.checked } })}
+      />
+      {value.reviewers.auditModel && (
+        <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
+          <Select
+            disabled={disabled}
+            value={value.reviewers.auditModelConfigId ?? ''}
+            onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModelConfigId: data.value || null } })}
+          >
+            <option value="">{t('notConfigured')}</option>
+            {modelConfigs
+              .filter((model) => model.id !== sessionModel?.id)
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name || model.modelName || t('unnamedModel')}
+                </option>
+              ))}
+          </Select>
+        </Field>
+      )}
+      {value.reviewers.auditModel && auditModel && sessionModel &&
+        auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase() && (
+        <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+      )}
+      <Switch
+        checked={value.reviewers.manualConfirmation}
+        disabled={disabled}
+        label={t('commandManualConfirmation')}
+        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, manualConfirmation: data.checked } })}
+      />
+      <p className="settings-description">{t('reviewManualConfirmationNote')}</p>
+
+      <p className="section-label">{t('reviewContentRules')}</p>
+      {onOpenSyntaxHelp && (
+        <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
+          {t('reviewSyntaxHelp')}
+        </Button>
+      )}
+      <div className="command-rules-list">
+        {value.contentRules.length === 0 && <p className="settings-description">{t('reviewNoRules')}</p>}
+        {value.contentRules.map((rule) => {
+          const conflict = findConflictingRule(value.contentRules, rule)
+          return (
+            <div className="command-rule-row" key={rule.id}>
+              <input
+                aria-label={t('reviewRuleEnabled')}
+                type="checkbox"
+                checked={rule.enabled}
+                disabled={disabled}
+                onChange={(event) => updateRule(rule.id, { enabled: event.target.checked })}
+              />
+              <input
+                aria-label={t('reviewRulePattern')}
+                className="command-rule-pattern"
+                type="text"
+                value={rule.pattern}
+                disabled={disabled}
+                onChange={(event) => updateRule(rule.id, { pattern: event.target.value })}
+              />
+              <Select
+                aria-label={t('reviewRuleList')}
+                disabled={disabled}
+                value={rule.list}
+                onChange={(_, data) => updateRule(rule.id, { list: data.value as 'allow' | 'deny' })}
+              >
+                <option value="deny">{t('reviewRuleDeny')}</option>
+                <option value="allow">{t('reviewRuleAllow')}</option>
+              </Select>
+              <span className={`command-rule-source source-${rule.source}`} title={rule.patternType === 'regex' ? t('reviewRuleRegex') : undefined}>
+                {t(`reviewSource_${rule.source}`)}
+              </span>
+              <Button appearance="subtle" size="small" disabled={disabled} onClick={() => removeRule(rule.id)}>
+                {t('reviewRuleDelete')}
+              </Button>
+              {conflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
+            </div>
+          )
+        })}
+      </div>
+      {!disabled && (
+        <div className="command-rule-add">
+          <Input
+            aria-label={t('reviewNewRulePattern')}
+            placeholder="git *"
+            type="text"
+            value={newPattern}
+            onChange={(_, data) => setNewPattern(data.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') addRule()
+            }}
+          />
+          <Select
+            aria-label={t('reviewNewRuleList')}
+            value={newList}
+            onChange={(_, data) => setNewList(data.value as 'allow' | 'deny')}
+          >
+            <option value="deny">{t('reviewRuleDeny')}</option>
+            <option value="allow">{t('reviewRuleAllow')}</option>
+          </Select>
+          <Button appearance="secondary" disabled={newPatternInvalid || newPattern.trim() === ''} onClick={addRule}>
+            {t('reviewRuleAdd')}
+          </Button>
+        </div>
+      )}
+      {newPatternInvalid && <p className="settings-warning" role="alert">{t('reviewRulePatternInvalid')}</p>}
+      {newPatternConflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
+    </div>
+  )
+}
+
+/** In-app approval card shown when run_command needs manual review. */
+function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
+  request: CommandApprovalRequest
+  onRespond: (approved: boolean, memory?: CommandApprovalMemory) => void
+  onOpenSyntaxHelp: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [remember, setRemember] = useState(false)
+  const [patternType, setPatternType] = useState<'exact' | 'prefix'>('exact')
+  const [scope, setScope] = useState<'turn' | 'session' | 'project' | 'global'>('project')
+  const [list, setList] = useState<'allow' | 'deny'>('allow')
+  useEffect(() => {
+    setRemember(false)
+    setPatternType('exact')
+    setScope('project')
+    setList('allow')
+  }, [request.requestId])
+  const checkLabels: Record<string, string> = {
+    rules: t('approvalCheckRules'),
+    'model-audit': t('approvalCheckModelAudit'),
+    'manual-confirmation': t('approvalCheckManual'),
+  }
+  const checksText = request.checks.map((check) => checkLabels[check] ?? check).join(', ')
+  const respond = (approved: boolean): void => {
+    onRespond(approved, remember ? { patternType, scope, list } : undefined)
+  }
+  return (
+    <Dialog open modalType="alert" onOpenChange={(_, data) => { if (!data.open) respond(false) }}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>{t('approvalTitle')}</DialogTitle>
+          <DialogContent className="dialog-fields">
+            <p className="settings-description">
+              {t('approvalDurationInfo', { duration: formatCommandDuration(request.timeoutSeconds) })}
+            </p>
+            <pre className="command-approval-command">{request.command}</pre>
+            <p className="settings-description">
+              {t('approvalEnvironment', { environment: request.environment, workspace: request.workspacePath })}
+            </p>
+            {request.auditModelName && (
+              <p className="settings-description">
+                {t('approvalAuditVerdict', {
+                  model: request.auditModelName,
+                  verdict: request.auditNote?.trim() || t('approvalNoObjection'),
+                })}
+              </p>
+            )}
+            {request.checks.length > 0 && (
+              <p className="settings-description">{t('approvalChecks', { checks: checksText })}</p>
+            )}
+            <div className="command-approval-memory">
+              <Switch checked={remember} label={t('approvalRemember')} onChange={(_, data) => setRemember(data.checked)} />
+              {remember && (
+                <>
+                  <Field label={t('approvalMemoryPattern')}>
+                    <Select value={patternType} onChange={(_, data) => setPatternType(data.value as 'exact' | 'prefix')}>
+                      <option value="exact">{t('approvalMemoryExact')}</option>
+                      <option value="prefix">{t('approvalMemoryPrefix')}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t('approvalMemoryScope')}>
+                    <Select value={scope} onChange={(_, data) => setScope(data.value as typeof scope)}>
+                      <option value="turn">{t('approvalScopeTurn')}</option>
+                      <option value="session">{t('approvalScopeSession')}</option>
+                      <option value="project">{t('approvalScopeProject')}</option>
+                      <option value="global">{t('approvalScopeGlobal')}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t('approvalMemoryList')}>
+                    <Select value={list} onChange={(_, data) => setList(data.value as 'allow' | 'deny')}>
+                      <option value="allow">{t('approvalMemoryAllow')}</option>
+                      <option value="deny">{t('approvalMemoryDeny')}</option>
+                    </Select>
+                  </Field>
+                </>
+              )}
+            </div>
+            <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
+              {t('reviewSyntaxHelp')}
+            </Button>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={() => respond(false)}>
+              {t('approvalDeny')}
+            </Button>
+            <Button appearance="primary" onClick={() => respond(true)}>
+              {t('approvalApprove')}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  )
+}
+
 type VirtualWindow = { start: number; end: number }
 
-const conversationEstimatedRowHeight = 180
+const conversationEstimatedRowHeight = 480
 const conversationVirtualOverscan = 5
 
 function updateVirtualWindow(
@@ -576,6 +1113,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn,
   scrollContainerRef,
   shouldStickToBottom,
+  lastUserMessageId,
+  onContinue,
 }: {
   messages: ChatMessage[]
   projectId: string
@@ -583,6 +1122,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn?: ConversationTurn
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
+  lastUserMessageId?: string
+  onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const latestInitialStart = initialConversationWindowStart(messages)
@@ -624,9 +1165,18 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       Math.max(0, container.scrollTop - historyFoldHeight),
       container.clientHeight,
     )
-    setVirtualWindow({
-      start: visibleStartIndex + next.start,
-      end: visibleStartIndex + next.end,
+    setVirtualWindow((current) => {
+      const start = visibleStartIndex + next.start
+      const end = visibleStartIndex + next.end
+      if (current.start === start && current.end === end) return current
+      // Monotonic expansion: a stale-offsets recompute (rows still at the
+      // estimated height) must never clip rows that are already rendered,
+      // otherwise fast scrolling blanks the region above until the heights
+      // settle. Shrinking back happens naturally once real heights land.
+      return {
+        start: Math.min(current.start, start),
+        end: Math.max(current.end, end),
+      }
     })
   }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
 
@@ -735,12 +1285,29 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
     }
-    setStartIndex((current) => expandConversationWindowStart(
+    const nextStartIndex = expandConversationWindowStart(
       messages,
-      Math.min(current, initialConversationWindowStart(messages)),
+      Math.min(startIndex, initialConversationWindowStart(messages)),
       conversationHistoryBatchSize,
-    ))
-  }, [hasOlderMessages, messages, scrollContainerRef])
+    )
+    setStartIndex(nextStartIndex)
+    // Pre-expand the render window over the newly revealed rows: without
+    // this, virtualWindow keeps its old absolute start and the freshly
+    // exposed older messages stay outside the rendered slice until a later
+    // recompute, which can never fire when the estimated offsets already
+    // cover the viewport (the "blank above a threshold" symptom).
+    setVirtualWindow((current) => ({
+      start: Math.min(current.start, nextStartIndex),
+      end: current.end,
+    }))
+    // Release the in-flight guard once the state updates are queued: the
+    // anchoring effect resets it too, but when scrollTop stays at 0 the
+    // anchor restore never runs (scrollHeight keeps growing) and a stuck
+    // guard would reject every subsequent wheel-triggered batch.
+    window.requestAnimationFrame(() => {
+      loadingOlderRef.current = false
+    })
+  }, [hasOlderMessages, messages, scrollContainerRef, startIndex])
 
   useEffect(() => {
     const container = scrollContainerRef.current
@@ -779,9 +1346,19 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     Math.max(0, virtualWindow.start - visibleStartIndex),
     visibleMessages.length,
   )
-  const renderedEnd = Math.min(
-    Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
-    visibleMessages.length,
+  // Rendered range hard floor: at least 16 rows or the full visible list.
+  // Estimated heights compress the virtual window math on first paint
+  // (a "screenful" of 180px rows is only ~2 real rows), and the self-heal
+  // loop cannot widen a window whose end already exceeds the visible start —
+  // fast upward scrolling then shows a long blank stretch until real heights
+  // trickle in. Forcing a wide initial slice trades one cheap paint of a
+  // dozen extra rows for never blanking above the fold.
+  const renderedEnd = Math.max(
+    Math.min(
+      Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
+      visibleMessages.length,
+    ),
+    Math.min(renderedStart + 16, visibleMessages.length),
   )
   const topHeight = layout.offsets[renderedStart] ?? 0
   const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
@@ -809,6 +1386,8 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
             projectId={projectId}
             conversationId={conversationId}
             conversationTurn={conversationTurn}
+            showContinue={message.id === lastUserMessageId}
+            onContinue={onContinue}
           />
         </div>
       ))}
@@ -917,9 +1496,9 @@ function ContextSettingsFields({
   disabled = false,
   modelDisabled,
   showCustomStrategy = false,
-  modelConfigs,
+  modelTargets,
+  referenceModel,
   activeModelConfigId,
-  fallbackModelId,
   emptyModelOptionLabel,
   onModelConfigChange,
   onChange,
@@ -928,18 +1507,19 @@ function ContextSettingsFields({
   disabled?: boolean
   modelDisabled?: boolean
   showCustomStrategy?: boolean
-  modelConfigs?: ModelConfig[]
+  /** Selectable targets: single models and model groups. */
+  modelTargets?: Array<{ id: string; label: string }>
+  /** Resolved effective target used for budget derivation. */
+  referenceModel?: RuntimeModelConfig
   activeModelConfigId?: string | null
-  fallbackModelId?: string | null
   emptyModelOptionLabel?: string
   onModelConfigChange?: (modelConfigId: string) => void
   onChange: (patch: Partial<ContextManagementConfig>) => void
 }): React.JSX.Element {
+  const autoBudget = value.autoBudgetEnabled !== false
+  const fieldsDisabled = disabled || autoBudget
   const { t } = useTranslation()
   const strategyMode = contextStrategyMode(value, showCustomStrategy)
-  const referenceModel = modelConfigs?.find((model) => model.id === activeModelConfigId) ??
-    modelConfigs?.find((model) => model.id === fallbackModelId) ??
-    modelConfigs?.[0]
 
   function setStrategyMode(mode: ContextStrategyMode): void {
     if (mode === 'custom') {
@@ -952,12 +1532,16 @@ function ContextSettingsFields({
     })
   }
 
-  function applyExperiencedBudgets(): void {
-    if (!referenceModel) {
-      return
+  // Auto-apply formula budgets when model changes and autoBudget is enabled
+  useEffect(() => {
+    if (autoBudget && referenceModel) {
+      const budgets = deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens)
+      onChange({
+        ...budgets,
+        ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
+      })
     }
-    onChange(deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens))
-  }
+  }, [autoBudget, referenceModel?.id, referenceModel?.modelMaxContext, referenceModel?.modelMaxOutputTokens, strategyMode])
 
   return (
     <div className="context-settings-fields">
@@ -972,6 +1556,30 @@ function ContextSettingsFields({
           {showCustomStrategy && <option value="custom">{t('contextStrategyCustom')}</option>}
         </Select>
       </Field>
+
+      {modelTargets !== undefined && modelTargets.length > 0 && (
+        <>
+          <Field label={t('modelConfiguration')}>
+            <Select
+              disabled={modelDisabled ?? disabled}
+              value={activeModelConfigId ?? referenceModel?.id ?? ''}
+              onChange={(_, data) => onModelConfigChange?.(data.value)}
+            >
+              {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
+              {modelTargets.map((target) => (
+                <option key={target.id} value={target.id}>
+                  {target.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {referenceModel && (
+            <div className="model-context-info">
+              {t('modelMaxContext', { tokens: referenceModel.modelMaxContext.toLocaleString() })}
+            </div>
+          )}
+        </>
+      )}
 
       {strategyMode === 'custom' ? (
         <>
@@ -1014,25 +1622,25 @@ function ContextSettingsFields({
         <>
           <Switch
             checked={value.filterEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextFilter')}
             onChange={(_, data) => onChange({ filterEnabled: data.checked })}
           />
           <Switch
             checked={value.rewriteEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextRewrite')}
             onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
           />
           <Switch
             checked={value.truncateEnabled}
-            disabled={disabled}
+            disabled={fieldsDisabled}
             label={t('contextTruncate')}
             onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
           />
           <Field label={t('recentRounds')} required>
             <Input
-              disabled={disabled}
+              disabled={fieldsDisabled}
               max={20}
               min={1}
               type="number"
@@ -1040,33 +1648,27 @@ function ContextSettingsFields({
               onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
             />
           </Field>
-          {modelConfigs !== undefined && modelConfigs.length > 0 && (
-            <Field label={t('modelConfiguration')}>
-              <Select
-                disabled={modelDisabled ?? disabled}
-                value={activeModelConfigId ?? referenceModel?.id ?? ''}
-                onChange={(_, data) => onModelConfigChange?.(data.value)}
-              >
-                {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
-                {modelConfigs.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name || model.modelName || t('unnamedModel')}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
-          <Button
-            appearance="secondary"
-            disabled={disabled || !referenceModel}
-            onClick={applyExperiencedBudgets}
-          >
-            {t('generateExperiencedConfig')}
-          </Button>
+          <Switch
+            checked={autoBudget}
+            disabled={disabled}
+            label={t('contextUseRecommendedValues')}
+            onChange={(_, data) => {
+              if (data.checked) {
+                const budgets = referenceModel ? deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens) : {}
+                onChange({ 
+                  autoBudgetEnabled: true,
+                  ...budgets,
+                  ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
+                })
+              } else {
+                onChange({ autoBudgetEnabled: false })
+              }
+            }}
+          />
           {strategyMode === 'default' && (
             <Field label={t('maxInputTokens')} hint={t('maxInputTokensHint')}>
               <Input
-                disabled={disabled}
+                disabled={fieldsDisabled}
                 min={0}
                 step={1000}
                 type="number"
@@ -1083,7 +1685,7 @@ function ContextSettingsFields({
             <div className="context-budgets">
               <Field label={t('hotTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={1000}
                   step={1000}
                   type="number"
@@ -1093,7 +1695,7 @@ function ContextSettingsFields({
               </Field>
               <Field label={t('warmTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={0}
                   step={1000}
                   type="number"
@@ -1103,7 +1705,7 @@ function ContextSettingsFields({
               </Field>
               <Field label={t('coldRecallTokenBudget')} required>
                 <Input
-                  disabled={disabled}
+                  disabled={fieldsDisabled}
                   min={0}
                   step={1000}
                   type="number"
@@ -1120,6 +1722,10 @@ function ContextSettingsFields({
 }
 type ComposerProps = {
   canSend: boolean
+  supportsImageInput: boolean
+  supportsVideoInput: boolean
+  supportsAudioInput: boolean
+  supportsPdfInput: boolean
   configured: boolean
   conversationWorking: boolean
   hasActiveConversation: boolean
@@ -1130,11 +1736,15 @@ type ComposerProps = {
   onError: (message: string) => void
   onNetworkAccessChange: (enabled: boolean) => void
   onStop: () => void
-  onSubmit: (content: string, images: ImageAttachment[]) => boolean
+  onSubmit: (content: string, images: ImageAttachment[], attachments: MediaAttachment[]) => boolean
 }
 
 const Composer = memo(function Composer({
   canSend,
+  supportsImageInput,
+  supportsVideoInput,
+  supportsAudioInput,
+  supportsPdfInput,
   configured,
   conversationWorking,
   hasActiveConversation,
@@ -1150,10 +1760,15 @@ const Composer = memo(function Composer({
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [draftAttachments, setDraftAttachments] = useState<MediaAttachment[]>([])
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const pdfInputRef = useRef<HTMLInputElement>(null)
   const attachmentMenuRef = useRef<HTMLDivElement>(null)
   const draftImagesRef = useRef<ImageAttachment[]>([])
+  const draftAttachmentsRef = useRef<MediaAttachment[]>([])
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -1184,6 +1799,11 @@ const Composer = memo(function Composer({
     setDraftImages(images)
   }
 
+  function replaceDraftAttachments(attachments: MediaAttachment[]): void {
+    draftAttachmentsRef.current = attachments
+    setDraftAttachments(attachments)
+  }
+
   function appendImageAttachments(attachments: ImageAttachment[]): void {
     const current = draftImagesRef.current
     if (current.length + attachments.length > maximumImageAttachments) {
@@ -1191,6 +1811,16 @@ const Composer = memo(function Composer({
       return
     }
     replaceDraftImages([...current, ...attachments])
+    onError('')
+  }
+
+  function appendMediaAttachments(attachments: MediaAttachment[]): void {
+    const current = draftAttachmentsRef.current
+    if (current.length + attachments.length > maximumMediaAttachments) {
+      onError(t('tooManyAttachments', { count: maximumMediaAttachments }))
+      return
+    }
+    replaceDraftAttachments([...current, ...attachments])
     onError('')
   }
 
@@ -1217,10 +1847,41 @@ const Composer = memo(function Composer({
     }
   }
 
+  async function addMediaFiles(files: File[], kind: MediaKind): Promise<void> {
+    if (files.length === 0) return
+    if (draftAttachmentsRef.current.length + files.length > maximumMediaAttachments) {
+      onError(t('tooManyAttachments', { count: maximumMediaAttachments }))
+      return
+    }
+    const allowed = supportedMediaTypes[kind]
+    if (files.some((file) => !(allowed as readonly string[]).includes(file.type))) {
+      onError(t(`unsupportedAttachment_${kind}`))
+      return
+    }
+    const maximumBytes = maximumMediaAttachmentBytes[kind]
+    if (files.some((file) => file.size > maximumBytes)) {
+      onError(t('attachmentTooLarge', { size: maximumBytes / 1024 / 1024 }))
+      return
+    }
+
+    try {
+      const attachments = await Promise.all(files.map((file) => readMedia(file, kind)))
+      if (mountedRef.current) appendMediaAttachments(attachments)
+    } catch {
+      if (mountedRef.current) onError(t('attachmentReadFailed'))
+    }
+  }
+
   async function selectImages(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const files = [...(event.target.files ?? [])]
     event.target.value = ''
     await addImageFiles(files)
+  }
+
+  async function selectMedia(kind: MediaKind, event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = [...(event.target.files ?? [])]
+    event.target.value = ''
+    await addMediaFiles(files, kind)
   }
 
   async function captureScreen(hideWindow: boolean): Promise<void> {
@@ -1247,10 +1908,12 @@ const Composer = memo(function Composer({
     event.preventDefault()
     const content = draft.trim()
     const images = draftImages
-    if ((!content && images.length === 0) || !canSend || interactionLocked) return
-    if (!onSubmit(content, images)) return
+    const attachments = draftAttachments
+    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || interactionLocked) return
+    if (!onSubmit(content, images, attachments)) return
     setDraft('')
     replaceDraftImages([])
+    replaceDraftAttachments([])
     setAttachmentMenuOpen(false)
   }
 
@@ -1262,6 +1925,30 @@ const Composer = memo(function Composer({
         multiple
         onChange={(event) => void selectImages(event)}
         ref={imageInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.video.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('video', event)}
+        ref={videoInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.audio.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('audio', event)}
+        ref={audioInputRef}
+        type="file"
+      />
+      <input
+        accept={supportedMediaTypes.pdf.join(',')}
+        hidden
+        multiple
+        onChange={(event) => void selectMedia('pdf', event)}
+        ref={pdfInputRef}
         type="file"
       />
       {draftImages.length > 0 && (
@@ -1284,6 +1971,26 @@ const Composer = memo(function Composer({
           ))}
         </div>
       )}
+      {draftAttachments.length > 0 && (
+        <div className="draft-attachments">
+          {draftAttachments.map((attachment) => (
+            <span className={`draft-attachment draft-attachment-${attachment.kind}`} key={attachment.id}>
+              <span>{attachment.name}</span>
+              <Button
+                aria-label={t('removeAttachment')}
+                appearance="subtle"
+                onClick={() => replaceDraftAttachments(draftAttachmentsRef.current.filter((item) => item.id !== attachment.id))}
+                shape="circular"
+                size="small"
+                title={t('removeAttachment')}
+                type="button"
+              >
+                ×
+              </Button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="composer-side-controls">
         <div className="attachment-menu" ref={attachmentMenuRef}>
           <Button
@@ -1301,7 +2008,7 @@ const Composer = memo(function Composer({
             <div className="attachment-menu-popover" role="menu">
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   void captureScreen(false)
@@ -1313,7 +2020,7 @@ const Composer = memo(function Composer({
               </Button>
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   void captureScreen(true)
@@ -1325,7 +2032,7 @@ const Composer = memo(function Composer({
               </Button>
               <Button
                 appearance="subtle"
-                className="attachment-menu-item"
+                className="attachment-menu-item" disabled={!supportsImageInput}
                 onClick={() => {
                   setAttachmentMenuOpen(false)
                   imageInputRef.current?.click()
@@ -1335,6 +2042,46 @@ const Composer = memo(function Composer({
               >
                 {t('uploadImage')}
               </Button>
+              {mediaUploadMenuEnabled && (
+                <>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsVideoInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      videoInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadVideo')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsAudioInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      audioInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadAudio')}
+                  </Button>
+                  <Button
+                    appearance="subtle"
+                    className="attachment-menu-item" disabled={!supportsPdfInput}
+                    onClick={() => {
+                      setAttachmentMenuOpen(false)
+                      pdfInputRef.current?.click()
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    {t('uploadPdf')}
+                  </Button>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -1382,7 +2129,7 @@ const Composer = memo(function Composer({
       ) : (
         <Button
           appearance="primary"
-          disabled={!canSend || (!draft.trim() && draftImages.length === 0) || interactionLocked}
+          disabled={!canSend || (!draft.trim() && draftImages.length === 0 && draftAttachments.length === 0) || interactionLocked}
           size="large"
           type="submit"
         >
@@ -1400,6 +2147,23 @@ export function App(): React.JSX.Element {
   const [activeConversationId, setActiveConversationId] = useState('')
   const [config, setConfig] = useState(defaultAppConfig)
   const [configDraft, setConfigDraft] = useState(defaultAppConfig)
+  const [selectedProviderId, setSelectedProviderId] = useState('')
+  const [selectedDefinitionId, setSelectedDefinitionId] = useState('')
+  const [selectedLinkId, setSelectedLinkId] = useState('')
+  const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [groupMemberProviderFilter, setGroupMemberProviderFilter] = useState('')
+  const [groupMemberModelFilter, setGroupMemberModelFilter] = useState('')
+  const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<string[]>([])
+  const [modelCombos, setModelCombos] = useState<Array<{
+    key: string
+    providerId: string
+    definitionId: string
+    providerName: string
+    modelName: string
+    name: string
+    selected: boolean
+  }> | null>(null)
+  const [comboBusy, setComboBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
   const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
@@ -1415,10 +2179,23 @@ export function App(): React.JSX.Element {
   const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
   const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
   const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [agentLimitsOverride, setAgentLimitsOverride] = useState(false)
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
+  const [projectSettingsProjectId, setProjectSettingsProjectId] = useState('')
+  const [projectSettingsTab, setProjectSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context'>('model')
+  const [projectSettingsModelConfigId, setProjectSettingsModelConfigId] = useState('')
+  const [projectAgentLimitsOverride, setProjectAgentLimitsOverride] = useState(false)
+  const [projectAgentLimitsDraft, setProjectAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
+  const [projectCommandOverride, setProjectCommandOverride] = useState(false)
+  const [projectCommandDraft, setProjectCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
+  const [projectContextOverride, setProjectContextOverride] = useState(false)
+  const [projectContextDraft, setProjectContextDraft] = useState(defaultContextManagementConfig)
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
   const [commandProjectId, setCommandProjectId] = useState('')
   const [commandConversationId, setCommandConversationId] = useState('')
-  const [commandDraft, setCommandDraft] = useState(defaultCommandExecutionConfig)
+  const [commandOverride, setCommandOverride] = useState(false)
+  const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
+  const [approvalRequest, setApprovalRequest] = useState<CommandApprovalRequest | null>(null)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
   const [wslDistros, setWslDistros] = useState<string[]>([])
@@ -1426,7 +2203,7 @@ export function App(): React.JSX.Element {
   const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
   const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
   const [helpDialogOpen, setHelpDialogOpen] = useState(false)
-  const [helpTab, setHelpTab] = useState<'tools'>('tools')
+  const [helpTab, setHelpTab] = useState<'tools' | 'commandRules'>('tools')
   const [toolHelp, setToolHelp] = useState<ToolHelpSnapshot | null>(null)
   const [toolSearch, setToolSearch] = useState('')
   const [toolMatchIndex, setToolMatchIndex] = useState(0)
@@ -1439,6 +2216,7 @@ export function App(): React.JSX.Element {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
+  const [sessionModelDisplay, setSessionModelDisplay] = useState<{ key: string; providerName: string; modelName: string } | null>(null)
   const [stoppingConversations, setStoppingConversations] = useState<Record<string, boolean>>({})
   const [conversationTurns, setConversationTurns] = useState<Record<string, ConversationTurn>>({})
   const [saving, setSaving] = useState(false)
@@ -1454,6 +2232,8 @@ export function App(): React.JSX.Element {
   const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
   const [performanceError, setPerformanceError] = useState('')
   const [projectError, setProjectError] = useState('')
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(defaultNotificationSettings)
+  const [notificationSettingsLoaded, setNotificationSettingsLoaded] = useState(false)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -1462,7 +2242,8 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'language' | 'power' | 'archive' | 'developer' | 'prompts'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -1476,9 +2257,74 @@ export function App(): React.JSX.Element {
   const activeConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
+  const unreadCounts = useMemo((): Record<string, number> => {
+    const counts: Record<string, number> = {}
+    for (const project of projects) {
+      for (const conv of project.conversations) {
+        if (conv.archived) continue
+        const assistantMessages = conv.messages.filter((m) => m.role === 'assistant')
+        if (!conv.lastReadMessageId) {
+          counts[conv.id] = assistantMessages.length
+        } else {
+          const lastReadIdx = assistantMessages.findIndex((m) => m.id === conv.lastReadMessageId)
+          counts[conv.id] = lastReadIdx === -1 ? 0 : Math.max(0, assistantMessages.length - lastReadIdx - 1)
+        }
+      }
+    }
+    return counts
+  }, [projects])
+  const conversationErrors = useMemo((): Record<string, boolean> => {
+    const errors: Record<string, boolean> = {}
+    for (const project of projects) {
+      for (const conv of project.conversations) {
+        if (conv.archived) continue
+        const lastMsg = conv.messages[conv.messages.length - 1]
+        let hasError = Boolean(
+          lastMsg?.turn && (
+            lastMsg.turn.result === 'timeout' ||
+            lastMsg.turn.result === 'other' ||
+            Boolean(lastMsg.turn.error)
+          )
+        )
+        if (hasError && lastMsg && conv.lastReadMessageId === lastMsg.id) {
+          hasError = false
+        }
+        errors[conv.id] = hasError
+      }
+    }
+    return errors
+  }, [projects])
+  const projectUnreadState = useMemo((): Record<string, { count: number; error: boolean }> => {
+    const state: Record<string, { count: number; error: boolean }> = {}
+    for (const project of projects) {
+      let count = 0
+      let error = false
+      for (const conv of project.conversations) {
+        if (conv.archived) continue
+        count += unreadCounts[conv.id] || 0
+        if (conversationErrors[conv.id]) error = true
+      }
+      state[project.id] = { count, error }
+    }
+    return state
+  }, [projects, unreadCounts, conversationErrors])
+  const activeConversationKey = activeProject && activeConversation
+    ? `${activeProject.id}:${activeConversation.id}`
+    : ''
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
-  const effectiveModelConfig = config.modelConfigs.find((model) => model.id === effectiveModelConfigId)
+  const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
+  const effectiveModelMember = effectiveModelConfig?.chain[0]
+  const displayedSessionModel = sessionModelDisplay?.key === activeConversationKey
+    ? sessionModelDisplay
+    : effectiveModelMember
+  /** Single models flattened (audit-model pickers list models only, no groups). */
+  const flatModelConfigs = config.models
+    .map((model) => flattenModelLink(config, model))
+    .filter((model): model is ModelConfig => model !== undefined)
+  const flatDraftModelConfigs = configDraft.models
+    .map((model) => flattenModelLink(configDraft, model))
+    .filter((model): model is ModelConfig => model !== undefined)
   const effectiveContextConfig = activeConversation?.contextConfigOverride ??
     activeProject?.contextConfigOverride ?? config.contextManagement
   const maxInputTokensError = effectiveModelConfig &&
@@ -1500,9 +2346,6 @@ export function App(): React.JSX.Element {
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
     : ''
-  const activeConversationKey = activeProject && activeConversation
-    ? `${activeProject.id}:${activeConversation.id}`
-    : ''
   const activeConversationState = activeConversationKey
     ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
@@ -1517,6 +2360,22 @@ export function App(): React.JSX.Element {
     ))
   const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
+  const lastUserMessage = activeConversation
+    ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
+    : undefined
+  const lastUserMessageId = activeConversationState === 'idle' ? lastUserMessage?.id : undefined
+  const continueConversation = (): void => {
+    if (!lastUserMessage || !canSend) return
+    const prompts = [t('continuePromptAbnormal'), t('continuePromptNormal')]
+    const lastTurn = lastUserMessage.turn
+      ?? (conversationTurn?.userMessageId === lastUserMessage.id ? conversationTurn : undefined)
+    const content = prompts.includes(lastUserMessage.content)
+      ? lastUserMessage.content
+      : lastTurn?.result === 'normal'
+        ? prompts[1]
+        : prompts[0]
+    void sendMessage(content, [], [])
+  }
 
   useEffect(() => {
     void window.codey
@@ -1527,6 +2386,14 @@ export function App(): React.JSX.Element {
         setAppLanguage(saved.language)
       })
       .catch(() => setError(t('unableLoadConfig')))
+
+    void window.codey
+      .getNotificationSettings()
+      .then((saved: NotificationSettings) => {
+        setNotificationSettings(saved)
+        setNotificationSettingsLoaded(true)
+      })
+      .catch(() => setNotificationSettingsLoaded(true))
 
     void window.codey
       .getProjects()
@@ -1554,6 +2421,13 @@ export function App(): React.JSX.Element {
       window.codey.recordPerformanceTrace({
         traceId: activeTraceIdsRef.current[key] ?? 'renderer-session', scope: 'renderer', phase: 'progress-received',
         projectId: progress.projectId, conversationId: progress.conversationId,
+      })
+    }
+    if (progress.update.type === 'model-changed') {
+      setSessionModelDisplay({
+        key,
+        providerName: progress.update.providerName,
+        modelName: progress.update.modelName,
       })
     }
     updateDevelopmentProgress(progress)
@@ -1593,6 +2467,16 @@ export function App(): React.JSX.Element {
     setProjects((current) => current.map((item) => item.id === project.id ? project : item))
   }), [])
 
+  useEffect(() => window.codey.onNotificationClicked(({ projectId, conversationId }) => {
+    if (projectId) {
+      setActiveProjectId(projectId)
+      if (conversationId) {
+        setActiveConversationId(conversationId)
+        setTimeout(scrollToBottom, 150)
+      }
+    }
+  }), [])
+
   useEffect(() => {
     function openDebugger(event: KeyboardEvent): void {
       if (
@@ -1627,7 +2511,15 @@ export function App(): React.JSX.Element {
       return
     }
     const observer = new IntersectionObserver(
-      ([entry]) => setShowScrollToBottom(!entry.isIntersecting),
+      ([entry]) => {
+        setShowScrollToBottom(!entry.isIntersecting)
+        if (entry.isIntersecting && activeConversation) {
+          const lastMsg = activeConversation.messages[activeConversation.messages.length - 1]
+          if (lastMsg) {
+            void window.codey.setConversationReadState(activeProjectId, activeConversation.id, lastMsg.id, Date.now())
+          }
+        }
+      },
       { root, threshold: 0.9 },
     )
     observer.observe(end)
@@ -1683,6 +2575,20 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function markProjectAllRead(project: Project): Promise<void> {
+    for (const conv of project.conversations) {
+      if (conv.archived) continue
+      const lastAssistant = [...conv.messages].reverse().find(m => m.role === 'assistant')
+      if (lastAssistant) {
+        try {
+          const result = await window.codey.setConversationReadState(project.id, conv.id, lastAssistant.id, Date.now())
+          replaceProject(result)
+        } catch {}
+      }
+    }
+    setOpenProjectMenuId(null)
+  }
+
   function openArchiveList(): void {
     setSettingsOpen(false)
     setArchiveError('')
@@ -1690,11 +2596,28 @@ export function App(): React.JSX.Element {
   }
 
   function createSettingsDraft(): typeof defaultAppConfig {
-    if (config.modelConfigs.length > 0) {
+    if (config.providers.length > 0 && config.modelDefinitions.length > 0 && config.models.length > 0) {
       return config
     }
-    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
-    return { ...config, modelConfigs: [model], activeModelConfigId: model.id }
+    if (config.providers.length > 0 || config.modelDefinitions.length > 0 || config.models.length > 0) {
+      return config
+    }
+    // Seed one empty provider → definition → model chain on first run.
+    const provider = { ...defaultProviderConfig, id: crypto.randomUUID() }
+    const definition = { ...defaultModelDefinition, id: crypto.randomUUID() }
+    const link: ModelLink = {
+      ...defaultModelLink,
+      id: crypto.randomUUID(),
+      providerId: provider.id,
+      definitionId: definition.id,
+    }
+    return {
+      ...config,
+      providers: [provider],
+      modelDefinitions: [definition],
+      models: [link],
+      activeModelConfigId: link.id,
+    }
   }
 
   function openHelp(): void {
@@ -1970,13 +2893,16 @@ export function App(): React.JSX.Element {
     }
     setAgentLimitsProjectId(activeProject.id)
     setAgentLimitsConversationId(activeConversation.id)
-    setAgentLimitsDraft({ ...activeConversation.agentLimits })
+    // Three-level inheritance: conversation ?? project default ?? global.
+    const effective = activeConversation.agentLimits ?? activeProject.agentLimitsDefault ?? config.agentLimitsGlobal
+    setAgentLimitsOverride(activeConversation.agentLimits !== null)
+    setAgentLimitsDraft({ ...effective })
     setSettingsError('')
     setAgentLimitsDialogOpen(true)
   }
 
   async function saveAgentLimitsSettings(): Promise<void> {
-    if (interactionLocked || !isValidAgentLimits(agentLimitsDraft)) {
+    if (interactionLocked || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))) {
       return
     }
     setSaving(true)
@@ -1985,7 +2911,7 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.setConversationAgentLimits(
         agentLimitsProjectId,
         agentLimitsConversationId,
-        agentLimitsDraft,
+        agentLimitsOverride ? agentLimitsDraft : null,
       )
       replaceProject(updated)
       setAgentLimitsDialogOpen(false)
@@ -1996,13 +2922,75 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function openCommandExecutionSettings(): void {
-    if (!activeProject || !activeConversation || interactionLocked) {
+  function openProjectSettings(project: Project): void {
+    if (interactionLocked) {
       return
     }
+    setProjectSettingsProjectId(project.id)
+    setProjectSettingsTab('model')
+    setProjectSettingsModelConfigId(project.defaultModelConfigId ?? '')
+    setProjectAgentLimitsOverride(project.agentLimitsDefault !== null)
+    setProjectAgentLimitsDraft({ ...(project.agentLimitsDefault ?? config.agentLimitsGlobal) })
+    setProjectCommandOverride(project.commandExecutionDefault !== null)
+    setProjectCommandDraft(project.commandExecutionDefault
+      ? structuredClone(project.commandExecutionDefault)
+      : { ...structuredClone(config.commandExecutionGlobal), review: structuredClone(config.commandReviewGlobal) })
+    setProjectContextOverride(project.contextConfigOverride !== null)
+    setProjectContextDraft({ ...(project.contextConfigOverride ?? config.contextManagement) })
+    setSettingsError('')
+    setProjectSettingsOpen(true)
+    setOpenProjectMenuId(null)
+    // Availability checks need a detection; run one if none is cached so the
+    // first save does not fail with "run environment detection".
+    void window.codey.getCachedShellDetection().then((cached) => {
+      if (cached) {
+        setShellDetection(cached)
+        return
+      }
+      return runShellDetection()
+    }).catch(() => undefined)
+  }
+
+  async function saveProjectSettings(): Promise<void> {
+    const project = projects.find((entry) => entry.id === projectSettingsProjectId)
+    if (!project || interactionLocked) {
+      return
+    }
+    if (projectAgentLimitsOverride && !isValidAgentLimits(projectAgentLimitsDraft)) return
+    if (projectCommandOverride && !isValidCommandExecutionDraft(projectCommandDraft)) return
+    if (projectContextOverride && !isValidContextConfig(projectContextDraft)) return
+    setSaving(true)
+    setSettingsError('')
+    try {
+      await window.codey.setProjectModelConfig(project.id, projectSettingsModelConfigId || null)
+      await window.codey.setProjectAgentLimitsDefault(project.id, projectAgentLimitsOverride ? projectAgentLimitsDraft : null)
+      const updated = await window.codey.setProjectCommandExecutionDefault(project.id, projectCommandOverride ? projectCommandDraft : null)
+      const finalProject = await window.codey.setProjectContextConfig(project.id, projectContextOverride ? projectContextDraft : null)
+      replaceProject(finalProject ?? updated)
+      setProjectSettingsOpen(false)
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : t('unableChangeProjectSettings'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** Materializes the effective config for a conversation: its own override,
+   *  else the project default, else the global execution default — with
+   *  review falling back to the global review config. */
+  function effectiveConversationCommandConfig(): CommandExecutionConfig {
+    const base = activeConversation?.commandExecution ?? activeProject?.commandExecutionDefault ?? config.commandExecutionGlobal
+    return { ...structuredClone(base), review: base.review ?? structuredClone(config.commandReviewGlobal) }
+  }
+
+  function openCommandSettings(): void {
+    if (!activeProject || !activeConversation || interactionLocked) return
     setCommandProjectId(activeProject.id)
     setCommandConversationId(activeConversation.id)
-    setCommandDraft({ ...(activeConversation.commandExecution ?? activeProject.commandExecutionDefault) })
+    setCommandOverride(activeConversation.commandExecution !== null)
+    setCommandDraft(activeConversation.commandExecution
+      ? structuredClone(activeConversation.commandExecution)
+      : effectiveConversationCommandConfig())
     setSettingsError('')
     setCommandDialogOpen(true)
     // Availability checks need a detection; run one if none is cached so the
@@ -2017,7 +3005,7 @@ export function App(): React.JSX.Element {
   }
 
   async function saveCommandExecutionSettings(): Promise<void> {
-    if (interactionLocked || !isValidCommandExecutionDraft()) {
+    if (interactionLocked || (commandOverride && !isValidCommandExecutionDraft(commandDraft))) {
       return
     }
     setSaving(true)
@@ -2026,7 +3014,7 @@ export function App(): React.JSX.Element {
       const updated = await window.codey.setConversationCommandExecution(
         commandProjectId,
         commandConversationId,
-        commandDraft,
+        commandOverride ? commandDraft : null,
       )
       replaceProject(updated)
       setCommandDialogOpen(false)
@@ -2037,22 +3025,37 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function isValidCommandExecutionDraft(): boolean {
-    if (!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment)) return false
-    if (commandDraft.modelAuditEnabled && !commandDraft.auditModelConfigId) return false
-    if (commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId) {
-      const auditModel = config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)
-      const sessionModel = effectiveModelConfig
-      if (!auditModel || !sessionModel) return false
-      if (auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) return false
+  function isValidCommandExecutionDraft(draft: CommandExecutionConfig | null): boolean {
+    if (draft === null) return true
+    if (!commandExecutionSupported(draft.interpreter, draft.environment)) return false
+    // The session default combo must be within the enabled combos.
+    if (!(draft.enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) return false
+    // Every enabled combo must be supported.
+    for (const [interpreter, environments] of Object.entries(draft.enabledEnvironments)) {
+      for (const environment of environments) {
+        if (!commandExecutionSupported(interpreter as CommandExecutionConfig['interpreter'], environment)) return false
+      }
     }
-    try {
-      for (const rule of commandDraft.denyRules) new RegExp(rule, 'i')
-      return true
-    } catch {
-      return false
+    if (draft.review !== null && !validateCommandReviewConfig(draft.review)) return false
+    return true
+  }
+
+  function respondCommandApproval(approved: boolean, memory?: CommandApprovalMemory): void {
+    const request = approvalRequest
+    if (!request) return
+    setApprovalRequest(null)
+    void window.codey.respondCommandReview(request.requestId, { approved, memory }).catch(() => undefined)
+  }
+
+  function openCommandRulesHelp(): void {
+    setHelpTab('commandRules')
+    setHelpDialogOpen(true)
+    if (!toolHelp) {
+      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
     }
   }
+
+  useEffect(() => window.codey.onCommandReviewRequest((request) => setApprovalRequest(request)), [])
 
   async function runShellDetection(): Promise<void> {
     if (shellDetectBusy) {
@@ -2126,54 +3129,298 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function updateSelectedModel(patch: Partial<ModelConfig>): void {
-    const selectedId = configDraft.activeModelConfigId
-    if (!selectedId) {
+  // ---- Model settings: four-layer CRUD (providers / definitions / links / groups) ----
+
+  function updateSelectedProvider(patch: Partial<ProviderConfig>): void {
+    const selectedId = selectedProviderDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      providers: current.providers.map((provider) => provider.id === selectedId ? { ...provider, ...patch } : provider),
+    }))
+  }
+
+  function addProviderDraft(): void {
+    const provider = { ...defaultProviderConfig, id: crypto.randomUUID() }
+    setConfigDraft((current) => ({ ...current, providers: [...current.providers, provider] }))
+    setSelectedProviderId(provider.id)
+  }
+
+  function deleteSelectedProviderDraft(): void {
+    const provider = selectedProviderDraft
+    if (!provider) return
+    if (configDraft.models.some((model) => model.providerId === provider.id)) {
+      showToast(t('providerInUse'), 'error')
+      return
+    }
+    if (!window.confirm(t('deleteProviderConfirm', { name: provider.name || provider.baseUrl }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      providers: current.providers.filter((entry) => entry.id !== provider.id),
+    }))
+  }
+
+  function updateSelectedDefinition(patch: Partial<ModelDefinition>): void {
+    const selectedId = selectedDefinitionDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelDefinitions: current.modelDefinitions.map((definition) => definition.id === selectedId ? { ...definition, ...patch } : definition),
+    }))
+  }
+
+  function addDefinitionDraft(): void {
+    const definition = { ...defaultModelDefinition, id: crypto.randomUUID() }
+    setConfigDraft((current) => ({ ...current, modelDefinitions: [...current.modelDefinitions, definition] }))
+    setSelectedDefinitionId(definition.id)
+  }
+
+  function deleteSelectedDefinitionDraft(): void {
+    const definition = selectedDefinitionDraft
+    if (!definition) return
+    if (configDraft.models.some((model) => model.definitionId === definition.id)) {
+      showToast(t('definitionInUse'), 'error')
+      return
+    }
+    if (!window.confirm(t('deleteDefinitionConfirm', { name: definition.modelName }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelDefinitions: current.modelDefinitions.filter((entry) => entry.id !== definition.id),
+    }))
+  }
+
+  function updateSelectedLink(patch: Partial<ModelLink>): void {
+    const selectedId = selectedModelLinkDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      models: current.models.map((model) => model.id === selectedId ? { ...model, ...patch } : model),
+    }))
+  }
+
+  /** Queries every provider's model list and crosses it with the user's
+   *  model definitions to offer all available combinations. */
+  async function queryModelCombos(): Promise<void> {
+    if (comboBusy) return
+    setComboBusy(true)
+    try {
+      const results = await Promise.all(configDraft.providers.map(async (provider) => {
+        try {
+          const result = await window.codey.listProviderModels({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+          return { provider, models: result.status === 'ok' ? result.models : [] as string[] }
+        } catch {
+          return { provider, models: [] as string[] }
+        }
+      }))
+      const existing = new Set(configDraft.models.map((model) => `${model.providerId}:${model.definitionId}`))
+      const combos: Array<{
+        key: string
+        providerId: string
+        definitionId: string
+        providerName: string
+        modelName: string
+        name: string
+        selected: boolean
+      }> = []
+      for (const definition of configDraft.modelDefinitions) {
+        for (const { provider, models } of results) {
+          if (!models.some((id) => id.toLowerCase() === definition.modelName.trim().toLowerCase())) continue
+          if (existing.has(`${provider.id}:${definition.id}`)) continue
+          combos.push({
+            key: `${provider.id}:${definition.id}`,
+            providerId: provider.id,
+            definitionId: definition.id,
+            providerName: provider.name || provider.baseUrl,
+            modelName: definition.modelName,
+            name: `${provider.name || provider.baseUrl}-${definition.modelName}`,
+            selected: true,
+          })
+        }
+      }
+      setModelCombos(combos)
+    } finally {
+      setComboBusy(false)
+    }
+  }
+
+  function toggleModelCombo(key: string, selected: boolean): void {
+    setModelCombos((current) => current?.map((combo) => combo.key === key ? { ...combo, selected } : combo) ?? null)
+  }
+
+  function renameModelCombo(key: string, name: string): void {
+    setModelCombos((current) => current?.map((combo) => combo.key === key ? { ...combo, name } : combo) ?? null)
+  }
+
+  function applyModelCombos(): void {
+    const combos = modelCombos?.filter((combo) => combo.selected) ?? []
+    if (combos.length === 0) {
+      setModelCombos(null)
       return
     }
     setConfigDraft((current) => ({
       ...current,
-      modelConfigs: current.modelConfigs.map((model) =>
-        model.id === selectedId ? { ...model, ...patch } : model,
+      models: [
+        ...current.models,
+        ...combos.map((combo) => ({
+          id: crypto.randomUUID(),
+          name: combo.name.trim() || `${combo.providerName}-${combo.modelName}`,
+          providerId: combo.providerId,
+          definitionId: combo.definitionId,
+        })),
+      ],
+    }))
+    setModelCombos(null)
+  }
+
+  function addModelLinkDraft(): void {
+    if (configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0) {
+      showToast(t('modelLinkNeedsProviderAndDefinition'), 'error')
+      return
+    }
+    const link: ModelLink = {
+      ...defaultModelLink,
+      id: crypto.randomUUID(),
+      providerId: configDraft.providers[0]!.id,
+      definitionId: configDraft.modelDefinitions[0]!.id,
+      name: configDraft.modelDefinitions[0]!.modelName,
+    }
+    setConfigDraft((current) => ({
+      ...current,
+      models: [...current.models, link],
+      activeModelConfigId: current.activeModelConfigId ?? link.id,
+    }))
+    setSelectedLinkId(link.id)
+  }
+
+  function deleteSelectedModelLinkDraft(): void {
+    const link = selectedModelLinkDraft
+    if (!link) return
+    if (!window.confirm(t('deleteModelConfigConfirm', { name: link.name }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      models: current.models.filter((entry) => entry.id !== link.id),
+      // Strip the link from every group and drop groups left empty.
+      modelGroups: current.modelGroups
+        .map((group) => ({ ...group, modelIds: group.modelIds.filter((id) => id !== link.id) }))
+        .filter((group) => group.modelIds.length > 0),
+      activeModelConfigId: current.activeModelConfigId === link.id
+        ? (current.models.find((entry) => entry.id !== link.id)?.id ?? null)
+        : current.activeModelConfigId,
+    }))
+  }
+
+  function updateSelectedGroup(patch: Partial<ModelGroupConfig>): void {
+    const selectedId = selectedGroupDraft?.id
+    if (!selectedId) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) => group.id === selectedId ? { ...group, ...patch } : group),
+    }))
+  }
+
+  function addGroupDraft(): void {
+    if (configDraft.models.length === 0) {
+      showToast(t('groupNeedsModel'), 'error')
+      return
+    }
+    const group: ModelGroupConfig = {
+      id: crypto.randomUUID(),
+      name: '',
+      modelIds: [configDraft.models[0]!.id],
+      retriesPerModel: modelGroupDefaultRetries,
+    }
+    setConfigDraft((current) => ({ ...current, modelGroups: [...current.modelGroups, group] }))
+    setSelectedGroupId(group.id)
+  }
+
+  function deleteSelectedGroupDraft(): void {
+    const group = selectedGroupDraft
+    if (!group) return
+    if (!window.confirm(t('deleteGroupConfirm', { name: group.name }))) return
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.filter((entry) => entry.id !== group.id),
+      activeModelConfigId: current.activeModelConfigId === group.id
+        ? (current.models[0]?.id ?? null)
+        : current.activeModelConfigId,
+    }))
+  }
+
+  function moveGroupMember(groupId: string, modelId: string, direction: -1 | 1): void {
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) => {
+        if (group.id !== groupId) return group
+        const index = group.modelIds.indexOf(modelId)
+        const target = index + direction
+        if (index < 0 || target < 0 || target >= group.modelIds.length) return group
+        const modelIds = [...group.modelIds]
+        modelIds.splice(target, 0, modelIds.splice(index, 1)[0]!)
+        return { ...group, modelIds }
+      }),
+    }))
+  }
+
+  function removeGroupMember(groupId: string, modelId: string): void {
+    setConfigDraft((current) => ({
+      ...current,
+      modelGroups: current.modelGroups.map((group) =>
+        group.id === groupId ? { ...group, modelIds: group.modelIds.filter((id) => id !== modelId) } : group,
       ),
     }))
   }
 
-  function addModelConfig(): void {
-    const model = { ...defaultModelConfig, id: crypto.randomUUID() }
+  function addSelectedGroupMembers(groupId: string): void {
+    if (selectedGroupMemberIds.length === 0) return
     setConfigDraft((current) => ({
       ...current,
-      modelConfigs: [...current.modelConfigs, model],
-      activeModelConfigId: model.id,
+      modelGroups: current.modelGroups.map((group) => group.id === groupId
+        ? { ...group, modelIds: [...group.modelIds, ...selectedGroupMemberIds.filter((id) => !group.modelIds.includes(id))] }
+        : group,
+      ),
     }))
+    setSelectedGroupMemberIds([])
   }
 
-  function duplicateSelectedModelConfig(): void {
-    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
-    if (!selected) {
-      return
-    }
-    const copy: ModelConfig = {
-      ...selected,
-      id: crypto.randomUUID(),
-      name: `${selected.name || selected.modelName || t('unnamedModel')} ${t('modelConfigCopySuffix')}`,
-    }
-    setConfigDraft((current) => ({
-      ...current,
-      modelConfigs: [...current.modelConfigs, copy],
-      activeModelConfigId: copy.id,
-    }))
-  }
-
-  async function testSelectedModelConnectivity(): Promise<void> {
-    const selected = configDraft.modelConfigs.find((model) => model.id === configDraft.activeModelConfigId)
-    if (!selected || connectivityBusy || !selected.baseUrl.trim() || !selected.modelName.trim()) {
-      return
-    }
+  async function testSelectedProviderConnectivity(): Promise<void> {
+    const provider = selectedProviderDraft
+    if (!provider || connectivityBusy || !provider.baseUrl.trim() || !provider.apiKey.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
     try {
-      const result = await window.codey.testModelConnectivity(selected)
+      const result = await window.codey.testProviderConnectivity({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+      if (result.status === 'ok') {
+        setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
+        return
+      }
+      if (result.status === 'network-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+        return
+      }
+      if (result.status === 'auth-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityAuthError') })
+        return
+      }
+      if (result.status === 'endpoint-error') {
+        setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
+        return
+      }
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+    } catch {
+      setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
+    } finally {
+      setConnectivityBusy(false)
+    }
+  }
+
+  async function testSelectedModelConnectivity(): Promise<void> {
+    const link = selectedModelLinkDraft
+    const flat = link ? flattenModelLink(configDraft, link) : undefined
+    if (!flat || connectivityBusy || !flat.baseUrl.trim() || !flat.modelName.trim()) return
+    setConnectivityBusy(true)
+    setConnectivityStatus(null)
+    try {
+      const result = await window.codey.testModelConnectivity(flat)
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -2187,7 +3434,7 @@ export function App(): React.JSX.Element {
         return
       }
       if (result.status === 'model-not-found') {
-        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: selected.modelName, available: result.available.slice(0, 5).join(', ') }) })
+        setConnectivityStatus({ tone: 'error', text: t('connectivityModelNotFound', { model: flat.modelName, available: result.available.slice(0, 5).join(', ') }) })
         return
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
@@ -2198,35 +3445,6 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function deleteSelectedModelConfig(): void {
-    const selectedId = configDraft.activeModelConfigId
-    if (!selectedId) {
-      return
-    }
-    const target = configDraft.modelConfigs.find((model) => model.id === selectedId)
-    if (!target) {
-      return
-    }
-    const label = target.name || target.modelName || t('unnamedModel')
-    if (!window.confirm(t('deleteModelConfigConfirm', { name: label }))) {
-      return
-    }
-    setConfigDraft((current) => {
-      const remaining = current.modelConfigs.filter((model) => model.id !== selectedId)
-      if (remaining.length === 0) {
-        const model = { ...defaultModelConfig, id: crypto.randomUUID() }
-        return { ...current, modelConfigs: [model], activeModelConfigId: model.id }
-      }
-      return {
-        ...current,
-        modelConfigs: remaining,
-        activeModelConfigId: remaining.some((model) => model.id === current.activeModelConfigId)
-          ? current.activeModelConfigId
-          : remaining[0].id,
-      }
-    })
-  }
-
   function showToast(message: string, tone: 'info' | 'error'): void {
     if (toastTimerRef.current !== undefined) window.clearTimeout(toastTimerRef.current)
     setToast({ message, tone })
@@ -2234,7 +3452,7 @@ export function App(): React.JSX.Element {
   }
 
   async function fetchModelCapabilitiesForSelected(): Promise<void> {
-    const modelName = selectedModel?.modelName.trim() ?? ''
+    const modelName = selectedDefinitionDraft?.modelName.trim() ?? ''
     if (!modelName || capabilitiesBusy) {
       return
     }
@@ -2242,7 +3460,7 @@ export function App(): React.JSX.Element {
     try {
       const result = await window.codey.fetchModelCapabilities(modelName)
       if (result.status === 'ok') {
-        updateSelectedModel({
+        updateSelectedDefinition({
           ...(result.maxContextTokens !== undefined ? { modelMaxContext: result.maxContextTokens } : {}),
           ...(result.maxOutputTokens !== undefined ? { modelMaxOutputTokens: result.maxOutputTokens } : {}),
           supportsImageInput: result.image,
@@ -2388,8 +3606,8 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[]): Promise<void> {
-    if ((!content && images.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[]): Promise<void> {
+    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
 
@@ -2409,7 +3627,7 @@ export function App(): React.JSX.Element {
               ...conversation,
               messages: [
                 ...conversation.messages,
-                { id: userMessageId, role: 'user', content, images, createdAt: new Date().toISOString() },
+                { id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() },
               ],
             }
           : conversation,
@@ -2418,7 +3636,7 @@ export function App(): React.JSX.Element {
     replaceProject(optimisticProject)
     window.codey.recordPerformanceTrace({
       traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
-      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length },
+      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
     })
     resetDevelopmentProgress(conversationKey)
     setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
@@ -2436,7 +3654,7 @@ export function App(): React.JSX.Element {
 
     try {
       window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, traceId)
+      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
@@ -2444,7 +3662,8 @@ export function App(): React.JSX.Element {
         const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
           .reverse()
           .find((message) => message.role === 'user' && message.content === content &&
-            (images.length === 0 || message.images?.[0]?.id === images[0].id))
+            (images.length === 0 || message.images?.[0]?.id === images[0].id) &&
+            (attachments.length === 0 || message.attachments?.[0]?.id === attachments[0].id))
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -2525,21 +3744,69 @@ export function App(): React.JSX.Element {
     : activeProject.folders.length === 0
       ? t('folderDescription')
       : t('conversationDescription')
-  const selectedModel = configDraft.modelConfigs.find(
-    (model) => model.id === configDraft.activeModelConfigId,
-  ) ?? configDraft.modelConfigs[0]
+  const sortedProviderOptions = [...configDraft.providers].sort((a, b) => (a.name || a.baseUrl).localeCompare(b.name || b.baseUrl))
+  const sortedDefinitionOptions = [...configDraft.modelDefinitions].sort((a, b) => a.modelName.localeCompare(b.modelName))
+  const duplicateProviderNames = new Set(configDraft.providers.map((provider) => provider.name.trim().toLowerCase())).size !== configDraft.providers.length
+  const duplicateDefinitionModelNames = new Set(configDraft.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== configDraft.modelDefinitions.length
+  const selectedProviderDraft = configDraft.providers.find((provider) => provider.id === selectedProviderId) ?? configDraft.providers[0]
+  const selectedDefinitionDraft = configDraft.modelDefinitions.find((definition) => definition.id === selectedDefinitionId) ?? configDraft.modelDefinitions[0]
+  const selectedModelLinkDraft = configDraft.models.find((model) => model.id === selectedLinkId) ?? configDraft.models[0]
+  const selectedGroupDraft = configDraft.modelGroups.find((group) => group.id === selectedGroupId) ?? configDraft.modelGroups[0]
+  const availableGroupMembers = selectedGroupDraft
+    ? configDraft.models.filter((model) => {
+      if (selectedGroupDraft.modelIds.includes(model.id)) return false
+      const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
+      const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
+      const providerName = (provider?.name || provider?.baseUrl || '').toLowerCase()
+      const modelName = (definition?.modelName || model.name || '').toLowerCase()
+      return providerName.includes(groupMemberProviderFilter.trim().toLowerCase())
+        && modelName.includes(groupMemberModelFilter.trim().toLowerCase())
+    })
+    : []
+  const invalidModelConfig = (() => {
+    if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
+    if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
+    if (duplicateProviderNames || duplicateDefinitionModelNames) return true
+    if (configDraft.modelDefinitions.some((definition) =>
+      !definition.modelName.trim() ||
+      definition.modelMaxContext < 1_000 ||
+      (definition.modelMaxOutputTokens !== undefined &&
+        (!Number.isInteger(definition.modelMaxOutputTokens) || definition.modelMaxOutputTokens < 1)))) return true
+    const providerIds = new Set(configDraft.providers.map((provider) => provider.id))
+    const definitionIds = new Set(configDraft.modelDefinitions.map((definition) => definition.id))
+    const modelIds = new Set(configDraft.models.map((model) => model.id))
+    if (configDraft.models.some((model) => !model.name.trim() || !providerIds.has(model.providerId) || !definitionIds.has(model.definitionId))) return true
+    if (configDraft.modelGroups.some((group) =>
+      !group.name.trim() ||
+      group.modelIds.length === 0 ||
+      group.modelIds.some((id) => !modelIds.has(id)))) return true
+    const active = configDraft.activeModelConfigId
+    if (active && !modelIds.has(active) && !configDraft.modelGroups.some((group) => group.id === active)) return true
+    return false
+  })()
   const settingsDirty = configDraft !== config
-  const invalidModelConfig = configDraft.modelConfigs.length === 0 || configDraft.modelConfigs.some((model) =>
-    !model.name.trim() ||
-    !model.baseUrl.trim() ||
-    !model.apiKey.trim() ||
-    !model.modelName.trim() ||
-    model.modelMaxContext < 1_000 ||
-    (model.modelMaxOutputTokens !== undefined &&
-      (!Number.isInteger(model.modelMaxOutputTokens) || model.modelMaxOutputTokens < 1))
-  )
+  const sortedConversationModelGroups = [...config.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
+  const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
+  const sortedConfigDraftModelGroups = [...configDraft.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
+  const sortedConfigDraftModels = [...configDraft.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
+  const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
+  const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
+  const invalidGlobalCommandExecution = !isValidCommandExecutionDraft(configDraft.commandExecutionGlobal)
   const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
+  const projectSettingsTarget = projects.find((entry) => entry.id === projectSettingsProjectId)
+  const applicationDefaultTargetLabel = (() => {
+    const target = config.activeModelConfigId
+    if (!target) return t('notConfigured')
+    const model = config.models.find((entry) => entry.id === target)
+    if (model) return model.name || t('unnamedModel')
+    const group = config.modelGroups.find((entry) => entry.id === target)
+    return group ? t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) : t('notConfigured')
+  })()
+  const projectSettingsValid = Boolean(projectSettingsTarget) &&
+    (!projectAgentLimitsOverride || isValidAgentLimits(projectAgentLimitsDraft)) &&
+    (!projectCommandOverride || isValidCommandExecutionDraft(projectCommandDraft)) &&
+    (!projectContextOverride || isValidContextConfig(projectContextDraft))
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -2558,6 +3825,7 @@ export function App(): React.JSX.Element {
                   <div className="project-nav-row">
                     <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
                       <span className="nav-item-title">{project.name}</span>
+                      <UnreadBadge count={projectUnreadState[project.id]?.count ?? 0} error={projectUnreadState[project.id]?.error ?? false} />
                     </Button>
                     <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
@@ -2565,14 +3833,8 @@ export function App(): React.JSX.Element {
                   </div>
                   {openProjectMenuId === project.id && (
                     <div className="project-menu-panel">
-                      <label>
-                        <span>{t('projectDefaultModel')}</span>
-                        <Select aria-label={t('projectDefaultModel')} disabled={interactionLocked || config.modelConfigs.length === 0} value={project.defaultModelConfigId ?? ''} onChange={(_, data) => { setOpenProjectMenuId(null); void changeProjectModelConfig(project.id, data.value) }}>
-                          <option value="">{t('applicationDefault')}</option>
-                          {config.modelConfigs.map((model) => <option key={model.id} value={model.id}>{model.name || model.modelName || t('unnamedModel')}</option>)}
-                        </Select>
-                      </label>
-                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openContextSettings('project', project)}>{t('contextSettings')}</Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openProjectSettings(project)}>{t('projectSettings')}</Button>
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void markProjectAllRead(project)}>{t('markAllRead')}</Button>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setProjectArchive(project, true)}>{t('archiveProject')}</Button>
                     </div>
                   )}
@@ -2591,8 +3853,18 @@ export function App(): React.JSX.Element {
                 {visibleConversations.map((conversation) => (
                   <div className="conversation-nav-item" key={conversation.id}>
                     <div className="conversation-nav-row">
-                      <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => { setActiveConversationId(conversation.id); setOpenConversationMenuId(null); setError('') }}>
+                      <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => {
+                        setActiveConversationId(conversation.id);
+                        setOpenConversationMenuId(null);
+                        setError('');
+                        scrollToBottom();
+                        const lastMsg = conversation.messages[conversation.messages.length - 1];
+                        if (lastMsg && conversation.lastReadMessageId !== lastMsg.id) {
+                          void window.codey.setConversationReadState(activeProject.id, conversation.id, lastMsg.id, Date.now()).then(replaceProject);
+                        }
+                      }}>
                         <span className="nav-item-title">{conversation.title}</span>
+                        <UnreadBadge count={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} />
                       </Button>
                       <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
                     </div>
@@ -2640,13 +3912,15 @@ export function App(): React.JSX.Element {
               {activeConversation && <span>{activeConversation.title}</span>}
             </div>
             <div className="topbar-controls">
-              {activeConversation && config.modelConfigs.length > 0 ? (
+              {activeConversation && config.models.length > 0 ? (
                 <div className="topbar-row topbar-model-row">
                   <label className="topbar-field-label">
                     <span>{t('configuration')}:</span>
                     <span className="conversation-model-picker">
                       <span>
                         {effectiveModelConfig?.name || effectiveModelConfig?.modelName || t('notConfigured')}
+                        {config.modelGroups.some((group) => group.id === effectiveModelConfigId) &&
+                          <span className="model-group-badge">{t('modelGroupBadge')}</span>}
                       </span>
                       <select
                         aria-label={t('conversationModel')}
@@ -2655,17 +3929,26 @@ export function App(): React.JSX.Element {
                         onChange={(event) => void changeConversationModelConfig(event.target.value)}
                       >
                         <option value="">{t('followProjectDefault')}</option>
-                        {config.modelConfigs.map((model) => (
+                        {sortedConversationModelGroups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
+                          </option>
+                        ))}
+                        {sortedConversationModels.map((model) => (
                           <option key={model.id} value={model.id}>
-                            {model.name || model.modelName || t('unnamedModel')}
+                            {model.name || t('unnamedModel')}
                           </option>
                         ))}
                       </select>
                     </span>
                   </label>
                   <span className="topbar-model-name">
+                    <span>{t('providerLabel')}:</span>
+                    <strong>{configured ? displayedSessionModel?.providerName || t('notConfigured') : t('notConfigured')}</strong>
+                  </span>
+                  <span className="topbar-model-name">
                     <span>{t('modelLabel')}:</span>
-                    <strong>{configured ? effectiveModelConfig?.modelName : t('notConfigured')}</strong>
+                    <strong>{configured ? displayedSessionModel?.modelName : t('notConfigured')}</strong>
                   </span>
                 </div>
               ) : (
@@ -2680,8 +3963,8 @@ export function App(): React.JSX.Element {
                     {t('agentLimits')}
                   </Button>
                   {config.developerMode && activeProject && (
-                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandExecutionSettings}>
-                      {t('commandExecution')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
+                    <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openCommandSettings}>
+                      {t('commandAndReview')}：{(activeConversation.commandExecution ?? activeProject.commandExecutionDefault ?? defaultCommandExecutionConfig).enabled ? t('commandExecutionOn') : t('commandExecutionOff')}
                     </Button>
                   )}
                 </div>
@@ -2777,6 +4060,8 @@ export function App(): React.JSX.Element {
                   conversationTurn={conversationTurn}
                   scrollContainerRef={conversationRef}
                   shouldStickToBottom={!showScrollToBottom}
+                  lastUserMessageId={lastUserMessageId}
+                  onContinue={continueConversation}
                 />
                 <LiveDevelopmentResponse
                   conversationKey={activeConversationKey}
@@ -2806,6 +4091,10 @@ export function App(): React.JSX.Element {
           <Composer
             key={activeConversationKey || 'no-conversation'}
             canSend={canSend}
+            supportsImageInput={effectiveModelConfig?.supportsImageInput ?? false}
+            supportsVideoInput={effectiveModelConfig?.supportsVideoInput ?? false}
+            supportsAudioInput={effectiveModelConfig?.supportsAudioInput ?? false}
+            supportsPdfInput={effectiveModelConfig?.supportsPdfInput ?? false}
             configured={configured}
             conversationWorking={conversationWorking}
             hasActiveConversation={Boolean(activeConversation)}
@@ -2816,13 +4105,13 @@ export function App(): React.JSX.Element {
             onError={setError}
             onNetworkAccessChange={(enabled) => void setNetworkAccess(enabled)}
             onStop={() => void stopMessage()}
-            onSubmit={(content, images) => {
+            onSubmit={(content, images, attachments) => {
               if (maxInputTokensError) {
                 setError(maxInputTokensError)
                 return false
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
-              void sendMessage(content, images)
+              void sendMessage(content, images, attachments)
               return true
             }}
           />
@@ -2911,16 +4200,40 @@ export function App(): React.JSX.Element {
                 onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
               >
                 <Tab value="tools">{t('helpTools')}</Tab>
+                <Tab value="commandRules">{t('helpCommandRules')}</Tab>
               </TabList>
+              {helpTab === 'commandRules' && (
+                <section className="settings-group command-rules-help">
+                  <p className="settings-description">{t('helpCommandRulesIntro')}</p>
+                  <p className="section-label">{t('helpCommandRulesPatterns')}</p>
+                  <ul className="command-rules-help-list">
+                    <li><code>git status</code> — {t('helpCommandRulesExact')}</li>
+                    <li><code>git *</code> — {t('helpCommandRulesStar')}</li>
+                    <li><code>pnpm run build *</code> — {t('helpCommandRulesTailStar')}</li>
+                    <li><code>npm run ?</code> — {t('helpCommandRulesQuestion')}</li>
+                    <li><code>git commit -m "fix bug"</code> — {t('helpCommandRulesQuoted')}</li>
+                  </ul>
+                  <p className="section-label">{t('helpCommandRulesSemantics')}</p>
+                  <ul className="command-rules-help-list">
+                    <li>{t('helpCommandRulesCase')}</li>
+                    <li>{t('helpCommandRulesPrecedence')}</li>
+                    <li>{t('helpCommandRulesMutex')}</li>
+                    <li>{t('helpCommandRulesDuration')}</li>
+                    <li>{t('helpCommandRulesBuiltin')}</li>
+                    <li>{t('helpCommandRulesRegex')}</li>
+                  </ul>
+                </section>
+              )}
               {helpTab === 'tools' && (
                 <section className="settings-group tool-help-group">
-                  <p className="settings-description">
-                    {toolHelp
-                      ? toolSearch.trim()
-                        ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
-                        : t('helpToolTotalCount', { count: toolHelp.entries.length })
-                      : ''}
-                  </p>
+                      <p className="settings-description">
+                        {toolHelp
+                          ? toolSearch.trim()
+                            ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
+                            : t('helpToolTotalCount', { count: toolHelp.entries.length })
+                          : ''}
+                      </p>
+                      {toolHelp && <p className="settings-description">{t('helpToolToolsetNote')}</p>}
                   <div className="tool-search-row">
                     <div className="tool-search-field">
                       <Field label={t('helpToolSearch')}>
@@ -2945,17 +4258,69 @@ export function App(): React.JSX.Element {
                   </div>
                   <div className="tool-help-list" ref={toolListRef}>
                     {!toolHelp && <p className="settings-description">{t('loadingPrompts')}</p>}
-                    {toolHelp?.entries.map((entry) => (
-                      <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
-                        <h3><HighlightedText keyword={toolSearch} text={entry.name} /></h3>
-                        <p className="settings-description">{entry.description}</p>
-                        <details>
-                          <summary>{t('helpToolParameters')}</summary>
-                          <pre className="prompt-content">{entry.parameters}</pre>
-                        </details>
-                        <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
-                      </div>
-                    ))}
+                    {toolHelp && (() => {
+                      const renderEntry = (entry: typeof toolHelp.entries[number], showToolset: boolean) => (
+                        <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
+                          <h3>
+                            <HighlightedText keyword={toolSearch} text={entry.name} />
+                            {showToolset && entry.toolset && (
+                              <span className="tool-help-toolset" title={t('helpToolToolsetTitle', { toolset: entry.toolset })}>
+                                {t('helpToolToolset', { toolset: entry.toolset })}
+                              </span>
+                            )}
+                          </h3>
+                          <p className="settings-description">{entry.description}</p>
+                          <details>
+                            <summary>{t('helpToolParameters')}</summary>
+                            <pre className="prompt-content">{entry.parameters}</pre>
+                          </details>
+                          <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
+                        </div>
+                      )
+                      const groupEntries = (hidden: boolean) => {
+                        const groups = new Map<string, typeof toolHelp.entries>()
+                        for (const entry of toolHelp.entries) {
+                          if (!entry.toolset || entry.toolsetHidden !== hidden) continue
+                          const bucket = groups.get(entry.toolset) ?? []
+                          bucket.push(entry)
+                          groups.set(entry.toolset, bucket)
+                        }
+                        return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
+                      }
+                      // Search keeps the flat list so match navigation stays
+                      // contiguous; the catalog view groups by toolset: meta
+                      // tool first, then always-unlocked sets, then sets that
+                      // unlock on demand — each section alphabetically.
+                      if (toolSearch.trim()) {
+                        return toolMatches.map((entry) => renderEntry(entry, true))
+                      }
+                      return (
+                        <>
+                          <h4 className="tool-help-group-header">{t('helpToolMetaSection')}</h4>
+                          {toolHelp.entries.filter((entry) => !entry.toolset).map((entry) => renderEntry(entry, false))}
+                          <h4 className="tool-help-group-header">{t('helpToolsetUnlockedSection')}</h4>
+                          {groupEntries(false).map(([toolset, entries]) => (
+                            <div key={toolset}>
+                              <h5 className="tool-help-toolset-header">
+                                {toolset}
+                                <span className="tool-help-toolset-state">{t('helpToolsetUnlockedLabel')}</span>
+                              </h5>
+                              {entries.map((entry) => renderEntry(entry, false))}
+                            </div>
+                          ))}
+                          <h4 className="tool-help-group-header">{t('helpToolsetOnDemandSection')}</h4>
+                          {groupEntries(true).map(([toolset, entries]) => (
+                            <div key={toolset}>
+                              <h5 className="tool-help-toolset-header">
+                                {toolset}
+                                <span className="tool-help-toolset-state">{t('helpToolsetOnDemandLabel')}</span>
+                              </h5>
+                              {entries.map((entry) => renderEntry(entry, false))}
+                            </div>
+                          ))}
+                        </>
+                      )
+                    })()}
                   </div>
                 </section>
               )}
@@ -2968,6 +4333,14 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      {approvalRequest && (
+        <CommandApprovalDialog
+          request={approvalRequest}
+          onRespond={(approved, memory) => respondCommandApproval(approved, memory)}
+          onOpenSyntaxHelp={openCommandRulesHelp}
+        />
+      )}
 
       <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
         <DialogSurface>
@@ -2985,53 +4358,16 @@ export function App(): React.JSX.Element {
                 }}
               >
                 <Tab value="models">{t('models')}</Tab>
+                <Tab value="global">{t('globalSettings')}</Tab>
                 <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
+                <Tab value="notifications">{t('notifications')}</Tab>
                 <Tab value="archive">{t('archivedItems')}</Tab>
                 <Tab value="developer">{t('developerMode')}</Tab>
                 <Tab value="prompts">{t('prompts')}</Tab>
               </TabList>
               {settingsTab === 'models' && (
               <section className="settings-group">
-                <div className="model-config-toolbar">
-                  <Select
-                    aria-label={t('modelSettings')}
-                    value={configDraft.activeModelConfigId ?? ''}
-                    onChange={(_, data) => setConfigDraft((current) => ({
-                      ...current,
-                      activeModelConfigId: data.value || null,
-                    }))}
-                  >
-                    {configDraft.modelConfigs.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name || model.modelName || t('unnamedModel')}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button appearance="secondary" onClick={addModelConfig}>
-                    {t('addModelConfig')}
-                  </Button>
-                  <Button appearance="secondary" onClick={duplicateSelectedModelConfig}>
-                    {t('duplicateModelConfig')}
-                  </Button>
-                  <Button appearance="secondary" onClick={deleteSelectedModelConfig}>
-                    {t('deleteModelConfig')}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedModel?.baseUrl.trim() || !selectedModel?.modelName.trim() || connectivityBusy}
-                    onClick={() => void testSelectedModelConnectivity()}
-                  >
-                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
-                  </Button>
-                  <Button
-                    appearance="primary"
-                    disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
-                    onClick={() => void saveSettings()}
-                  >
-                    {saving ? t('saving') : t('save')}
-                  </Button>
-                </div>
                 <p className="model-config-status-line" role="status">
                   <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
                     {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
@@ -3040,47 +4376,94 @@ export function App(): React.JSX.Element {
                     <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
                   )}
                 </p>
-                <Field label={t('modelConfigName')} required>
+
+                <h4 className="settings-section-title">{t('providersSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('providersSection')}
+                    value={selectedProviderDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedProviderId(data.value)}
+                  >
+                    {sortedProviderOptions.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name || provider.baseUrl || t('unnamedProvider')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addProviderDraft}>{t('addProvider')}</Button>
+                  <Button appearance="secondary" disabled={!selectedProviderDraft} onClick={deleteSelectedProviderDraft}>
+                    {t('deleteProvider')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedProviderDraft?.baseUrl.trim() || !selectedProviderDraft?.apiKey.trim() || connectivityBusy}
+                    onClick={() => void testSelectedProviderConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                </div>
+                <Field label={t('providerName')} required>
                   <Input
-                    value={selectedModel?.name ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ name: data.value })}
+                    value={selectedProviderDraft?.name ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ name: data.value })}
                   />
                 </Field>
                 <Field label={t('baseUrl')} required>
                   <Input
-                    value={selectedModel?.baseUrl ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ baseUrl: data.value })}
+                    value={selectedProviderDraft?.baseUrl ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ baseUrl: data.value })}
                     placeholder="https://api.example.com/v1"
                   />
                 </Field>
                 <Field label={t('apiKey')} required>
                   <Input
                     type="password"
-                    value={selectedModel?.apiKey ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ apiKey: data.value })}
+                    value={selectedProviderDraft?.apiKey ?? ''}
+                    onChange={(_, data) => updateSelectedProvider({ apiKey: data.value })}
                   />
                 </Field>
+
+                {duplicateProviderNames && <p className="settings-warning" role="alert">{t('duplicateProviderName')}</p>}
+
+                <h4 className="settings-section-title">{t('definitionsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('definitionsSection')}
+                    value={selectedDefinitionDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedDefinitionId(data.value)}
+                  >
+                    {sortedDefinitionOptions.map((definition) => (
+                      <option key={definition.id} value={definition.id}>
+                        {definition.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addDefinitionDraft}>{t('addDefinition')}</Button>
+                  <Button appearance="secondary" disabled={!selectedDefinitionDraft} onClick={deleteSelectedDefinitionDraft}>
+                    {t('deleteDefinition')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedDefinitionDraft?.modelName.trim() || capabilitiesBusy}
+                    onClick={() => void fetchModelCapabilitiesForSelected()}
+                  >
+                    {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
+                  </Button>
+                </div>
                 <Field label={t('modelName')} required>
                   <Input
-                    value={selectedModel?.modelName ?? ''}
-                    onChange={(_, data) => updateSelectedModel({ modelName: data.value })}
+                    value={selectedDefinitionDraft?.modelName ?? ''}
+                    onChange={(_, data) => updateSelectedDefinition({ modelName: data.value })}
                     placeholder="model-name"
                   />
                 </Field>
-                <Button
-                  appearance="secondary"
-                  disabled={!selectedModel?.modelName.trim() || capabilitiesBusy}
-                  onClick={() => void fetchModelCapabilitiesForSelected()}
-                >
-                  {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
-                </Button>
                 <Field label={t('maximumContextTokens')} required>
                   <Input
                     min={1000}
                     step={1000}
                     type="number"
-                    value={String(selectedModel?.modelMaxContext ?? '')}
-                    onChange={(_, data) => updateSelectedModel({ modelMaxContext: Number(data.value) })}
+                    value={String(selectedDefinitionDraft?.modelMaxContext ?? '')}
+                    onChange={(_, data) => updateSelectedDefinition({ modelMaxContext: Number(data.value) })}
                   />
                 </Field>
                 <Field label={t('maximumOutputTokens')} hint={t('maximumOutputTokensHint')}>
@@ -3088,8 +4471,8 @@ export function App(): React.JSX.Element {
                     min={1}
                     step={1000}
                     type="number"
-                    value={selectedModel?.modelMaxOutputTokens === undefined ? '' : String(selectedModel.modelMaxOutputTokens)}
-                    onChange={(_, data) => updateSelectedModel({
+                    value={selectedDefinitionDraft?.modelMaxOutputTokens === undefined ? '' : String(selectedDefinitionDraft.modelMaxOutputTokens)}
+                    onChange={(_, data) => updateSelectedDefinition({
                       modelMaxOutputTokens: data.value === '' || !Number.isFinite(Number(data.value))
                         ? undefined
                         : Number(data.value),
@@ -3100,27 +4483,414 @@ export function App(): React.JSX.Element {
                   <p className="section-label">{t('multimodalCapabilities')}</p>
                   <div className="multimodal-switches">
                     <Switch
-                      checked={selectedModel?.supportsImageInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsImageInput ?? false}
                       label={t('modalityImage')}
-                      onChange={(_, data) => updateSelectedModel({ supportsImageInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsImageInput: data.checked })}
                     />
                     <Switch
-                      checked={selectedModel?.supportsPdfInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsPdfInput ?? false}
                       label={t('modalityPdf')}
-                      onChange={(_, data) => updateSelectedModel({ supportsPdfInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsPdfInput: data.checked })}
                     />
                     <Switch
-                      checked={selectedModel?.supportsVideoInput ?? false}
+                      checked={selectedDefinitionDraft?.supportsVideoInput ?? false}
                       label={t('modalityVideo')}
-                      onChange={(_, data) => updateSelectedModel({ supportsVideoInput: data.checked })}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsVideoInput: data.checked })}
                     />
-                     <Switch
-                       checked={selectedModel?.supportsAudioInput ?? false}
-                       label={t('modalityAudio')}
-                       onChange={(_, data) => updateSelectedModel({ supportsAudioInput: data.checked })}
-                     />
-                   </div>
-                 </div>
+                    <Switch
+                      checked={selectedDefinitionDraft?.supportsAudioInput ?? false}
+                      label={t('modalityAudio')}
+                      onChange={(_, data) => updateSelectedDefinition({ supportsAudioInput: data.checked })}
+                    />
+                  </div>
+                </div>
+
+                {duplicateDefinitionModelNames && <p className="settings-warning" role="alert">{t('duplicateDefinitionModelName')}</p>}
+
+                <h4 className="settings-section-title">{t('modelsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('modelsSection')}
+                    value={selectedModelLinkDraft?.id ?? ''}
+                    onChange={(_, data) => setSelectedLinkId(data.value)}
+                  >
+                    {configDraft.models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    appearance="secondary"
+                    disabled={comboBusy || configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0}
+                    onClick={() => void queryModelCombos()}
+                  >
+                    {comboBusy ? t('modelComboBusy') : t('modelComboButton')}
+                  </Button>
+                  <Button appearance="secondary" onClick={addModelLinkDraft}>{t('addModelConfig')}</Button>
+                  <Button appearance="secondary" disabled={!selectedModelLinkDraft} onClick={deleteSelectedModelLinkDraft}>
+                    {t('deleteModelConfig')}
+                  </Button>
+                  <Button
+                    appearance="secondary"
+                    disabled={!selectedModelLinkDraft || !flattenModelLink(configDraft, selectedModelLinkDraft)?.modelName.trim() || connectivityBusy}
+                    onClick={() => void testSelectedModelConnectivity()}
+                  >
+                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
+                  </Button>
+                </div>
+                {modelCombos !== null && (
+                  <div className="model-combo-panel">
+                    <p className="section-label">{t('modelComboTitle')}</p>
+                    {modelCombos.length === 0 && (
+                      <p className="settings-description">{t('modelComboEmpty')}</p>
+                    )}
+                    {modelCombos.map((combo) => (
+                      <div className="model-combo-row" key={combo.key}>
+                        <input
+                          aria-label={t('modelComboSelect')}
+                          type="checkbox"
+                          checked={combo.selected}
+                          onChange={(event) => toggleModelCombo(combo.key, event.target.checked)}
+                        />
+                        <span className="model-combo-provider">{combo.providerName}</span>
+                        <span className="model-combo-model">{combo.modelName}</span>
+                        <Input
+                          aria-label={t('modelComboName')}
+                          value={combo.name}
+                          onChange={(_, data) => renameModelCombo(combo.key, data.value)}
+                        />
+                      </div>
+                    ))}
+                    <div className="model-combo-actions">
+                      <Button appearance="secondary" onClick={() => setModelCombos(null)}>{t('cancel')}</Button>
+                      <Button
+                        appearance="primary"
+                        disabled={modelCombos.every((combo) => !combo.selected)}
+                        onClick={applyModelCombos}
+                      >
+                        {t('modelComboAdd')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <Field label={t('modelConfigName')} required>
+                  <Input
+                    value={selectedModelLinkDraft?.name ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ name: data.value })}
+                  />
+                </Field>
+                <Field label={t('providerLabel')} required>
+                  <Select
+                    value={selectedModelLinkDraft?.providerId ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ providerId: data.value })}
+                  >
+                    {sortedProviderOptions.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name || provider.baseUrl || t('unnamedProvider')}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label={t('modelDefinitionLabel')} required>
+                  <Select
+                    value={selectedModelLinkDraft?.definitionId ?? ''}
+                    onChange={(_, data) => updateSelectedLink({ definitionId: data.value })}
+                  >
+                    {sortedDefinitionOptions.map((definition) => (
+                      <option key={definition.id} value={definition.id}>
+                        {definition.modelName || t('unnamedModel')}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+
+                <h4 className="settings-section-title">{t('groupsSection')}</h4>
+                <div className="layer-config-toolbar">
+                  <Select
+                    aria-label={t('groupsSection')}
+                    value={selectedGroupDraft?.id ?? ''}
+                    onChange={(_, data) => {
+                      setSelectedGroupId(data.value)
+                      setSelectedGroupMemberIds([])
+                    }}
+                  >
+                    {configDraft.modelGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name || t('unnamedModelGroup')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button appearance="secondary" onClick={addGroupDraft}>{t('addGroup')}</Button>
+                  <Button appearance="secondary" disabled={!selectedGroupDraft} onClick={deleteSelectedGroupDraft}>
+                    {t('deleteGroup')}
+                  </Button>
+                </div>
+                {selectedGroupDraft && (
+                  <>
+                    <Field label={t('groupName')} required>
+                      <Input
+                        value={selectedGroupDraft.name}
+                        onChange={(_, data) => updateSelectedGroup({ name: data.value })}
+                      />
+                    </Field>
+                    <Field label={t('retriesPerModel')} hint={t('retriesPerModelHint')}>
+                      <Input
+                        min={1}
+                        max={10}
+                        type="number"
+                        value={String(selectedGroupDraft.retriesPerModel)}
+                        onChange={(_, data) => updateSelectedGroup({
+                          retriesPerModel: Math.min(10, Math.max(1, Math.floor(Number(data.value) || 1))),
+                        })}
+                      />
+                    </Field>
+                    <p className="section-label">{t('groupMembers')}</p>
+                    <div className="group-member-list">
+                      {selectedGroupDraft.modelIds.map((modelId, index) => {
+                        const member = configDraft.models.find((model) => model.id === modelId)
+                        return (
+                          <div className="group-member-row" key={modelId}>
+                            <span className="group-member-index">{index + 1}</span>
+                            <span className="group-member-name">{member?.name || t('unnamedModel')}</span>
+                            <Button appearance="subtle" size="small" disabled={index === 0} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, -1)}>↑</Button>
+                            <Button appearance="subtle" size="small" disabled={index === selectedGroupDraft.modelIds.length - 1} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, 1)}>↓</Button>
+                            <Button appearance="subtle" size="small" onClick={() => removeGroupMember(selectedGroupDraft.id, modelId)}>{t('reviewRuleDelete')}</Button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <Field label={t('addGroupMember')}>
+                      <div className="group-member-filters">
+                        <Input
+                          aria-label={t('groupMemberProviderFilter')}
+                          placeholder={t('groupMemberProviderFilter')}
+                          value={groupMemberProviderFilter}
+                          onChange={(_, data) => setGroupMemberProviderFilter(data.value)}
+                        />
+                        <Input
+                          aria-label={t('groupMemberModelFilter')}
+                          placeholder={t('groupMemberModelFilter')}
+                          value={groupMemberModelFilter}
+                          onChange={(_, data) => setGroupMemberModelFilter(data.value)}
+                        />
+                      </div>
+                      <div className="group-member-picker" role="listbox" aria-label={t('addGroupMember')}>
+                        {availableGroupMembers.length === 0 && (
+                          <p className="settings-description">{t('groupMemberNoMatches')}</p>
+                        )}
+                        {availableGroupMembers.map((model) => {
+                          const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
+                          const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
+                          const checked = selectedGroupMemberIds.includes(model.id)
+                          return (
+                            <label className="group-member-option" key={model.id}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => setSelectedGroupMemberIds((current) => checked ? current.filter((id) => id !== model.id) : [...current, model.id])}
+                              />
+                              <span>{provider?.name || provider?.baseUrl || t('unnamedProvider')}</span>
+                              <span>{definition?.modelName || model.name || t('unnamedModel')}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                      <Button
+                        appearance="secondary"
+                        disabled={selectedGroupMemberIds.length === 0}
+                        onClick={() => addSelectedGroupMembers(selectedGroupDraft.id)}
+                      >
+                        {t('addSelectedGroupMembers')}
+                      </Button>
+                    </Field>
+                     <p className="settings-description">{t('groupEnvelopeNote')}</p>
+                   </>
+                 )}
+               </section>
+               )}
+              {settingsTab === 'global' && (
+              <section className="settings-group">
+                <TabList
+                  selectedValue={globalSettingsTab}
+                  onTabSelect={(_, data) => setGlobalSettingsTab(data.value as typeof globalSettingsTab)}
+                >
+                  <Tab value="model">{t('globalTabModel')}</Tab>
+                  <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
+                  <Tab value="command">{t('globalTabCommand')}</Tab>
+                  <Tab value="context">{t('globalTabContext')}</Tab>
+                </TabList>
+                {globalSettingsTab === 'model' && (
+                  <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
+                    <Select
+                      aria-label={t('defaultModelTarget')}
+                      value={configDraft.activeModelConfigId ?? ''}
+                      onChange={(_, data) => setConfigDraft((current) => ({
+                        ...current,
+                        activeModelConfigId: data.value || null,
+                      }))}
+                    >
+                      <option value="">{t('notConfigured')}</option>
+                      {sortedConfigDraftModelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>
+                          {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
+                        </option>
+                      ))}
+                      {sortedConfigDraftModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name || t('unnamedModel')}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                )}
+                {globalSettingsTab === 'agentLimits' && (
+                  <AgentLimitsFields
+                    value={configDraft.agentLimitsGlobal}
+                    disabled={interactionLocked}
+                    onChange={(patch) => setConfigDraft((current) => ({
+                      ...current,
+                      agentLimitsGlobal: { ...current.agentLimitsGlobal, ...patch },
+                    }))}
+                  />
+                )}
+                {globalSettingsTab === 'command' && (
+                  <>
+                    <div className="command-execution-global-group">
+                      <h3>{t('globalCommandExecution')}</h3>
+                      <CommandExecutionEditorFields
+                        value={configDraft.commandExecutionGlobal}
+                        onChange={(next) => setConfigDraft((current) => ({
+                          ...current,
+                          commandExecutionGlobal: next,
+                        }))}
+                        modelConfigs={flatDraftModelConfigs}
+                        globalReview={configDraft.commandReviewGlobal}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        showReview={false}
+                      />
+                    </div>
+                    <div className="command-review-global-group">
+                      <h3>{t('globalCommandReview')}</h3>
+                      <p className="settings-description">{t('globalCommandReviewDescription')}</p>
+                      <CommandReviewEditor
+                        value={configDraft.commandReviewGlobal}
+                        modelConfigs={flatDraftModelConfigs}
+                        onOpenSyntaxHelp={openCommandRulesHelp}
+                        onChange={(next) => setConfigDraft((current) => ({
+                          ...current,
+                          commandReviewGlobal: next,
+                        }))}
+                      />
+                    </div>
+                    <div className="shell-detection-group">
+                      <h3>{t('environmentDetection')}</h3>
+                      <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
+                        {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
+                      </Button>
+                      {shellDetection && (
+                        <div className="shell-detection-results">
+                          {shellDetection.interpreters.map((entry) => (
+                            <p key={entry.kind} className="shell-detection-item">
+                              <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
+                              <span className="shell-detection-detail">{entry.detail}</span>
+                            </p>
+                          ))}
+                          {shellDetection.environments.map((entry) => (
+                            <p key={entry.kind} className="shell-detection-item">
+                              <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
+                              <span className="shell-detection-detail">{entry.detail}</span>
+                            </p>
+                          ))}
+                          <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
+                            {t('pickBashExecutable')}
+                          </Button>
+                          <div className="wsl2-config-group">
+                            <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
+                              {t('configureWsl2')}
+                            </Button>
+                            {wsl2ConfigOpen && (
+                              <div className="wsl2-config-form">
+                                {wslDistros.length > 0 ? (
+                                  <Field label={t('wsl2Distro')}>
+                                    <Select
+                                      disabled={wsl2ConfigBusy}
+                                      value={wsl2Draft.distro}
+                                      onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
+                                    >
+                                      {wslDistros.map((distro) => (
+                                        <option key={distro} value={distro}>{distro}</option>
+                                      ))}
+                                    </Select>
+                                  </Field>
+                                ) : (
+                                  <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
+                                )}
+                                <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
+                                  <Input
+                                    disabled={wsl2ConfigBusy || wslDistros.length === 0}
+                                    value={wsl2Draft.sandboxUser}
+                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
+                                  />
+                                </Field>
+                                <div className="wsl2-config-actions">
+                                  <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
+                                    {t('save')}
+                                  </Button>
+                                  <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
+                                    {t('wsl2ClearConfig')}
+                                  </Button>
+                                  <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
+                                    {t('close')}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {shellDetection.wsl2Sandbox && (
+                            <div className="wsl2-sandbox-probe">
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
+                              </p>
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
+                              </p>
+                              <p className="shell-detection-item">
+                                <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
+                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
+                              </p>
+                              {shellDetection.wsl2Sandbox.interopEnabled && (
+                                <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
+                              )}
+                              {!shellDetection.wsl2Sandbox.socatAvailable && (
+                                <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+                {globalSettingsTab === 'context' && (
+                  <ContextSettingsFields
+                    modelTargets={[
+                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                    ]}
+                    activeModelConfigId={configDraft.activeModelConfigId}
+                    referenceModel={resolveModelTarget(configDraft, configDraft.activeModelConfigId)}
+                    onModelConfigChange={(id) => setConfigDraft((current) => ({ ...current, activeModelConfigId: id }))}
+                    value={configDraft.contextManagement}
+                    disabled={interactionLocked}
+                    onChange={(patch) => setConfigDraft((current) => ({
+                      ...current,
+                      contextManagement: { ...current.contextManagement, ...patch },
+                    }))}
+                  />
+                )}
               </section>
               )}
               {settingsTab === 'language' && (
@@ -3174,107 +4944,16 @@ export function App(): React.JSX.Element {
                </section>
               )}
               {settingsTab === 'developer' && (
-               <section className="settings-group">
-                 <Switch
-                   checked={configDraft.developerMode}
-                  label={t('developerMode')}
-                  onChange={(_, data) => setConfigDraft((current) => ({
-                    ...current,
-                    developerMode: data.checked,
-                  }))}
-                />
-                <p className="settings-description">{t('developerModeDescription')}</p>
-                {configDraft.developerMode && (
-                  <div className="shell-detection-group">
-                    <h3>{t('environmentDetection')}</h3>
-                    <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
-                      {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
-                    </Button>
-                    {shellDetection && (
-                      <div className="shell-detection-results">
-                        {shellDetection.interpreters.map((entry) => (
-                          <p key={entry.kind} className="shell-detection-item">
-                            <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
-                            <span className="shell-detection-detail">{entry.detail}</span>
-                          </p>
-                        ))}
-                        {shellDetection.environments.map((entry) => (
-                          <p key={entry.kind} className="shell-detection-item">
-                            <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
-                            <span className="shell-detection-detail">{entry.detail}</span>
-                          </p>
-                        ))}
-                        <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
-                          {t('pickBashExecutable')}
-                        </Button>
-                        <div className="wsl2-config-group">
-                          <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
-                            {t('configureWsl2')}
-                          </Button>
-                          {wsl2ConfigOpen && (
-                            <div className="wsl2-config-form">
-                              {wslDistros.length > 0 ? (
-                                <Field label={t('wsl2Distro')}>
-                                  <Select
-                                    disabled={wsl2ConfigBusy}
-                                    value={wsl2Draft.distro}
-                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
-                                  >
-                                    {wslDistros.map((distro) => (
-                                      <option key={distro} value={distro}>{distro}</option>
-                                    ))}
-                                  </Select>
-                                </Field>
-                              ) : (
-                                <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
-                              )}
-                              <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
-                                <Input
-                                  disabled={wsl2ConfigBusy || wslDistros.length === 0}
-                                  value={wsl2Draft.sandboxUser}
-                                  onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
-                                />
-                              </Field>
-                              <div className="wsl2-config-actions">
-                                <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
-                                  {t('save')}
-                                </Button>
-                                <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
-                                  {t('wsl2ClearConfig')}
-                                </Button>
-                                <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
-                                  {t('close')}
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        {shellDetection.wsl2Sandbox && (
-                          <div className="wsl2-sandbox-probe">
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
-                            </p>
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
-                            </p>
-                            <p className="shell-detection-item">
-                              <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
-                              <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
-                            </p>
-                            {shellDetection.wsl2Sandbox.interopEnabled && (
-                              <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
-                            )}
-                            {!shellDetection.wsl2Sandbox.socatAvailable && (
-                              <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                   </div>
-                 )}
+                <section className="settings-group">
+                  <Switch
+                    checked={configDraft.developerMode}
+                    label={t('developerMode')}
+                    onChange={(_, data) => setConfigDraft((current) => ({
+                      ...current,
+                      developerMode: data.checked,
+                    }))}
+                  />
+                  <p className="settings-description">{t('developerModeDescription')}</p>
                 </section>
               )}
               {settingsTab === 'prompts' && (
@@ -3298,7 +4977,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || invalidAppContextConfig || interactionLocked || saving}
+                disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -3406,37 +5085,139 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog open={projectSettingsOpen} onOpenChange={(_, data) => setProjectSettingsOpen(data.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t('projectSettings')}{projectSettingsTarget ? ` · ${projectSettingsTarget.name}` : ''}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <TabList
+                selectedValue={projectSettingsTab}
+                onTabSelect={(_, data) => setProjectSettingsTab(data.value as typeof projectSettingsTab)}
+              >
+                <Tab value="model">{t('globalTabModel')}</Tab>
+                <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
+                <Tab value="command">{t('globalTabCommand')}</Tab>
+                <Tab value="context">{t('globalTabContext')}</Tab>
+              </TabList>
+              {projectSettingsTab === 'model' && (
+                <>
+                  <Field label={t('projectDefaultModel')}>
+                    <Select
+                      disabled={interactionLocked || config.models.length === 0}
+                      value={projectSettingsModelConfigId}
+                      onChange={(_, data) => setProjectSettingsModelConfigId(data.value)}
+                    >
+                      <option value="">{t('applicationDefault')}</option>
+                      {sortedConversationModelGroups.map((group) => (
+                        <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>
+                      ))}
+                      {sortedConversationModels.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  {projectSettingsModelConfigId === '' && (
+                    <p className="settings-description">{t('applicationDefault')} · {applicationDefaultTargetLabel}</p>
+                  )}
+                </>
+              )}
+              {projectSettingsTab === 'agentLimits' && (
+                <>
+                  <Switch
+                    checked={projectAgentLimitsOverride}
+                    disabled={interactionLocked}
+                    label={t('agentLimitsOverrideGlobal')}
+                    onChange={(_, data) => setProjectAgentLimitsOverride(data.checked)}
+                  />
+                  <AgentLimitsFields
+                    value={projectAgentLimitsDraft}
+                    disabled={interactionLocked || !projectAgentLimitsOverride}
+                    onChange={(patch) => setProjectAgentLimitsDraft((current) => ({ ...current, ...patch }))}
+                  />
+                </>
+              )}
+              {projectSettingsTab === 'command' && (
+                <>
+                  <Switch
+                    checked={projectCommandOverride}
+                    disabled={interactionLocked}
+                    label={t('commandOverrideDefault')}
+                    onChange={(_, data) => setProjectCommandOverride(data.checked)}
+                  />
+                  <CommandExecutionEditorFields
+                    value={projectCommandDraft}
+                    onChange={setProjectCommandDraft}
+                    disabled={interactionLocked || !projectCommandOverride}
+                    modelConfigs={flatModelConfigs}
+                    sessionModel={effectiveModelConfig}
+                    globalReview={config.commandReviewGlobal}
+                    onOpenSyntaxHelp={openCommandRulesHelp}
+                  />
+                </>
+              )}
+              {projectSettingsTab === 'context' && (
+                <>
+                  <Switch
+                    checked={projectContextOverride}
+                    disabled={interactionLocked}
+                    label={t('overrideApplicationContext')}
+                    onChange={(_, data) => {
+                      setProjectContextOverride(data.checked)
+                      if (data.checked) {
+                        setProjectContextDraft({ ...(projectSettingsTarget?.contextConfigOverride ?? config.contextManagement) })
+                      }
+                    }}
+                  />
+                  <ContextSettingsFields
+                    disabled={interactionLocked || !projectContextOverride}
+                    modelDisabled={interactionLocked}
+                    modelTargets={[
+                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                    ]}
+                    referenceModel={resolveModelTarget(config, projectSettingsModelConfigId || config.activeModelConfigId)}
+                    activeModelConfigId={projectSettingsModelConfigId}
+                    emptyModelOptionLabel={t('applicationDefault')}
+                    onModelConfigChange={(modelConfigId) => setProjectSettingsModelConfigId(modelConfigId)}
+                    value={projectContextDraft}
+                    onChange={(patch) => setProjectContextDraft((current) => ({ ...current, ...patch }))}
+                  />
+                </>
+              )}
+              {settingsError && <p className="dialog-error">{settingsError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setProjectSettingsOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || saving || !projectSettingsValid}
+                onClick={() => void saveProjectSettings()}
+              >
+                {saving ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={agentLimitsDialogOpen} onOpenChange={(_, data) => setAgentLimitsDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
             <DialogTitle>{t('conversationAgentLimits')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
-                <Input
-                  disabled={interactionLocked}
-                  min={1}
-                  max={maximumAgentLimit}
-                  type="number"
-                  value={String(agentLimitsDraft.modelRequestsPerRound)}
-                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
-                    ...current,
-                    modelRequestsPerRound: Number(data.value),
-                  }))}
-                />
-              </Field>
-              <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
-                <Input
-                  disabled={interactionLocked}
-                  min={1}
-                  max={maximumAgentLimit}
-                  type="number"
-                  value={String(agentLimitsDraft.toolCallsPerRequest)}
-                  onChange={(_, data) => setAgentLimitsDraft((current) => ({
-                    ...current,
-                    toolCallsPerRequest: Number(data.value),
-                  }))}
-                />
-              </Field>
+              <Switch
+                checked={agentLimitsOverride}
+                disabled={interactionLocked}
+                label={t('agentLimitsOverrideProject')}
+                onChange={(_, data) => setAgentLimitsOverride(data.checked)}
+              />
+              <AgentLimitsFields
+                value={agentLimitsDraft}
+                disabled={interactionLocked || !agentLimitsOverride}
+                onChange={(patch) => setAgentLimitsDraft((current) => ({ ...current, ...patch }))}
+              />
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -3445,7 +5226,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={interactionLocked || saving || !isValidAgentLimits(agentLimitsDraft)}
+                disabled={interactionLocked || saving || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))}
                 onClick={() => void saveAgentLimitsSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -3458,95 +5239,23 @@ export function App(): React.JSX.Element {
       <Dialog open={commandDialogOpen} onOpenChange={(_, data) => setCommandDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
-            <DialogTitle>{t('commandExecutionSettings')}</DialogTitle>
+            <DialogTitle>{t('commandAndReviewSettings')}</DialogTitle>
             <DialogContent className="dialog-fields">
               <Switch
-                checked={commandDraft.enabled}
+                checked={commandOverride}
                 disabled={interactionLocked}
-                label={t('commandExecutionEnabled')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, enabled: data.checked }))}
+                label={t('commandOverrideProject')}
+                onChange={(_, data) => setCommandOverride(data.checked)}
               />
-              <p className="settings-description">{t('commandExecutionDescription')}</p>
-              <Field label={t('commandInterpreter')}>
-                <Select
-                  disabled={interactionLocked || !commandDraft.enabled}
-                  value={commandDraft.interpreter}
-                  onChange={(_, data) => setCommandDraft((current) => ({
-                    ...current,
-                    interpreter: data.value as CommandExecutionConfig['interpreter'],
-                  }))}
-                >
-                  <option value="bash">bash</option>
-                  <option value="pwsh7">pwsh 7</option>
-                  <option value="pwsh51">pwsh 5.1</option>
-                </Select>
-              </Field>
-              <Field label={t('commandEnvironment')}>
-                <Select
-                  disabled={interactionLocked || !commandDraft.enabled}
-                  value={commandDraft.environment}
-                  onChange={(_, data) => setCommandDraft((current) => ({
-                    ...current,
-                    environment: data.value as CommandExecutionConfig['environment'],
-                  }))}
-                >
-                  <option value="bare">{t('commandEnvBare')}</option>
-                  <option value="wsl2">wsl2</option>
-                  <option value="docker">docker</option>
-                  <option value="windows-sandbox">Windows Sandbox</option>
-                </Select>
-              </Field>
-              {!commandExecutionSupported(commandDraft.interpreter, commandDraft.environment) && (
-                <p className="settings-warning" role="alert">{t('commandComboUnsupported')}</p>
-              )}
-              <Switch
-                checked={commandDraft.modelAuditEnabled}
-                disabled={interactionLocked || !commandDraft.enabled}
-                label={t('commandModelAudit')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, modelAuditEnabled: data.checked }))}
+              <CommandExecutionEditorFields
+                value={commandDraft}
+                onChange={setCommandDraft}
+                disabled={interactionLocked || !commandOverride}
+                modelConfigs={flatModelConfigs}
+                sessionModel={effectiveModelConfig}
+                globalReview={config.commandReviewGlobal}
+                onOpenSyntaxHelp={openCommandRulesHelp}
               />
-              {commandDraft.modelAuditEnabled && (
-                <>
-                  <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
-                    <Select
-                      disabled={interactionLocked}
-                      value={commandDraft.auditModelConfigId ?? ''}
-                      onChange={(_, data) => setCommandDraft((current) => ({
-                        ...current,
-                        auditModelConfigId: data.value || null,
-                      }))}
-                    >
-                      <option value="">{t('notConfigured')}</option>
-                      {config.modelConfigs
-                        .filter((model) => model.id !== effectiveModelConfig?.id)
-                        .map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.name || model.modelName || t('unnamedModel')}
-                          </option>
-                        ))}
-                    </Select>
-                  </Field>
-                  {effectiveModelConfig && (
-                    <p className="settings-description">
-                      {t('commandSessionModelInfo', {
-                        config: effectiveModelConfig.name || effectiveModelConfig.modelName,
-                        model: effectiveModelConfig.modelName,
-                      })}
-                    </p>
-                  )}
-                </>
-              )}
-              {commandDraft.modelAuditEnabled && commandDraft.auditModelConfigId && effectiveModelConfig &&
-                config.modelConfigs.find((model) => model.id === commandDraft.auditModelConfigId)?.modelName.trim().toLowerCase() === effectiveModelConfig.modelName.trim().toLowerCase() && (
-                <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
-              )}
-              <Switch
-                checked={commandDraft.manualConfirmationEnabled}
-                disabled={interactionLocked || !commandDraft.enabled}
-                label={t('commandManualConfirmation')}
-                onChange={(_, data) => setCommandDraft((current) => ({ ...current, manualConfirmationEnabled: data.checked }))}
-              />
-              <p className="settings-description">{t('commandRuleInterceptionNote')}</p>
               {settingsError && <p className="dialog-error">{settingsError}</p>}
             </DialogContent>
             <DialogActions>
@@ -3555,7 +5264,7 @@ export function App(): React.JSX.Element {
               </Button>
               <Button
                 appearance="primary"
-                disabled={interactionLocked || saving || !isValidCommandExecutionDraft()}
+                disabled={interactionLocked || saving || !isValidCommandExecutionDraft(commandDraft)}
                 onClick={() => void saveCommandExecutionSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -3582,13 +5291,16 @@ export function App(): React.JSX.Element {
                 disabled={interactionLocked || !contextOverrideEnabled}
                 modelDisabled={interactionLocked}
                 showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
-                modelConfigs={config.modelConfigs}
+                modelTargets={[
+                  ...config.models.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                  ...config.modelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                ]}
+                referenceModel={resolveModelTarget(config, contextScope === 'conversation'
+                  ? (activeConversation?.modelConfigId ?? activeProject?.defaultModelConfigId ?? config.activeModelConfigId)
+                  : (projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? config.activeModelConfigId))}
                 activeModelConfigId={contextScope === 'conversation'
                   ? activeConversation?.modelConfigId ?? ''
                   : projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? ''}
-                fallbackModelId={contextScope === 'conversation'
-                  ? activeProject?.defaultModelConfigId ?? config.activeModelConfigId
-                  : config.activeModelConfigId}
                 emptyModelOptionLabel={t(contextScope === 'conversation' ? 'followProjectDefault' : 'applicationDefault')}
                 onModelConfigChange={(modelConfigId) => void changeContextModelConfig(modelConfigId)}
                 value={contextDraft}

@@ -6,41 +6,30 @@ import type {
   ModelConfig,
 } from '../shared/types'
 import {
-  commandConfirmationThresholdSeconds,
-  commandTimeoutClampSeconds,
   commandTimeoutMaxSeconds,
   commandTimeoutMinSeconds,
+  defaultCommandReviewConfig,
 } from '../shared/types'
 import { isAuditModelAllowed } from './command-execution-config'
+import { evaluateCommandRules, type CommandRuleLayer } from '../shared/command-rules'
 import { log } from './logger'
 import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-detect'
-import { dockerBashImage, dockerPwshImage, type CommandInterpreter } from '../shared/types'
+import { commandExecutionSupported, dockerBashImage, dockerPwshImage, type CommandEnvironment, type CommandInterpreter, type CommandReviewStep } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
 const AUDIT_TIMEOUT_MS = 120_000
-const CONFIRMATION_TIMEOUT_MS = 120_000
 
-/** Built-in deny rules; matched case-insensitively against the whole command.
- *  Rule interception cannot be disabled. */
-const BUILT_IN_DENY_RULES: RegExp[] = [
-  /\bformat\s+[a-z]:/i,
-  /\bcd\s+[a-z]:\\?\s*&&\s*(del|rd|format)/i,
-  /\brd\s+\/s\s+\/q\s+%?(systemroot|windir|programfiles)/i,
-  /\breg(\.exe)?\s+(delete|add)\s+(HKLM|HKCU)\\(system|software\\microsoft\\windows\\currentversion\\run)/i,
-  /\bbcdedit\b/i,
-  /\bdiskpart\b/i,
-  /\bcipher\s+\/w/i,
-  /\bshutdown\b|\brestart-computer\b/i,
-  /\bvssadmin\b/i,
-  /\bwevtutil\s+cl\b/i,
-  /\bpowershell.+-enc(odedcommand)?\s+[a-z0-9+/=]{40,}/i,
-  /\b(curl|wget|invoke-webrequest|invoke-restmethod)\b[^\n|;]*\|\s*(cmd|powershell|pwsh|bash|iex|invoke-expression)/i,
-  /\bnet\s+user\b[^\n]*\/(add|delete)/i,
-  /\bschtasks\b[^\n]*\/(create|delete)/i,
-  /\bsc(\.exe)?\s+(config|delete|stop|start)\b/i,
-  /\bremove-item\b[^\n]*-recurse[^\n]*-force[^\n]*(c:\\|\/etc\/|~\/?\s*$)/i,
-  /\bgit\s+push\b[^\n]*--force/i,
-]
+/** Persistent review-history entry (command-review-history.jsonl). The
+ *  recording sink adds projectId/conversationId context. */
+export type CommandReviewDecision = {
+  at: string
+  command: string
+  decision: 'rule-allow' | 'rule-deny' | 'audit-deny' | 'manual-deny' | 'manual-approve' | 'executed'
+  detail?: string
+  ruleId?: string
+  layer?: string
+  timeoutSeconds?: number
+}
 
 export type CommandDecision =
   | { action: 'allow'; checks: string[] }
@@ -52,17 +41,30 @@ export type CommandExecutorRuntime = {
   conversationId: string
   signal?: AbortSignal
   sessionModelName?: string
+  /** Rule pool for this conversation, highest precedence first (runtime
+   *  memory, conversation, project, global). Settings live in config.review. */
+  ruleLayers?: CommandRuleLayer[]
   /** Resolves the audit model configuration by id. */
   resolveAuditModel: (configId: string) => Promise<ModelConfig | undefined>
-  /** Shows a native confirmation; resolves false on timeout or dismissal. */
+  /** Shows the in-app approval card; resolves denied when dismissed. */
   requestConfirmation: (request: {
     command: string
     timeoutSeconds: number
     editable: boolean
     checks: string[]
+    workspacePath: string
+    environment: string
+    /** Audit-model display name when that reviewer ran and allowed. */
+    auditModelName?: string
+    /** Audit-model reason text (may be empty when it simply allowed). */
+    auditNote?: string
   }) => Promise<{ approved: boolean; timeoutSeconds: number }>
   /** Optional audit sink (context-debug audit trail). */
   recordAudit?: (entry: CommandExecutionAudit) => void
+  /** Optional persistent review-history sink. */
+  recordDecision?: (entry: CommandReviewDecision) => void
+  /** Optional live per-step review sink (streams the chain as it unfolds). */
+  onReviewStep?: (step: CommandReviewStep) => void
 }
 
 /** Serial execution queue per conversation: commands run one at a time. */
@@ -76,20 +78,6 @@ function enqueue<T>(conversationId: string, task: () => Promise<T>): Promise<T> 
     if (conversationQueues.get(conversationId) === next) conversationQueues.delete(conversationId)
   })
   return next
-}
-
-export function evaluateDenyRules(command: string, extraRules: string[]): { denied: boolean; rule: string | null } {
-  for (const rule of BUILT_IN_DENY_RULES) {
-    if (rule.test(command)) return { denied: true, rule: `builtin: ${rule.source}` }
-  }
-  for (const source of extraRules) {
-    try {
-      if (new RegExp(source, 'i').test(command)) return { denied: true, rule: `user rule: ${source}` }
-    } catch {
-      // Invalid user rules are rejected at save time; skip defensively here.
-    }
-  }
-  return { denied: false, rule: null }
 }
 
 function clip(text: string): string {
@@ -142,7 +130,8 @@ export function buildAuditPromptTemplate(): string {
     `Workspace: <workspace path>`,
     `Environment: <interpreter>/<environment>`,
     `Command: <the command>`,
-    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+    `Requested timeout: <seconds>s (duration gate reference: <gate>s; deny when the requested duration is unreasonable for this command)`,
+    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
   ].join('\n')
 }
 
@@ -150,6 +139,8 @@ async function requestAuditVerdict(
   command: string,
   workspacePath: string,
   environment: string,
+  timeoutSeconds: number,
+  durationGateSeconds: number,
   auditModel: ModelConfig,
   signal?: AbortSignal,
 ): Promise<{ allow: boolean; reason: string }> {
@@ -162,7 +153,8 @@ async function requestAuditVerdict(
     `Workspace: ${workspacePath}`,
     `Environment: ${environment}`,
     `Command: ${command}`,
-    `Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
+    `Requested timeout: ${timeoutSeconds}s (duration gate reference: ${durationGateSeconds}s; deny when the requested duration is unreasonable for this command)`,
+    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
   ].join('\n')
   try {
     // Pass 1: JSON mode (API-enforced schema; chatty models cannot lead with
@@ -306,14 +298,23 @@ async function runBare(
 }
 
 /** WSL accepts Windows paths and translates them itself; quoting guards
- *  paths with spaces. The 8-second grace handles a distro being started. */
+ *  paths with spaces. The 8-second grace handles a distro being started.
+ *  `-e` (exec) hands the argv straight to the interpreter: the `--` form
+ *  instead re-parses the rejoined command line through the distro's default
+ *  shell, which would expand $vars/backticks and misread redirects before
+ *  the real interpreter ever sees them. pwsh7 runs PowerShell 7 installed
+ *  inside the distro (Linux pwsh, same flavor as the docker combo). */
 async function runWsl2(
+  interpreter: CommandInterpreter,
   command: string,
   windowsWorkspacePath: string,
   timeoutSeconds: number,
   signal?: AbortSignal,
 ): Promise<RawRunResult> {
-  return runProcess('wsl.exe', ['--', 'bash', '-c', command], windowsWorkspacePath, Math.max(timeoutSeconds, 8), signal)
+  const wslArgs = interpreter === 'pwsh7'
+    ? ['-e', 'pwsh', '-NoProfile', '-NonInteractive', '-Command', command]
+    : ['-e', 'bash', '-c', command]
+  return runProcess('wsl.exe', wslArgs, windowsWorkspacePath, Math.max(timeoutSeconds, 8), signal)
 }
 
 /** Docker: mounts the workspace at /work inside a disposable container.
@@ -355,6 +356,8 @@ export type RunCommandOutcome = {
   ok: boolean
   output: string
   audit: CommandExecutionAudit[]
+  /** Structured review chain for the tool-call card (and future sinks). */
+  steps: CommandReviewStep[]
 }
 
 export async function executeCommand(options: {
@@ -362,6 +365,9 @@ export async function executeCommand(options: {
   conversationId: string
   config: CommandExecutionConfig
   command: string
+  /** Optional per-call overrides; must be within the enabled combos. */
+  overrideInterpreter?: CommandInterpreter
+  overrideEnvironment?: CommandEnvironment
   requestedTimeoutSeconds?: number
   workspaceFolderId: string
   workspacePath: string
@@ -370,96 +376,179 @@ export async function executeCommand(options: {
   const { config, command, runtime } = options
   const audit: CommandExecutionAudit[] = []
   const checks: string[] = []
+  const earlySteps: CommandReviewStep[] = []
   if (!config.enabled) {
-    return { ok: false, output: 'Command execution is disabled for this conversation.', audit }
+    return { ok: false, output: 'Command execution is disabled for this conversation.', audit, steps: earlySteps }
   }
   const trimmed = command.trim()
   if (!trimmed) {
-    return { ok: false, output: 'The command is empty.', audit }
+    return { ok: false, output: 'The command is empty.', audit, steps: earlySteps }
   }
+
+  // Resolve the effective interpreter/environment (model may override).
+  const effectiveInterpreter = options.overrideInterpreter ?? config.interpreter
+  const effectiveEnvironment = options.overrideEnvironment ?? config.environment
+
+  // Combo validation: the effective combo must be enabled and supported.
+  const enabledForInterpreter = config.enabledEnvironments[effectiveInterpreter] ?? []
+  if (!enabledForInterpreter.includes(effectiveEnvironment)) {
+    const available = Object.entries(config.enabledEnvironments)
+      .flatMap(([interpreter, envs]) => envs.map((env) => `${interpreter}/${env}`))
+      .join(', ')
+    return {
+      ok: false,
+      output: `Combo ${effectiveInterpreter}/${effectiveEnvironment} is not enabled. Available combos: ${available || 'none'}.`,
+      audit,
+      steps: earlySteps,
+    }
+  }
+  if (!commandExecutionSupported(effectiveInterpreter, effectiveEnvironment)) {
+    return {
+      ok: false,
+      output: `Combo ${effectiveInterpreter}/${effectiveEnvironment} is not supported in this version.`,
+      audit,
+      steps: earlySteps,
+    }
+  }
+
   // Mount policy: sandboxed environments may only mount project folders.
   const allowedFolderPaths = options.project.folders.map((folder) => folder.path)
-  if (config.environment === 'docker' || config.environment === 'wsl2') {
+  if (effectiveEnvironment === 'docker' || effectiveEnvironment === 'wsl2') {
     try {
       assertMountableWorkspace(options.workspacePath, allowedFolderPaths)
     } catch (error) {
-      return { ok: false, output: error instanceof Error ? error.message : 'Workspace rejected', audit }
-    }
+      return { ok: false, output: error instanceof Error ? error.message : 'Workspace rejected', audit, steps: earlySteps }
+  }
   }
 
   return enqueue(options.conversationId, async () => {
-    // Gate 1: rule interception (always on).
-    const rules = evaluateDenyRules(trimmed, config.denyRules)
+    const review = config.review ?? defaultCommandReviewConfig
+    const decide = (entry: CommandReviewDecision): void => runtime.recordDecision?.(entry)
+    const steps: CommandReviewStep[] = []
+    const recordStep = (entry: CommandReviewStep): void => {
+      steps.push(entry)
+      runtime.onReviewStep?.(entry)
+    }
+
+    // Reviewer 1: program rules (always on). Duration legality is a hard
+    // check that precedes the lists — an illegal duration denies even a
+    // whitelisted command. The duration never authorizes passage: commands
+    // unmatched by the lists enter the reviewer chain regardless of duration.
+    const declared = options.requestedTimeoutSeconds
+    const declaredLegal = declared === undefined ||
+      (Number.isFinite(declared) && Math.floor(declared) === declared &&
+        declared >= commandTimeoutMinSeconds && declared <= commandTimeoutMaxSeconds)
+    if (!declaredLegal) {
+      checks.push('rules')
+      recordStep({ stage: 'duration', outcome: 'deny', detail: `declared duration ${String(declared)}s is not a legal value` })
+      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-deny', detail: `illegal declared duration: ${String(declared)}s` })
+      return {
+        ok: false,
+        output: `Blocked by command rules: the declared duration (${String(declared)}s) is not a legal value. It must be an integer between ${commandTimeoutMinSeconds} and ${commandTimeoutMaxSeconds} seconds.`,
+        audit,
+        steps,
+      }
+    }
+    let timeoutSeconds = declared === undefined ? review.durationAllowSeconds : Math.floor(declared)
+    recordStep({ stage: 'duration', outcome: 'pass', detail: declared === undefined ? `undeclared; defaults to ${timeoutSeconds}s` : `declared ${timeoutSeconds}s` })
+
+    const verdict = evaluateCommandRules(trimmed, runtime.ruleLayers ?? [])
     checks.push('rules')
-    audit.push({ description: `rule check: ${rules.denied ? `denied (${rules.rule})` : 'passed'}`, simulated: false })
-    if (rules.denied) {
-      return { ok: false, output: `Blocked by command rules: ${rules.rule}. Adjust the command or the deny rules in command execution settings.`, audit }
+    audit.push({ description: `rule check: ${verdict.decision === 'deny' ? `denied (${verdict.rule?.pattern})` : verdict.decision === 'allow' ? `allowed (${verdict.rule?.pattern})` : 'no match'}`, simulated: false })
+    if (verdict.decision === 'deny') {
+      recordStep({ stage: 'rules', outcome: 'deny', detail: `${verdict.level} layer: ${verdict.rule?.pattern}` })
+      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-deny', ruleId: verdict.rule?.id, layer: verdict.level ?? undefined, detail: verdict.rule?.pattern })
+      return { ok: false, output: `Blocked by command rules (${verdict.level} layer): ${verdict.rule?.pattern}. Adjust the command or the rules in command review settings.`, audit, steps }
     }
+    recordStep(
+      verdict.decision === 'allow'
+        ? { stage: 'rules', outcome: 'pass', detail: `whitelist: ${verdict.rule?.pattern} (skips the remaining reviewers)` }
+        : { stage: 'rules', outcome: 'pass', detail: 'no rule matched; entering the reviewer chain' },
+    )
 
-    // Timeout normalization.
-    let timeoutSeconds = Math.floor(Number(options.requestedTimeoutSeconds ?? commandTimeoutClampSeconds))
-    if (!Number.isFinite(timeoutSeconds)) timeoutSeconds = commandTimeoutClampSeconds
-    timeoutSeconds = Math.min(commandTimeoutMaxSeconds, Math.max(commandTimeoutMinSeconds, timeoutSeconds))
-    let clamped = false
-    if (!config.manualConfirmationEnabled && timeoutSeconds > commandTimeoutClampSeconds) {
-      timeoutSeconds = commandTimeoutClampSeconds
-      clamped = true
-    }
+    if (verdict.decision === 'allow') {
+      decide({ at: new Date().toISOString(), command: trimmed, decision: 'rule-allow', ruleId: verdict.rule?.id, layer: verdict.level ?? undefined, detail: verdict.rule?.pattern, timeoutSeconds })
+    } else {
+      // Reviewer 2: model audit (optional, fail-closed). An audit "allow"
+      // means no objection — the chain continues; it never replaces the human.
+      // The audit judges the command content AND the requested duration.
+      let auditNote: string | undefined
+      let auditModelName: string | undefined
+      if (review.reviewers.auditModel) {
+        checks.push('model-audit')
+        const auditModel = review.reviewers.auditModelConfigId
+          ? await runtime.resolveAuditModel(review.reviewers.auditModelConfigId)
+          : undefined
+        if (!auditModel) {
+          audit.push({ description: 'model audit: no audit model resolved; denied', simulated: false })
+          recordStep({ stage: 'audit-model', outcome: 'deny', detail: 'audit model unresolved' })
+          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: 'audit model unresolved' })
+          return { ok: false, output: 'Command denied: the audit model could not be resolved. Configure a valid audit model in command review settings.', audit, steps }
+        }
+        if (!isAuditModelAllowed(review, runtime.sessionModelName, auditModel.modelName)) {
+          audit.push({ description: 'model audit: audit model has the same name as the session model; denied', simulated: false })
+          recordStep({ stage: 'audit-model', outcome: 'deny', detail: 'audit model equals session model' })
+          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: 'audit model equals session model' })
+          return { ok: false, output: 'Command denied: the audit model must differ from the session model.', audit, steps }
+        }
+        const auditVerdict = await requestAuditVerdict(trimmed, options.workspacePath, `${effectiveInterpreter}/${effectiveEnvironment}`, timeoutSeconds, review.durationAllowSeconds, auditModel, runtime.signal)
+        audit.push({ description: `model audit: ${auditVerdict.allow ? 'allowed' : `denied (${auditVerdict.reason})`}`, simulated: false })
+        if (!auditVerdict.allow) {
+          recordStep({ stage: 'audit-model', outcome: 'deny', detail: auditVerdict.reason })
+          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: auditVerdict.reason })
+          return { ok: false, output: `Command denied by the audit model: ${auditVerdict.reason}`, audit, steps }
+        }
+        auditNote = auditVerdict.reason
+        auditModelName = auditModel.name || auditModel.modelName
+        recordStep({ stage: 'audit-model', outcome: 'pass', detail: auditNote || 'no objection' })
+      } else {
+        recordStep({ stage: 'audit-model', outcome: 'skipped', detail: 'reviewer disabled' })
+      }
 
-    // Gate 2: model audit (optional, fail-closed).
-    if (config.modelAuditEnabled) {
-      checks.push('model-audit')
-      const auditModel = config.auditModelConfigId
-        ? await runtime.resolveAuditModel(config.auditModelConfigId)
-        : undefined
-      if (!auditModel) {
-        audit.push({ description: 'model audit: no audit model resolved; denied', simulated: false })
-        return { ok: false, output: 'Command denied: the audit model could not be resolved. Configure a valid audit model in command execution settings.', audit }
-      }
-      if (!isAuditModelAllowed(config, runtime.sessionModelName, auditModel.modelName)) {
-        audit.push({ description: 'model audit: audit model has the same name as the session model; denied', simulated: false })
-        return { ok: false, output: 'Command denied: the audit model must differ from the session model.', audit }
-      }
-      const verdict = await requestAuditVerdict(trimmed, options.workspacePath, `${config.interpreter}/${config.environment}`, auditModel, runtime.signal)
-      audit.push({ description: `model audit: ${verdict.allow ? 'allowed' : `denied (${verdict.reason})`}`, simulated: false })
-      if (!verdict.allow) {
-        return { ok: false, output: `Command denied by the audit model: ${verdict.reason}`, audit }
-      }
-    }
-
-    // Gate 3: manual confirmation (optional; also required for long timeouts).
-    if (config.manualConfirmationEnabled) {
-      checks.push('manual-confirmation')
-      if (timeoutSeconds > commandConfirmationThresholdSeconds) {
+      // Reviewer 3: manual confirmation (optional, on by default). The check
+      // only counts as passed after the user actually approves it.
+      if (review.reviewers.manualConfirmation) {
         const confirmation = await runtime.requestConfirmation({
           command: trimmed,
           timeoutSeconds,
           editable: true,
           checks,
+          workspacePath: options.workspacePath,
+          environment: `${effectiveInterpreter}/${effectiveEnvironment}`,
+          auditModelName,
+          auditNote,
         })
         if (!confirmation.approved) {
           audit.push({ description: `manual confirmation: denied (timeout ${timeoutSeconds}s)`, simulated: false })
-          return { ok: false, output: 'Command denied by the user.', audit }
+          recordStep({ stage: 'manual-confirmation', outcome: 'deny', detail: 'rejected by the user' })
+          decide({ at: new Date().toISOString(), command: trimmed, decision: 'manual-deny', timeoutSeconds })
+          return { ok: false, output: 'Command denied by the user.', audit, steps }
         }
+        checks.push('manual-confirmation')
+        recordStep({ stage: 'manual-confirmation', outcome: 'pass', detail: 'approved by the user' })
+        decide({ at: new Date().toISOString(), command: trimmed, decision: 'manual-approve', timeoutSeconds })
         timeoutSeconds = Math.min(commandTimeoutMaxSeconds, Math.max(commandTimeoutMinSeconds, confirmation.timeoutSeconds))
+      } else {
+        recordStep({ stage: 'manual-confirmation', outcome: 'skipped', detail: 'reviewer disabled' })
       }
     }
 
     const startedAt = Date.now()
     let result: RawRunResult
     try {
-      if (config.environment === 'wsl2') {
-        result = await runWsl2(trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
-      } else if (config.environment === 'docker') {
-        result = await runDocker(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      if (effectiveEnvironment === 'wsl2') {
+        result = await runWsl2(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+      } else if (effectiveEnvironment === 'docker') {
+        result = await runDocker(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       } else {
-        result = await runBare(config.interpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
+        result = await runBare(effectiveInterpreter, trimmed, options.workspacePath, timeoutSeconds, runtime.signal)
       }
     } catch (error) {
       return {
         ok: false,
         output: error instanceof Error ? error.message : 'Command execution failed to start.',
         audit,
+        steps,
       }
     }
     const durationMs = Date.now() - startedAt
@@ -467,15 +556,16 @@ export async function executeCommand(options: {
       description: `executed (${config.interpreter}/${config.environment}) exit=${result.exitCode ?? 'n/a'} timeout=${timeoutSeconds}s duration=${Math.round(durationMs / 100) / 10}s`,
       simulated: false,
     })
+    decide({ at: new Date().toISOString(), command: trimmed, decision: 'executed', timeoutSeconds })
     const sections: string[] = []
     if (result.stdout) sections.push(`=== STDOUT ===\n${result.stdout}`)
     if (result.stderr) sections.push(`=== STDERR ===\n${result.stderr}`)
-    if (result.timedOut) sections.push(`=== EXECUTION TIMEOUT ===\nExecution timed out after ${timeoutSeconds} seconds`)
-    if (clamped) sections.push(`=== NOTE ===\nTimeout clamped to ${commandTimeoutClampSeconds}s because manual confirmation is disabled.`)
+    if (result.timedOut) sections.push(`=== EXECUTION TIMEOUT ===\nTerminated after exceeding the declared duration of ${timeoutSeconds} seconds. Declare a longer timeout next time.`)
     return {
       ok: result.exitCode === 0 && !result.timedOut,
       output: sections.join('\n\n') || `RC: ${result.exitCode ?? 'n/a'}`,
       audit,
+      steps,
     }
   })
 }

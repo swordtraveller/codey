@@ -3,6 +3,8 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   ColdRecallPreview,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextDebugMessage,
   ContextDebugOverview,
   ContextManagementConfig,
@@ -11,6 +13,7 @@ import type {
   DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
+  MediaAttachment,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -26,6 +29,8 @@ import type {
   ScreenshotSelection,
   ScreenshotSource,
   TokenLimitSimulation,
+  NotificationOptions,
+  NotificationSettings,
 } from '../../shared/types'
 
 interface RuntimeInfo {
@@ -48,6 +53,8 @@ declare global {
       saveConfig(config: AppConfig): Promise<AppConfig>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
+      testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
+      listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
       getProjects(): Promise<Project[]>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
@@ -78,17 +85,23 @@ declare global {
       setConversationAgentLimits(
         projectId: string,
         conversationId: string,
-        agentLimits: AgentLimitsConfig,
+        agentLimits: AgentLimitsConfig | null,
       ): Promise<Project>
       setConversationCommandExecution(
         projectId: string,
         conversationId: string,
-        commandExecution: CommandExecutionConfig,
+        commandExecution: CommandExecutionConfig | null,
       ): Promise<Project>
       setProjectCommandExecutionDefault(
         projectId: string,
-        commandExecution: CommandExecutionConfig,
+        commandExecution: CommandExecutionConfig | null,
       ): Promise<Project>
+      setProjectAgentLimitsDefault(
+        projectId: string,
+        agentLimits: AgentLimitsConfig | null,
+      ): Promise<Project>
+      onCommandReviewRequest(listener: (request: CommandApprovalRequest) => void): () => void
+      respondCommandReview(requestId: string, response: CommandApprovalResponse): Promise<boolean>
       detectShells(): Promise<ShellDetectionResult>
       getCachedShellDetection(): Promise<ShellDetectionResult | null>
       pickBashExecutable(): Promise<string | null>
@@ -98,11 +111,13 @@ declare global {
       getPromptSnapshot(): Promise<PromptSnapshot>
       getToolHelpSnapshot(): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
+      setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project>
       develop(
         projectId: string,
         conversationId: string,
         content: string,
         images?: ImageAttachment[],
+        attachments?: MediaAttachment[],
         traceId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
@@ -142,6 +157,10 @@ declare global {
         conversationId: string,
         requestTokens: number,
       ): Promise<TokenLimitSimulation>
+      showNotification(payload: NotificationOptions): Promise<void>
+      getNotificationSettings(): Promise<NotificationSettings>
+      setNotificationSettings(settings: Partial<NotificationSettings>): Promise<void>
+      onNotificationClicked(callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void): () => void
     }
   }
 }
