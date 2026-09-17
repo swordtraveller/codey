@@ -111,12 +111,14 @@ import {
   setConversationModelConfig,
   setConversationReadState,
   setConversationSkillSelection,
+  setConversationKnowledgeBaseSelection,
   setProjectAgentLimitsDefault,
   setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
   setProjectModelConfig,
   setProjectSkillSelection,
+  setProjectKnowledgeBaseSelection,
   updateConversationAgentMessages,
   updateConversationTurn,
 } from './workspace'
@@ -135,7 +137,15 @@ import {
   sanitizeResourceSelection,
   validateResourceSelection,
 } from './skills'
-
+import {
+  createKnowledgeBase,
+  getKnowledgeBasesByIds,
+  listKnowledgeBases,
+  refreshKnowledgeBase,
+  removeKnowledgeBase,
+  resolveKnowledgeBaseSelection,
+  updateKnowledgeBase,
+} from './knowledge-bases'
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
 const developmentProgressStates = new Map<string, DevelopmentProgressState>()
@@ -378,6 +388,7 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
     agentLimitsDefault: null,
     skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -419,6 +430,7 @@ function buildPromptSnapshot(): PromptSnapshot {
     commandExecutionDefault: { ...defaultCommandExecutionConfig },
     agentLimitsDefault: null,
     skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
@@ -660,6 +672,11 @@ async function developProject(
     conversation.skillSelection,
   )
   const enabledSkills = await getInstalledSkillsByIds(effectiveSkillIds)
+  const enabledKnowledgeBases = await getKnowledgeBasesByIds(resolveKnowledgeBaseSelection(
+    appConfig.defaultKnowledgeBaseIds,
+    project.knowledgeBaseSelection,
+    conversation.knowledgeBaseSelection,
+  ))
   const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) {
     return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
@@ -801,6 +818,7 @@ async function developProject(
       commandRuntime,
       shellDetection: getCachedShellDetection(),
       enabledSkills,
+      enabledKnowledgeBases,
       unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
       onToolsetUnlocked: (keyword: string) => {
         // Persist the unlock so it survives app restarts and conversation
@@ -1067,11 +1085,16 @@ async function initializeContextDebugContext(
     project.skillSelection,
     conversation.skillSelection,
   ))
+  const enabledKnowledgeBases = await getKnowledgeBasesByIds(resolveKnowledgeBaseSelection(
+    appConfig.defaultKnowledgeBaseIds,
+    project.knowledgeBaseSelection,
+    conversation.knowledgeBaseSelection,
+  ))
   const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, {
     allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
     roundId: initializationRoundId,
     roundCount: initializationRoundCount,
-  }, enabledSkills)
+  }, enabledSkills, enabledKnowledgeBases)
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
   rememberInitializedSnapshot(
     projectId,
@@ -1249,6 +1272,55 @@ app.whenReady().then(() => {
       }
     }
   })
+  ipcMain.handle('knowledge-bases:list', () => listKnowledgeBases())
+  ipcMain.handle('knowledge-bases:choose-directory', async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+  ipcMain.handle('knowledge-bases:create', async (_event, input: Parameters<typeof createKnowledgeBase>[0]) => {
+    ensureAllIdle()
+    return createKnowledgeBase(input)
+  })
+  ipcMain.handle('knowledge-bases:update', async (_event, id: string, patch: Parameters<typeof updateKnowledgeBase>[1]) => {
+    ensureAllIdle()
+    return updateKnowledgeBase(id, patch)
+  })
+  ipcMain.handle('knowledge-bases:refresh', async (_event, id: string) => {
+    ensureAllIdle()
+    return refreshKnowledgeBase(id)
+  })
+  ipcMain.handle('knowledge-bases:remove', async (_event, knowledgeBaseId: string) => {
+    ensureAllIdle()
+    await removeKnowledgeBase(knowledgeBaseId)
+    const config = await readConfig()
+    if (config.defaultKnowledgeBaseIds.includes(knowledgeBaseId)) {
+      await saveConfig({
+        ...config,
+        defaultKnowledgeBaseIds: config.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBaseId),
+      })
+    }
+    const projects = await getProjects()
+    for (const project of projects) {
+      const projectSelection = sanitizeResourceSelection({
+        enabledIds: project.knowledgeBaseSelection.enabledIds.filter((id) => id !== knowledgeBaseId),
+        disabledIds: project.knowledgeBaseSelection.disabledIds.filter((id) => id !== knowledgeBaseId),
+      })
+      if (projectSelection.enabledIds.length !== project.knowledgeBaseSelection.enabledIds.length
+        || projectSelection.disabledIds.length !== project.knowledgeBaseSelection.disabledIds.length) {
+        await setProjectKnowledgeBaseSelection(project.id, projectSelection)
+      }
+      for (const conversation of project.conversations) {
+        const conversationSelection = sanitizeResourceSelection({
+          enabledIds: conversation.knowledgeBaseSelection.enabledIds.filter((id) => id !== knowledgeBaseId),
+          disabledIds: conversation.knowledgeBaseSelection.disabledIds.filter((id) => id !== knowledgeBaseId),
+        })
+        if (conversationSelection.enabledIds.length !== conversation.knowledgeBaseSelection.enabledIds.length
+          || conversationSelection.disabledIds.length !== conversation.knowledgeBaseSelection.disabledIds.length) {
+          await setConversationKnowledgeBaseSelection(project.id, conversation.id, conversationSelection)
+        }
+      }
+    }
+  })
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
   ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
@@ -1290,6 +1362,10 @@ app.whenReady().then(() => {
     ensureProjectIdle(projectId)
     return setProjectSkillSelection(projectId, validateResourceSelection(selection))
   })
+  ipcMain.handle('projects:set-knowledge-base-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
+    ensureProjectIdle(projectId)
+    return setProjectKnowledgeBaseSelection(projectId, validateResourceSelection(selection))
+  })
   ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
     ensureProjectIdle(projectId)
     return setProjectArchived(projectId, archived)
@@ -1310,6 +1386,10 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-skill-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
     ensureIdle(projectId, conversationId)
     return setConversationSkillSelection(projectId, conversationId, validateResourceSelection(selection))
+  })
+  ipcMain.handle('conversations:set-knowledge-base-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationKnowledgeBaseSelection(projectId, conversationId, validateResourceSelection(selection))
   })
   ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureIdle(projectId, conversationId)

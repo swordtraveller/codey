@@ -47,7 +47,7 @@ type PersistedAgentMessage = Omit<AgentContextMessage, 'images' | 'attachments'>
   images?: ImageAttachment[] | StoredImageReference[]
   attachments?: MediaAttachment[] | StoredMediaReference[]
 }
-type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits' | 'commandExecution' | 'skillSelection'> & {
+type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits' | 'commandExecution' | 'skillSelection' | 'knowledgeBaseSelection'> & {
   messages: PersistedChatMessage[]
   agentMessages?: PersistedAgentMessage[]
   modelConfigId?: string | null
@@ -55,11 +55,12 @@ type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'mod
   agentLimits?: Partial<AgentLimitsConfig> | null
   commandExecution?: Partial<CommandExecutionConfig> | null
   skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
   unlockedToolsets?: string[]
 }
 type LegacyStoredProject = Omit<
   Project,
-  'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations' | 'skillSelection'
+  'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations' | 'skillSelection' | 'knowledgeBaseSelection'
 > & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
@@ -67,13 +68,15 @@ type LegacyStoredProject = Omit<
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
   skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
 }
-type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault' | 'agentLimitsDefault' | 'skillSelection'> & {
+type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault' | 'agentLimitsDefault' | 'skillSelection' | 'knowledgeBaseSelection'> & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
   commandExecutionDefault?: Partial<CommandExecutionConfig> | null
   agentLimitsDefault?: Partial<AgentLimitsConfig> | null
   skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversationIds: string[]
@@ -258,6 +261,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
     commandExecution: normalizeStoredCommandExecution(value.commandExecution),
     skillSelection: sanitizeResourceSelection(value.skillSelection),
+    knowledgeBaseSelection: sanitizeResourceSelection(value.knowledgeBaseSelection),
     unlockedToolsets: Array.isArray(value.unlockedToolsets)
       ? [...new Set(value.unlockedToolsets.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== ''))]
       : [],
@@ -283,6 +287,7 @@ async function normalizeProjectMetadata(
     commandExecutionDefault: normalizeStoredCommandExecution(value.commandExecutionDefault),
     agentLimitsDefault: normalizeStoredAgentLimits(value.agentLimitsDefault),
     skillSelection: sanitizeResourceSelection(value.skillSelection),
+    knowledgeBaseSelection: sanitizeResourceSelection(value.knowledgeBaseSelection),
     folders,
     conversations,
     pythonEnvironmentFolderId: configuredFolder
@@ -488,6 +493,7 @@ function createConversationRecord(index: number): Conversation {
     // null = inherit the project default (and, through it, the global review).
     commandExecution: null,
     skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     messages: [],
     agentMessages: [],
   }
@@ -547,6 +553,7 @@ export function createProject(name: string, defaultModelConfigId: string | null 
       // null = inherit the global agent-limits default.
       agentLimitsDefault: null,
       skillSelection: { enabledIds: [], disabledIds: [] },
+      knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
       folders: [],
       pythonEnvironmentFolderId: null,
       conversations: [createConversationRecord(1)],
@@ -596,6 +603,15 @@ export function setProjectSkillSelection(projectId: string, selection: ResourceS
   return serializeWrite(projectWriteScope(projectId), async () => {
     const project = await findProject(projectId)
     project.skillSelection = sanitizeResourceSelection(selection)
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
+export function setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const project = await findProject(projectId)
+    project.knowledgeBaseSelection = sanitizeResourceSelection(selection)
     await persistProjectMetadata(project)
     return project
   })
@@ -661,6 +677,20 @@ export function setConversationSkillSelection(
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     conversation.skillSelection = sanitizeResourceSelection(selection)
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setConversationKnowledgeBaseSelection(
+  projectId: string,
+  conversationId: string,
+  selection: ResourceSelectionOverride,
+): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.knowledgeBaseSelection = sanitizeResourceSelection(selection)
     await persistConversation(projectId, conversation)
     return project
   })

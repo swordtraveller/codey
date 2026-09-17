@@ -10,6 +10,7 @@ import type {
   DevelopmentProgressUpdate,
   DevelopmentTimelineItem,
   InstalledSkill,
+  KnowledgeBase,
   ModelConfig,
   Project,
   RuntimeModelConfig,
@@ -25,6 +26,7 @@ import { detectProjectFolders, formatProjectDetections } from './project-detecti
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
 import type { CommandExecutorRuntime } from './command-executor'
 import { createSkillTools, runSkillTool, skillInstructions } from './skills'
+import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
 
 type ResponseMessage = {
   content?: string | null
@@ -623,6 +625,7 @@ export function createAgentSystemMessage(
   networkAccessEnabled = false,
   contextConfig?: ContextManagementConfig,
   enabledSkills: InstalledSkill[] = [],
+  enabledKnowledgeBases: KnowledgeBase[] = [],
 ): ContextMessage {
   const customActive = contextConfig?.customStrategyEnabled === true && Boolean(contextConfig.customStrategyScript?.trim())
   const strategyPrompt = customActive
@@ -648,6 +651,7 @@ export function createAgentSystemMessage(
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add and git_unstage require explicit file paths; git_unstage only removes selected files from the index and preserves working tree contents; git_commit requires staged changes.',
       ...(skillInstructions(enabledSkills) ? ['', skillInstructions(enabledSkills)] : []),
+      ...(knowledgeBaseInstructions(enabledKnowledgeBases) ? ['', knowledgeBaseInstructions(enabledKnowledgeBases)] : []),
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
@@ -661,10 +665,11 @@ export function buildAgentContext(
   networkAccessEnabled = false,
   customStrategy?: { allow: boolean; latestUserMessageId?: string; roundId?: string; roundCount?: number },
   enabledSkills: InstalledSkill[] = [],
+  enabledKnowledgeBases: KnowledgeBase[] = [],
 ): ContextResult {
   return manageContext(
-    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills), ...toApiMessages(agentMessages)],
-    [...createAgentTools(project, networkAccessEnabled), ...createSkillTools(enabledSkills, project)],
+    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases), ...toApiMessages(agentMessages)],
+    [...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
     config,
     contextConfig,
     {
@@ -701,6 +706,8 @@ export async function develop(
     onToolsetUnlocked?: (keyword: string) => void
     /** Immutable snapshot of skills explicitly enabled by the user for this request. */
     enabledSkills?: InstalledSkill[]
+    /** Immutable snapshot of knowledge bases explicitly enabled by the user. */
+    enabledKnowledgeBases?: KnowledgeBase[]
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -720,13 +727,15 @@ export async function develop(
   // tools appear from the next request onward.
   const unlockedToolsets = new Set(runtime?.unlockedToolsets ?? [])
   const enabledSkills = runtime?.enabledSkills ?? []
+  const enabledKnowledgeBases = runtime?.enabledKnowledgeBases ?? []
   const buildTools = (): object[] => [
-    ...createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets]),
+    ...createKnowledgeBaseTools(enabledKnowledgeBases),
     ...createSkillTools(enabledSkills, project),
+    ...createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets]),
   ]
   let tools = buildTools()
   const projectDetections = await detectProjectFolders(project.folders)
-  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills)
+  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases)
   const history = toApiMessages(agentMessages)
   if (runtime?.latestUserMessageId && !history.some((message) =>
     message.id === runtime.latestUserMessageId && message.role === 'user'
@@ -1002,8 +1011,11 @@ export async function develop(
           : runtime?.commandRuntime
         try {
           throwIfAborted(runtime?.signal)
-          const skillResult = await runSkillTool(enabledSkills, project, toolCall, runtime?.signal)
-          content = skillResult ?? await runAgentTool(
+          const knowledgeBaseResult = await runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, runtime?.signal)
+          const skillResult = knowledgeBaseResult === undefined
+            ? await runSkillTool(enabledSkills, project, toolCall, runtime?.signal)
+            : undefined
+          content = knowledgeBaseResult ?? skillResult ?? await runAgentTool(
             project,
             toolCall,
             writtenFiles,

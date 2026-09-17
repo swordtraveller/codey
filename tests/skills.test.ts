@@ -30,6 +30,7 @@ const project: Project = {
   commandExecutionDefault: null,
   agentLimitsDefault: null,
   skillSelection: { enabledIds: [], disabledIds: [] },
+  knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
   folders: [
     { id: 'folder-a', path: 'D:\\project-a' },
     { id: 'folder-b', path: 'D:\\project-b' },

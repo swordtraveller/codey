@@ -54,6 +54,7 @@ type StoredAppConfig = {
   agentLimits?: Partial<AgentLimitsConfig>
   commandExecutionGlobal?: Partial<CommandExecutionConfig> | null
   defaultSkillIds?: string[]
+  defaultKnowledgeBaseIds?: string[]
 }
 
 type LegacyStoredConfig = LegacyStoredModel & {
@@ -365,6 +366,7 @@ export async function readConfig(): Promise<AppConfig> {
         agentLimitsGlobal,
         commandExecutionGlobal,
         defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+        defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
       }
       const legacyMargin = stored.contextManagement?.safeOutputMargin
       const needsMigration = layers.migrated ||
@@ -378,6 +380,7 @@ export async function readConfig(): Promise<AppConfig> {
         stored.agentLimits === undefined ||
         stored.commandExecutionGlobal === undefined ||
         stored.defaultSkillIds === undefined ||
+        stored.defaultKnowledgeBaseIds === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || (stored.modelConfigs ?? []).some((model) =>
           !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -404,6 +407,7 @@ export async function readConfig(): Promise<AppConfig> {
         agentLimitsGlobal: readAgentLimitsGlobal(stored),
         commandExecutionGlobal: readCommandExecutionGlobal(stored),
         defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+        defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
       }
     }
 
@@ -428,6 +432,7 @@ export async function readConfig(): Promise<AppConfig> {
       agentLimitsGlobal: readAgentLimitsGlobal(stored),
       commandExecutionGlobal: readCommandExecutionGlobal(stored),
       defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+      defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
     }
     await writeConfig(migrated)
     return migrated
@@ -489,6 +494,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     agentLimitsGlobal,
     commandExecutionGlobal,
     defaultSkillIds: normalizeSkillIds(config.defaultSkillIds),
+    defaultKnowledgeBaseIds: normalizeSkillIds(config.defaultKnowledgeBaseIds),
   }
   await writeConfig(normalized)
   return normalized

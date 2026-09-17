@@ -387,6 +387,60 @@ export const emptyResourceSelectionOverride: ResourceSelectionOverride = {
   disabledIds: [],
 }
 
+export type KnowledgeBaseMode = 'rg' | 'rag'
+
+export type KnowledgeBaseStatus = 'ready' | 'indexing' | 'error' | 'model-required'
+
+export type LocalEmbeddingProviderConfig = {
+  kind: 'local'
+  modelId: string
+}
+
+export type RemoteEmbeddingProviderConfig = {
+  kind: 'remote'
+  providerId: string
+  modelId: string
+}
+
+export type EmbeddingProviderConfig = LocalEmbeddingProviderConfig | RemoteEmbeddingProviderConfig
+
+export const defaultLocalEmbeddingModelId = 'Xenova/bge-small-zh-v1.5'
+
+export type KnowledgeBase = {
+  id: string
+  name: string
+  source: { kind: 'local-directory'; path: string }
+  mode: KnowledgeBaseMode
+  embeddingProvider: EmbeddingProviderConfig | null
+  status: KnowledgeBaseStatus
+  fileCount: number
+  totalBytes: number
+  createdAt: string
+  updatedAt: string
+  indexedAt: string | null
+  error?: string
+}
+
+export type KnowledgeBaseSearchResult = {
+  knowledgeBaseId: string
+  knowledgeBaseName: string
+  sourcePath: string
+  relativePath: string
+  lineStart?: number
+  lineEnd?: number
+  content: string
+  score?: number
+}
+
+export type KnowledgeBaseModelProgress = {
+  knowledgeBaseId?: string
+  modelId: string
+  status: 'downloading' | 'ready' | 'error'
+  progress?: number
+  file?: string
+  error?: string
+}
+
 export type SkillToolRuntime = 'node' | 'python'
 
 export type SkillTool = {
@@ -461,6 +515,8 @@ export type AppConfig = {
   agentLimitsGlobal: AgentLimitsConfig
   /** Skills enabled by default for every project. Users manage this list explicitly. */
   defaultSkillIds: string[]
+  /** Knowledge bases enabled by default for every project. */
+  defaultKnowledgeBaseIds: string[]
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -481,6 +537,7 @@ export const defaultAppConfig: AppConfig = {
   commandExecutionGlobal: { ...defaultCommandExecutionConfig, review: null },
   agentLimitsGlobal: { ...defaultAgentLimitsConfig },
   defaultSkillIds: [],
+  defaultKnowledgeBaseIds: [],
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -738,6 +795,8 @@ export type Conversation = {
   unlockedToolsets?: string[]
   /** Explicit per-conversation skill deltas over the project selection. */
   skillSelection: ResourceSelectionOverride
+  /** Explicit per-conversation knowledge-base deltas over the project selection. */
+  knowledgeBaseSelection: ResourceSelectionOverride
   /** Agent-limits override; null = inherit the project default. */
   agentLimits: AgentLimitsConfig | null
   /** Full command-execution override; null = inherit the project default. */
@@ -769,6 +828,8 @@ export type Project = {
   agentLimitsDefault: AgentLimitsConfig | null
   /** Explicit project skill deltas over global defaults. */
   skillSelection: ResourceSelectionOverride
+  /** Explicit project knowledge-base deltas over global defaults. */
+  knowledgeBaseSelection: ResourceSelectionOverride
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

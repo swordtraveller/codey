@@ -33,6 +33,7 @@ describe('agent tools', () => {
       defaultModelConfigId: null,
       contextConfigOverride: null,
       skillSelection: { enabledIds: [], disabledIds: [] },
+      knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
       commandExecutionDefault: { ...defaultCommandExecutionConfig },
       agentLimitsDefault: null,
       folders: [{ id: 'root', path: root }],

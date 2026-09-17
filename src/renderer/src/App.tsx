@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
 import { isContextConfigValidForModel, isValidContextManagementConfig } from '../../shared/context-validation'
 import type { BridgeChannelStatus } from '../../shared/bridge'
+import { defaultLocalEmbeddingModelId } from '../../shared/types'
 import type {
   AgentLimitsConfig,
   AppLanguage,
@@ -38,6 +39,8 @@ import type {
   ImageMediaType,
   MediaAttachment,
   MediaKind,
+  KnowledgeBase,
+  KnowledgeBaseMode,
   PerformanceTraceFile,
   PerformanceTraceStatus,
   InstalledSkill,
@@ -124,7 +127,7 @@ function updateResourceSelection(
   return { enabledIds, disabledIds }
 }
 
-function resolveEffectiveSkillIds(
+function resolveEffectiveResourceIds(
   globalIds: string[],
   projectSelection?: ResourceSelectionOverride,
   conversationSelection?: ResourceSelectionOverride,
@@ -2201,6 +2204,14 @@ export function App(): React.JSX.Element {
   const [skillError, setSkillError] = useState('')
   const [conversationSkillsOpen, setConversationSkillsOpen] = useState(false)
   const [conversationSkillDraft, setConversationSkillDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
+  const [knowledgeBaseDirectory, setKnowledgeBaseDirectory] = useState('')
+  const [knowledgeBaseName, setKnowledgeBaseName] = useState('')
+  const [knowledgeBaseMode, setKnowledgeBaseMode] = useState<KnowledgeBaseMode>('rg')
+  const [knowledgeBaseBusy, setKnowledgeBaseBusy] = useState(false)
+  const [knowledgeBaseError, setKnowledgeBaseError] = useState('')
+  const [conversationKnowledgeBasesOpen, setConversationKnowledgeBasesOpen] = useState(false)
+  const [conversationKnowledgeBaseDraft, setConversationKnowledgeBaseDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [selectedDefinitionId, setSelectedDefinitionId] = useState('')
   const [selectedLinkId, setSelectedLinkId] = useState('')
@@ -2236,7 +2247,7 @@ export function App(): React.JSX.Element {
   const [agentLimitsOverride, setAgentLimitsOverride] = useState(false)
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
   const [projectSettingsProjectId, setProjectSettingsProjectId] = useState('')
-  const [projectSettingsTab, setProjectSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills'>('model')
+  const [projectSettingsTab, setProjectSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
   const [projectSettingsModelConfigId, setProjectSettingsModelConfigId] = useState('')
   const [projectAgentLimitsOverride, setProjectAgentLimitsOverride] = useState(false)
   const [projectAgentLimitsDraft, setProjectAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
@@ -2245,6 +2256,7 @@ export function App(): React.JSX.Element {
   const [projectContextOverride, setProjectContextOverride] = useState(false)
   const [projectContextDraft, setProjectContextDraft] = useState(defaultContextManagementConfig)
   const [projectSkillDraft, setProjectSkillDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
+  const [projectKnowledgeBaseDraft, setProjectKnowledgeBaseDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
   const [commandDialogOpen, setCommandDialogOpen] = useState(false)
   const [commandProjectId, setCommandProjectId] = useState('')
   const [commandConversationId, setCommandConversationId] = useState('')
@@ -2297,8 +2309,8 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
-  const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills'>('model')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -2313,7 +2325,7 @@ export function App(): React.JSX.Element {
     (conversation) => conversation.id === activeConversationId,
   )
   const installedSkillIds = new Set(installedSkills.map((skill) => skill.id))
-  const effectiveSkillIds = resolveEffectiveSkillIds(
+  const effectiveSkillIds = resolveEffectiveResourceIds(
     config.defaultSkillIds,
     activeProject?.skillSelection,
     activeConversation?.skillSelection,
@@ -2321,6 +2333,15 @@ export function App(): React.JSX.Element {
   const effectiveSkills = effectiveSkillIds
     .map((id) => installedSkills.find((skill) => skill.id === id))
     .filter((skill): skill is InstalledSkill => Boolean(skill))
+  const knowledgeBaseIds = new Set(knowledgeBases.map((knowledgeBase) => knowledgeBase.id))
+  const effectiveKnowledgeBaseIds = resolveEffectiveResourceIds(
+    config.defaultKnowledgeBaseIds,
+    activeProject?.knowledgeBaseSelection,
+    activeConversation?.knowledgeBaseSelection,
+  ).filter((id) => knowledgeBaseIds.has(id))
+  const effectiveKnowledgeBases = effectiveKnowledgeBaseIds
+    .map((id) => knowledgeBases.find((knowledgeBase) => knowledgeBase.id === id))
+    .filter((knowledgeBase): knowledgeBase is KnowledgeBase => Boolean(knowledgeBase))
   const unreadCounts = useMemo((): Record<string, number> => {
     const counts: Record<string, number> = {}
     for (const project of projects) {
@@ -2455,6 +2476,11 @@ export function App(): React.JSX.Element {
       .listSkills()
       .then(setInstalledSkills)
       .catch(() => setSkillError(t('unableLoadSkills')))
+
+    void window.codey
+      .listKnowledgeBases()
+      .then(setKnowledgeBases)
+      .catch(() => setKnowledgeBaseError(t('unableLoadKnowledgeBases')))
 
     void window.codey
       .getNotificationSettings()
@@ -2701,6 +2727,151 @@ export function App(): React.JSX.Element {
       setSkillError(reason instanceof Error ? reason.message : t('unableChangeSkills'))
     } finally {
       setSkillBusy(false)
+    }
+  }
+
+  async function refreshKnowledgeBases(): Promise<void> {
+    setKnowledgeBases(await window.codey.listKnowledgeBases())
+  }
+
+  async function chooseKnowledgeBaseDirectory(): Promise<void> {
+    if (knowledgeBaseBusy || interactionLocked) return
+    setKnowledgeBaseError('')
+    try {
+      const directory = await window.codey.chooseKnowledgeBaseDirectory()
+      if (directory) setKnowledgeBaseDirectory(directory)
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableChooseKnowledgeBaseDirectory'))
+    }
+  }
+
+  async function createLocalKnowledgeBase(): Promise<void> {
+    if (!knowledgeBaseDirectory.trim() || knowledgeBaseBusy || interactionLocked) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      await window.codey.createKnowledgeBase({
+        name: knowledgeBaseName.trim() || undefined,
+        directoryPath: knowledgeBaseDirectory.trim(),
+        mode: knowledgeBaseMode,
+        embeddingProvider: knowledgeBaseMode === 'rag'
+          ? { kind: 'local', modelId: defaultLocalEmbeddingModelId }
+          : null,
+      })
+      await refreshKnowledgeBases()
+      setKnowledgeBaseName('')
+      setKnowledgeBaseDirectory('')
+      setKnowledgeBaseMode('rg')
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableCreateKnowledgeBase'))
+      await refreshKnowledgeBases().catch(() => undefined)
+    } finally {
+      setKnowledgeBaseBusy(false)
+    }
+  }
+
+  async function refreshLocalKnowledgeBase(knowledgeBase: KnowledgeBase): Promise<void> {
+    if (knowledgeBaseBusy || interactionLocked) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      await window.codey.refreshKnowledgeBase(knowledgeBase.id)
+      await refreshKnowledgeBases()
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableRefreshKnowledgeBase'))
+      await refreshKnowledgeBases().catch(() => undefined)
+    } finally {
+      setKnowledgeBaseBusy(false)
+    }
+  }
+
+  async function renameKnowledgeBase(knowledgeBase: KnowledgeBase): Promise<void> {
+    if (knowledgeBaseBusy || interactionLocked) return
+    const name = window.prompt(t('knowledgeBaseName'), knowledgeBase.name)?.trim()
+    if (!name || name === knowledgeBase.name) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      await window.codey.updateKnowledgeBase(knowledgeBase.id, { name })
+      await refreshKnowledgeBases()
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableUpdateKnowledgeBase'))
+    } finally {
+      setKnowledgeBaseBusy(false)
+    }
+  }
+
+  async function changeKnowledgeBaseMode(knowledgeBase: KnowledgeBase, mode: KnowledgeBaseMode): Promise<void> {
+    if (mode === knowledgeBase.mode || knowledgeBaseBusy || interactionLocked) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      await window.codey.updateKnowledgeBase(knowledgeBase.id, {
+        mode,
+        embeddingProvider: mode === 'rag'
+          ? { kind: 'local', modelId: defaultLocalEmbeddingModelId }
+          : null,
+      })
+      await refreshKnowledgeBases()
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableUpdateKnowledgeBase'))
+      await refreshKnowledgeBases().catch(() => undefined)
+    } finally {
+      setKnowledgeBaseBusy(false)
+    }
+  }
+
+  async function removeLocalKnowledgeBase(knowledgeBase: KnowledgeBase): Promise<void> {
+    if (knowledgeBaseBusy || interactionLocked || !window.confirm(t('removeKnowledgeBaseConfirm', { name: knowledgeBase.name }))) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      await window.codey.removeKnowledgeBase(knowledgeBase.id)
+      const [items, savedConfig, savedProjects] = await Promise.all([
+        window.codey.listKnowledgeBases(),
+        window.codey.getConfig(),
+        window.codey.getProjects(),
+      ])
+      setKnowledgeBases(items)
+      setConfig(savedConfig)
+      setProjects(savedProjects)
+      setConfigDraft((current) => ({
+        ...current,
+        defaultKnowledgeBaseIds: current.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBase.id),
+      }))
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableRemoveKnowledgeBase'))
+    } finally {
+      setKnowledgeBaseBusy(false)
+    }
+  }
+
+  function openConversationKnowledgeBases(): void {
+    if (!activeProject || !activeConversation || interactionLocked) return
+    setConversationKnowledgeBaseDraft({
+      enabledIds: [...activeConversation.knowledgeBaseSelection.enabledIds],
+      disabledIds: [...activeConversation.knowledgeBaseSelection.disabledIds],
+    })
+    setKnowledgeBaseError('')
+    setConversationKnowledgeBasesOpen(true)
+  }
+
+  async function saveConversationKnowledgeBases(): Promise<void> {
+    if (!activeProject || !activeConversation || interactionLocked || knowledgeBaseBusy) return
+    setKnowledgeBaseBusy(true)
+    setKnowledgeBaseError('')
+    try {
+      const updated = await window.codey.setConversationKnowledgeBaseSelection(
+        activeProject.id,
+        activeConversation.id,
+        conversationKnowledgeBaseDraft,
+      )
+      replaceProject(updated)
+      setConversationKnowledgeBasesOpen(false)
+    } catch (reason) {
+      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableChangeKnowledgeBases'))
+    } finally {
+      setKnowledgeBaseBusy(false)
     }
   }
 
@@ -3113,6 +3284,10 @@ export function App(): React.JSX.Element {
       enabledIds: [...project.skillSelection.enabledIds],
       disabledIds: [...project.skillSelection.disabledIds],
     })
+    setProjectKnowledgeBaseDraft({
+      enabledIds: [...project.knowledgeBaseSelection.enabledIds],
+      disabledIds: [...project.knowledgeBaseSelection.disabledIds],
+    })
     setSettingsError('')
     setProjectSettingsOpen(true)
     setOpenProjectMenuId(null)
@@ -3142,7 +3317,8 @@ export function App(): React.JSX.Element {
       await window.codey.setProjectAgentLimitsDefault(project.id, projectAgentLimitsOverride ? projectAgentLimitsDraft : null)
       const updated = await window.codey.setProjectCommandExecutionDefault(project.id, projectCommandOverride ? projectCommandDraft : null)
       await window.codey.setProjectContextConfig(project.id, projectContextOverride ? projectContextDraft : null)
-      const finalProject = await window.codey.setProjectSkillSelection(project.id, projectSkillDraft)
+      await window.codey.setProjectSkillSelection(project.id, projectSkillDraft)
+      const finalProject = await window.codey.setProjectKnowledgeBaseSelection(project.id, projectKnowledgeBaseDraft)
       replaceProject(finalProject ?? updated)
       setProjectSettingsOpen(false)
     } catch (error) {
@@ -4152,7 +4328,9 @@ export function App(): React.JSX.Element {
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openConversationSkills}>
                     {t('skills')} · {effectiveSkills.length}
                   </Button>
-                  <span className="resource-unavailable">{t('knowledgeBase')} · {t('notAvailable')}</span>
+                  <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openConversationKnowledgeBases}>
+                    {t('knowledgeBase')} · {effectiveKnowledgeBases.length}
+                  </Button>
                 </div>
               )}
               {activeConversation && (
@@ -4546,7 +4724,7 @@ export function App(): React.JSX.Element {
                 <Tab value="models">{t('models')}</Tab>
                 <Tab value="global">{t('globalSettings')}</Tab>
                 <Tab value="skills">{t('skills')}</Tab>
-                <Tab disabled value="knowledgeBases">{t('knowledgeBaseUnavailable')}</Tab>
+                <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
                 <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
                 <Tab value="notifications">{t('notifications')}</Tab>
@@ -4908,7 +5086,7 @@ export function App(): React.JSX.Element {
                   <Tab value="command">{t('globalTabCommand')}</Tab>
                   <Tab value="context">{t('globalTabContext')}</Tab>
                   <Tab value="skills">{t('skills')}</Tab>
-                  <Tab disabled value="knowledgeBases">{t('knowledgeBaseUnavailable')}</Tab>
+                  <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
                 </TabList>
                 {globalSettingsTab === 'model' && (
                   <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
@@ -5089,6 +5267,34 @@ export function App(): React.JSX.Element {
                     ))}
                   </div>
                 )}
+                {globalSettingsTab === 'knowledgeBases' && (
+                  <div className="skill-selection-list">
+                    <p className="settings-description">{t('globalKnowledgeBaseSelectionDescription')}</p>
+                    {knowledgeBases.length === 0 ? (
+                      <p className="settings-description">{t('noKnowledgeBases')}</p>
+                    ) : knowledgeBases.map((knowledgeBase) => (
+                      <label className="skill-selection-row" key={knowledgeBase.id}>
+                        <Checkbox
+                          checked={configDraft.defaultKnowledgeBaseIds.includes(knowledgeBase.id)}
+                          disabled={interactionLocked}
+                          onChange={(_, data) => setConfigDraft((current) => ({
+                            ...current,
+                            defaultKnowledgeBaseIds: data.checked === true
+                              ? [...new Set([...current.defaultKnowledgeBaseIds, knowledgeBase.id])]
+                              : current.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBase.id),
+                          }))}
+                        />
+                        <span>
+                          <strong>{knowledgeBase.name}</strong>
+                          <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
+                          <small className={knowledgeBase.status === 'ready' ? 'resource-effective' : 'resource-unavailable'}>
+                            {t(`knowledgeBaseStatus_${knowledgeBase.status.replace('-', '_')}`)}
+                          </small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
                 {globalSettingsTab === 'context' && (
                   <ContextSettingsFields
                     modelTargets={[
@@ -5198,6 +5404,124 @@ export function App(): React.JSX.Element {
                     ))}
                   </div>
                   {skillError && <p className="dialog-error">{skillError}</p>}
+                </section>
+              )}
+              {settingsTab === 'knowledgeBases' && (
+                <section className="settings-group skill-management">
+                  <h2>{t('knowledgeBaseManagement')}</h2>
+                  <p className="settings-description">{t('knowledgeBaseManagementDescription')}</p>
+                  <p className="settings-description">{t('knowledgeBaseSupportedFormats')}</p>
+                  <p className="settings-description">{t('knowledgeBaseFutureFormats')}</p>
+                  <Field label={t('knowledgeBaseDirectory')}>
+                    <div className="skill-import-actions">
+                      <Input
+                        value={knowledgeBaseDirectory}
+                        disabled={knowledgeBaseBusy || interactionLocked}
+                        placeholder={t('knowledgeBaseDirectoryPlaceholder')}
+                        onChange={(_, data) => setKnowledgeBaseDirectory(data.value)}
+                      />
+                      <Button disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void chooseKnowledgeBaseDirectory()}>
+                        {t('chooseDirectory')}
+                      </Button>
+                    </div>
+                  </Field>
+                  <Field label={t('knowledgeBaseName')} hint={t('knowledgeBaseNameHint')}>
+                    <Input
+                      value={knowledgeBaseName}
+                      disabled={knowledgeBaseBusy || interactionLocked}
+                      placeholder={t('knowledgeBaseNamePlaceholder')}
+                      onChange={(_, data) => setKnowledgeBaseName(data.value)}
+                    />
+                  </Field>
+                  <Field label={t('knowledgeBaseMode')}>
+                    <Select
+                      value={knowledgeBaseMode}
+                      disabled={knowledgeBaseBusy || interactionLocked}
+                      onChange={(_, data) => setKnowledgeBaseMode(data.value as KnowledgeBaseMode)}
+                    >
+                      <option value="rg">{t('knowledgeBaseModeRg')}</option>
+                      <option value="rag">{t('knowledgeBaseModeRag')}</option>
+                    </Select>
+                  </Field>
+                  {knowledgeBaseMode === 'rag' && (
+                    <div className="skill-preview">
+                      <Field label={t('embeddingProvider')}>
+                        <Select
+                          value="local"
+                          disabled={knowledgeBaseBusy || interactionLocked}
+                        >
+                          <option value="local">{t('localEmbeddingProvider')}</option>
+                        </Select>
+                      </Field>
+                      <Field label={t('embeddingModel')}>
+                        <Select
+                          value={defaultLocalEmbeddingModelId}
+                          disabled={knowledgeBaseBusy || interactionLocked}
+                        >
+                          <option value={defaultLocalEmbeddingModelId}>{defaultLocalEmbeddingModelId}</option>
+                        </Select>
+                      </Field>
+                      <p className="settings-description">{t('ragModelDownloadNotice')}</p>
+                    </div>
+                  )}
+                  <Button
+                    appearance="primary"
+                    disabled={!knowledgeBaseDirectory.trim() || knowledgeBaseBusy || interactionLocked}
+                    onClick={() => void createLocalKnowledgeBase()}
+                  >
+                    {knowledgeBaseBusy ? t('loading') : t('createKnowledgeBase')}
+                  </Button>
+                  <div className="skill-list">
+                    <h2>{t('knowledgeBases')}</h2>
+                    {knowledgeBases.length === 0 ? (
+                      <p className="settings-description">{t('noKnowledgeBases')}</p>
+                    ) : knowledgeBases.map((knowledgeBase) => (
+                      <article className="skill-card" key={knowledgeBase.id}>
+                        <div className="skill-card-header">
+                          <div>
+                            <h3>{knowledgeBase.name}</h3>
+                            <small className={knowledgeBase.status === 'ready' ? 'resource-effective' : 'resource-unavailable'}>
+                              {t(`knowledgeBaseStatus_${knowledgeBase.status.replace('-', '_')}`)}
+                            </small>
+                          </div>
+                          <div className="skill-import-actions">
+                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void renameKnowledgeBase(knowledgeBase)}>
+                              {t('renameKnowledgeBase')}
+                            </Button>
+                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void refreshLocalKnowledgeBase(knowledgeBase)}>
+                              {t('refreshKnowledgeBase')}
+                            </Button>
+                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void removeLocalKnowledgeBase(knowledgeBase)}>
+                              {t('removeKnowledgeBase')}
+                            </Button>
+                          </div>
+                        </div>
+                        <Field label={t('knowledgeBaseMode')}>
+                          <Select
+                            value={knowledgeBase.mode}
+                            disabled={knowledgeBaseBusy || interactionLocked}
+                            onChange={(_, data) => void changeKnowledgeBaseMode(knowledgeBase, data.value as KnowledgeBaseMode)}
+                          >
+                            <option value="rg">{t('knowledgeBaseModeRg')}</option>
+                            <option value="rag">{t('knowledgeBaseModeRag')}</option>
+                          </Select>
+                        </Field>
+                        {knowledgeBase.mode === 'rag' && (
+                          <p className="settings-description">
+                            {t('embeddingProvider')}: {t('localEmbeddingProvider')} · {knowledgeBase.embeddingProvider?.modelId}
+                          </p>
+                        )}
+                        <dl className="skill-metadata">
+                          <dt>{t('knowledgeBasePath')}</dt><dd>{knowledgeBase.source.path}</dd>
+                          <dt>{t('knowledgeBaseFiles')}</dt><dd>{knowledgeBase.fileCount}</dd>
+                          <dt>{t('knowledgeBaseSize')}</dt><dd>{formatBytes(knowledgeBase.totalBytes)}</dd>
+                          <dt>{t('knowledgeBaseIndexedAt')}</dt><dd>{knowledgeBase.indexedAt ? new Date(knowledgeBase.indexedAt).toLocaleString() : t('notAvailable')}</dd>
+                        </dl>
+                        {knowledgeBase.error && <p className="dialog-error">{knowledgeBase.error}</p>}
+                      </article>
+                    ))}
+                  </div>
+                  {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
                 </section>
               )}
               {settingsTab === 'language' && (
@@ -5405,7 +5729,7 @@ export function App(): React.JSX.Element {
                 {installedSkills.length === 0 ? (
                   <p className="status">{t('noInstalledSkills')}</p>
                 ) : installedSkills.map((skill) => {
-                  const effective = resolveEffectiveSkillIds(
+                  const effective = resolveEffectiveResourceIds(
                     config.defaultSkillIds,
                     activeProject?.skillSelection,
                     conversationSkillDraft,
@@ -5455,6 +5779,69 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
+      <Dialog
+        open={conversationKnowledgeBasesOpen}
+        onOpenChange={(_, data) => setConversationKnowledgeBasesOpen(data.open)}
+      >
+        <DialogSurface className="skill-selection-dialog">
+          <DialogBody>
+            <DialogTitle>{t('knowledgeBaseSelection')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <p className="settings-description">{t('conversationKnowledgeBaseSelectionDescription')}</p>
+              <section className="skill-selection-list">
+                {knowledgeBases.length === 0 ? (
+                  <p className="status">{t('noKnowledgeBases')}</p>
+                ) : knowledgeBases.map((knowledgeBase) => {
+                  const effective = resolveEffectiveResourceIds(
+                    config.defaultKnowledgeBaseIds,
+                    activeProject?.knowledgeBaseSelection,
+                    conversationKnowledgeBaseDraft,
+                  ).includes(knowledgeBase.id)
+                  return (
+                    <div className="skill-selection-row" key={knowledgeBase.id}>
+                      <div>
+                        <strong>{knowledgeBase.name}</strong>
+                        <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
+                        <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
+                          {t(effective ? 'knowledgeBaseEffective' : 'knowledgeBaseNotEffective')}
+                        </small>
+                      </div>
+                      <Select
+                        aria-label={t('knowledgeBaseSelection')}
+                        disabled={interactionLocked || knowledgeBaseBusy}
+                        value={resourceSelectionMode(conversationKnowledgeBaseDraft, knowledgeBase.id)}
+                        onChange={(_, data) => setConversationKnowledgeBaseDraft((current) => updateResourceSelection(
+                          current,
+                          knowledgeBase.id,
+                          data.value as ResourceSelectionMode,
+                        ))}
+                      >
+                        <option value="inherit">{t('knowledgeBaseSelectionInherit')}</option>
+                        <option value="enabled">{t('knowledgeBaseSelectionEnabled')}</option>
+                        <option value="disabled">{t('knowledgeBaseSelectionDisabled')}</option>
+                      </Select>
+                    </div>
+                  )
+                })}
+              </section>
+              {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" disabled={knowledgeBaseBusy} onClick={() => setConversationKnowledgeBasesOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={interactionLocked || knowledgeBaseBusy}
+                onClick={() => void saveConversationKnowledgeBases()}
+              >
+                {knowledgeBaseBusy ? t('saving') : t('save')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
       <Dialog open={projectSettingsOpen} onOpenChange={(_, data) => setProjectSettingsOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
@@ -5469,7 +5856,7 @@ export function App(): React.JSX.Element {
                 <Tab value="command">{t('globalTabCommand')}</Tab>
                 <Tab value="context">{t('globalTabContext')}</Tab>
                 <Tab value="skills">{t('skills')}</Tab>
-                <Tab disabled value="knowledgeBases">{t('knowledgeBaseUnavailable')}</Tab>
+                <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
               </TabList>
               {projectSettingsTab === 'model' && (
                 <>
@@ -5562,7 +5949,7 @@ export function App(): React.JSX.Element {
                   {installedSkills.length === 0 ? (
                     <p className="status">{t('noInstalledSkills')}</p>
                   ) : installedSkills.map((skill) => {
-                    const effective = resolveEffectiveSkillIds(config.defaultSkillIds, projectSkillDraft).includes(skill.id)
+                    const effective = resolveEffectiveResourceIds(config.defaultSkillIds, projectSkillDraft).includes(skill.id)
                     return (
                       <div className="skill-selection-row" key={skill.id}>
                         <div>
@@ -5585,6 +5972,41 @@ export function App(): React.JSX.Element {
                           <option value="inherit">{t('skillSelectionInherit')}</option>
                           <option value="enabled">{t('skillSelectionEnabled')}</option>
                           <option value="disabled">{t('skillSelectionDisabled')}</option>
+                        </Select>
+                      </div>
+                    )
+                  })}
+                </section>
+              )}
+              {projectSettingsTab === 'knowledgeBases' && (
+                <section className="skill-selection-list">
+                  <p className="settings-description">{t('projectKnowledgeBaseSelectionDescription')}</p>
+                  {knowledgeBases.length === 0 ? (
+                    <p className="status">{t('noKnowledgeBases')}</p>
+                  ) : knowledgeBases.map((knowledgeBase) => {
+                    const effective = resolveEffectiveResourceIds(config.defaultKnowledgeBaseIds, projectKnowledgeBaseDraft).includes(knowledgeBase.id)
+                    return (
+                      <div className="skill-selection-row" key={knowledgeBase.id}>
+                        <div>
+                          <strong>{knowledgeBase.name}</strong>
+                          <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
+                          <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
+                            {t(effective ? 'knowledgeBaseEffective' : 'knowledgeBaseNotEffective')}
+                          </small>
+                        </div>
+                        <Select
+                          aria-label={t('knowledgeBaseSelection')}
+                          disabled={interactionLocked}
+                          value={resourceSelectionMode(projectKnowledgeBaseDraft, knowledgeBase.id)}
+                          onChange={(_, data) => setProjectKnowledgeBaseDraft((current) => updateResourceSelection(
+                            current,
+                            knowledgeBase.id,
+                            data.value as ResourceSelectionMode,
+                          ))}
+                        >
+                          <option value="inherit">{t('knowledgeBaseSelectionInherit')}</option>
+                          <option value="enabled">{t('knowledgeBaseSelectionEnabled')}</option>
+                          <option value="disabled">{t('knowledgeBaseSelectionDisabled')}</option>
                         </Select>
                       </div>
                     )
