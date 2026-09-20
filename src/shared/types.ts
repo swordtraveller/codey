@@ -488,6 +488,26 @@ export type SkillImportPreview = {
   candidates: SkillImportCandidate[]
 }
 
+export type McpStdioServerConfig = {
+  id: string
+  name: string
+  enabled: boolean
+  command: string
+  args: string[]
+  env: Record<string, string>
+  cwdMode: 'project-root' | 'custom'
+  customCwd?: string
+}
+
+export type McpServerTestResult = {
+  status: 'ok' | 'error'
+  serverName?: string
+  serverVersion?: string
+  toolNames: string[]
+  stderr?: string
+  error?: string
+}
+
 export type AppConfig = {
   /** Legacy flat list — kept only for read-migration into the four-layer
    *  structure below; always empty after migration. */
@@ -517,6 +537,8 @@ export type AppConfig = {
   defaultSkillIds: string[]
   /** Knowledge bases enabled by default for every project. */
   defaultKnowledgeBaseIds: string[]
+  /** User-managed local MCP servers. Enabled entries are started for each agent run. */
+  mcpServers: McpStdioServerConfig[]
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -538,6 +560,7 @@ export const defaultAppConfig: AppConfig = {
   agentLimitsGlobal: { ...defaultAgentLimitsConfig },
   defaultSkillIds: [],
   defaultKnowledgeBaseIds: [],
+  mcpServers: [],
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>

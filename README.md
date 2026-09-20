@@ -28,6 +28,18 @@ An open, functional desktop agent app for conversation, work and coding.
 
 <img src="docs/assets/codey_rhai_screenshot.png" style="width: 60dvw; height: auto;" />
 
+## MCP and agent-lsp
+
+Codey can connect to user-installed MCP servers over stdio. To use Python language intelligence through [agent-lsp](https://github.com/blackwell-systems/agent-lsp):
+
+1. Install `agent-lsp` using its [official instructions](https://www.agent-lsp.com/getting-started/installation/) and ensure `agent-lsp` is on `PATH`. One supported option is `npm install -g @blackwell-systems/agent-lsp`.
+2. Install a Python language server, for example `npm install -g pyright`.
+3. Run `agent-lsp doctor` to verify the local setup.
+4. In Codey, open **Settings → MCP**, choose **Add agent-lsp**, test the connection, enable the server, and save settings.
+5. Open a Python project and ask the Agent to use the available language-intelligence tools.
+
+The preset uses the `agent-lsp` command with no arguments, so agent-lsp auto-detects language servers on `PATH`. Use the arguments field for an explicit server selection such as `python:pyright-langserver,--stdio`.
+
 ## Development
 
 ```bash

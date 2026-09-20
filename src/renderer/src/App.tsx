@@ -99,6 +99,7 @@ import {
   type NotificationSettings,
 } from '../../shared/types'
 import { UnreadBadge } from './components/UnreadBadge'
+import { McpSettings } from './components/McpSettings'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
@@ -2309,7 +2310,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
@@ -4725,6 +4726,7 @@ export function App(): React.JSX.Element {
                 <Tab value="global">{t('globalSettings')}</Tab>
                 <Tab value="skills">{t('skills')}</Tab>
                 <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
+                <Tab value="mcp">{t('mcp')}</Tab>
                 <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
                 <Tab value="notifications">{t('notifications')}</Tab>
@@ -5523,6 +5525,14 @@ export function App(): React.JSX.Element {
                   </div>
                   {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
                 </section>
+              )}
+              {settingsTab === 'mcp' && (
+                <McpSettings
+                  servers={configDraft.mcpServers}
+                  onChange={(mcpServers) => setConfigDraft((current) => ({ ...current, mcpServers }))}
+                  disabled={interactionLocked}
+                  projectRoot={activeProject?.folders[0]?.path}
+                />
               )}
               {settingsTab === 'language' && (
               <section className="settings-group">

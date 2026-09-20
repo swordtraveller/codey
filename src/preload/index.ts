@@ -10,6 +10,8 @@ import type {
   DevelopmentProgressState,
   ImageAttachment,
   MediaAttachment,
+  McpServerTestResult,
+  McpStdioServerConfig,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -51,6 +53,8 @@ contextBridge.exposeInMainWorld(
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    testMcpServer: (config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult> =>
+      ipcRenderer.invoke('mcp:test-stdio-server', config, projectRoot),
     fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
     testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>

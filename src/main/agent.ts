@@ -27,6 +27,7 @@ import { createAgentTools, runAgentTool, type ToolCall } from './tools'
 import type { CommandExecutorRuntime } from './command-executor'
 import { createSkillTools, runSkillTool, skillInstructions } from './skills'
 import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
+import { executeAgentToolProviders, type AgentToolProvider } from './agent-tool-provider'
 
 type ResponseMessage = {
   content?: string | null
@@ -708,6 +709,8 @@ export async function develop(
     enabledSkills?: InstalledSkill[]
     /** Immutable snapshot of knowledge bases explicitly enabled by the user. */
     enabledKnowledgeBases?: KnowledgeBase[]
+    /** MCP tools connected for this request. */
+    mcpProvider?: AgentToolProvider
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -728,14 +731,27 @@ export async function develop(
   const unlockedToolsets = new Set(runtime?.unlockedToolsets ?? [])
   const enabledSkills = runtime?.enabledSkills ?? []
   const enabledKnowledgeBases = runtime?.enabledKnowledgeBases ?? []
+  const externalToolProviders: AgentToolProvider[] = [
+    {
+      tools: createKnowledgeBaseTools(enabledKnowledgeBases),
+      execute: (toolCall, signal) => runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, signal),
+    },
+    {
+      tools: createSkillTools(enabledSkills, project),
+      execute: (toolCall, signal) => runSkillTool(enabledSkills, project, toolCall, signal),
+    },
+    ...(runtime?.mcpProvider ? [runtime.mcpProvider] : []),
+  ]
   const buildTools = (): object[] => [
-    ...createKnowledgeBaseTools(enabledKnowledgeBases),
-    ...createSkillTools(enabledSkills, project),
+    ...externalToolProviders.flatMap((provider) => provider.tools),
     ...createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets]),
   ]
   let tools = buildTools()
   const projectDetections = await detectProjectFolders(project.folders)
   const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases)
+  if (runtime?.mcpProvider?.instructions) {
+    systemMessage.content = `${systemMessage.content ?? ''}\n\n${runtime.mcpProvider.instructions}`
+  }
   const history = toApiMessages(agentMessages)
   if (runtime?.latestUserMessageId && !history.some((message) =>
     message.id === runtime.latestUserMessageId && message.role === 'user'
@@ -1011,11 +1027,8 @@ export async function develop(
           : runtime?.commandRuntime
         try {
           throwIfAborted(runtime?.signal)
-          const knowledgeBaseResult = await runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, runtime?.signal)
-          const skillResult = knowledgeBaseResult === undefined
-            ? await runSkillTool(enabledSkills, project, toolCall, runtime?.signal)
-            : undefined
-          content = knowledgeBaseResult ?? skillResult ?? await runAgentTool(
+          const providerResult = await executeAgentToolProviders(externalToolProviders, toolCall, runtime?.signal)
+          content = providerResult ?? await runAgentTool(
             project,
             toolCall,
             writtenFiles,

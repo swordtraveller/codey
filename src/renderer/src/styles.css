@@ -2134,6 +2134,21 @@ h1 {
   min-width: 180px;
 }
 
+.mcp-server-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--colorNeutralStroke2, #ddd);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.mcp-server-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .group-member-list {
   display: flex;
   flex-direction: column;
