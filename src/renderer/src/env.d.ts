@@ -23,6 +23,12 @@ import type {
   ShellDetectionResult,
   Wsl2ManualConfig,
   Project,
+  InstalledSkill,
+  KnowledgeBase,
+  KnowledgeBaseMode,
+  EmbeddingProviderConfig,
+  SkillImportPreview,
+  ResourceSelectionOverride,
   PerformanceTraceEvent,
   PerformanceTraceFile,
   PerformanceTraceStatus,
@@ -56,6 +62,16 @@ declare global {
       testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
       listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
       getProjects(): Promise<Project[]>
+      listSkills(): Promise<InstalledSkill[]>
+      previewGitHubSkill(url: string): Promise<SkillImportPreview>
+      installSkillPreview(previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill>
+      removeSkill(skillId: string): Promise<void>
+      listKnowledgeBases(): Promise<KnowledgeBase[]>
+      chooseKnowledgeBaseDirectory(): Promise<string | null>
+      createKnowledgeBase(input: { name?: string; directoryPath: string; mode: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase>
+      updateKnowledgeBase(id: string, patch: { name?: string; mode?: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase>
+      refreshKnowledgeBase(id: string): Promise<KnowledgeBase>
+      removeKnowledgeBase(id: string): Promise<void>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
       approveBridgeRequest(channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]>
@@ -70,6 +86,8 @@ declare global {
         projectId: string,
         contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
+      setProjectSkillSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
+      setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
       setProjectArchived(projectId: string, archived: boolean): Promise<Project>
       createConversation(projectId: string): Promise<Project>
       setConversationModelConfig(
@@ -81,6 +99,16 @@ declare global {
         projectId: string,
         conversationId: string,
         contextConfig: ContextManagementConfig | null,
+      ): Promise<Project>
+      setConversationSkillSelection(
+        projectId: string,
+        conversationId: string,
+        selection: ResourceSelectionOverride,
+      ): Promise<Project>
+      setConversationKnowledgeBaseSelection(
+        projectId: string,
+        conversationId: string,
+        selection: ResourceSelectionOverride,
       ): Promise<Project>
       setConversationAgentLimits(
         projectId: string,

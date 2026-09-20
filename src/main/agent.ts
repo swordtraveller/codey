@@ -9,6 +9,8 @@ import type {
   ContextMetrics,
   DevelopmentProgressUpdate,
   DevelopmentTimelineItem,
+  InstalledSkill,
+  KnowledgeBase,
   ModelConfig,
   Project,
   RuntimeModelConfig,
@@ -23,6 +25,8 @@ import { truncateOutput } from './sandbox'
 import { detectProjectFolders, formatProjectDetections } from './project-detection'
 import { createAgentTools, runAgentTool, type ToolCall } from './tools'
 import type { CommandExecutorRuntime } from './command-executor'
+import { createSkillTools, runSkillTool, skillInstructions } from './skills'
+import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
 
 type ResponseMessage = {
   content?: string | null
@@ -616,7 +620,13 @@ export async function requestCompletion(
   throw summary
 }
 
-export function createAgentSystemMessage(project: Project, networkAccessEnabled = false, contextConfig?: ContextManagementConfig): ContextMessage {
+export function createAgentSystemMessage(
+  project: Project,
+  networkAccessEnabled = false,
+  contextConfig?: ContextManagementConfig,
+  enabledSkills: InstalledSkill[] = [],
+  enabledKnowledgeBases: KnowledgeBase[] = [],
+): ContextMessage {
   const customActive = contextConfig?.customStrategyEnabled === true && Boolean(contextConfig.customStrategyScript?.trim())
   const strategyPrompt = customActive
     ? (contextConfig?.customStrategyPrompt?.trim() || '')
@@ -640,6 +650,8 @@ export function createAgentSystemMessage(project: Project, networkAccessEnabled 
         : 'Network access is disabled. Do not call web_search or web_open.',
       'Every tool is restricted to the project sandbox. Do not access .git, agent_venv, or cache directories directly; use git_* tools for version control.',
       'Git tools only operate on attached folders that are repository roots. git_add and git_unstage require explicit file paths; git_unstage only removes selected files from the index and preserves working tree contents; git_commit requires staged changes.',
+      ...(skillInstructions(enabledSkills) ? ['', skillInstructions(enabledSkills)] : []),
+      ...(knowledgeBaseInstructions(enabledKnowledgeBases) ? ['', knowledgeBaseInstructions(enabledKnowledgeBases)] : []),
       'Do not run tests unless the user asks. After completing changes, give a concise summary.',
     ].join('\n'),
   }
@@ -652,10 +664,12 @@ export function buildAgentContext(
   agentMessages: AgentContextMessage[],
   networkAccessEnabled = false,
   customStrategy?: { allow: boolean; latestUserMessageId?: string; roundId?: string; roundCount?: number },
+  enabledSkills: InstalledSkill[] = [],
+  enabledKnowledgeBases: KnowledgeBase[] = [],
 ): ContextResult {
   return manageContext(
-    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig), ...toApiMessages(agentMessages)],
-    createAgentTools(project, networkAccessEnabled),
+    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases), ...toApiMessages(agentMessages)],
+    [...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
     config,
     contextConfig,
     {
@@ -690,6 +704,10 @@ export async function develop(
      *  peers are only registered when their keyword appears here. */
     unlockedToolsets?: string[]
     onToolsetUnlocked?: (keyword: string) => void
+    /** Immutable snapshot of skills explicitly enabled by the user for this request. */
+    enabledSkills?: InstalledSkill[]
+    /** Immutable snapshot of knowledge bases explicitly enabled by the user. */
+    enabledKnowledgeBases?: KnowledgeBase[]
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -708,9 +726,16 @@ export async function develop(
   // runtime; the tool list is rebuilt for every model request so unlocked
   // tools appear from the next request onward.
   const unlockedToolsets = new Set(runtime?.unlockedToolsets ?? [])
-  let tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets])
+  const enabledSkills = runtime?.enabledSkills ?? []
+  const enabledKnowledgeBases = runtime?.enabledKnowledgeBases ?? []
+  const buildTools = (): object[] => [
+    ...createKnowledgeBaseTools(enabledKnowledgeBases),
+    ...createSkillTools(enabledSkills, project),
+    ...createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets]),
+  ]
+  let tools = buildTools()
   const projectDetections = await detectProjectFolders(project.folders)
-  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig)
+  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases)
   const history = toApiMessages(agentMessages)
   if (runtime?.latestUserMessageId && !history.some((message) =>
     message.id === runtime.latestUserMessageId && message.role === 'user'
@@ -986,7 +1011,11 @@ export async function develop(
           : runtime?.commandRuntime
         try {
           throwIfAborted(runtime?.signal)
-          content = await runAgentTool(
+          const knowledgeBaseResult = await runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, runtime?.signal)
+          const skillResult = knowledgeBaseResult === undefined
+            ? await runSkillTool(enabledSkills, project, toolCall, runtime?.signal)
+            : undefined
+          content = knowledgeBaseResult ?? skillResult ?? await runAgentTool(
             project,
             toolCall,
             writtenFiles,
@@ -998,7 +1027,7 @@ export async function develop(
                 // unlocked tools appear in the very next request; the runtime
                 // callback additionally persists the unlock.
                 unlockedToolsets.add(keyword)
-                tools = createAgentTools(project, networkAccessEnabled, runtime?.commandExecution, runtime?.shellDetection, [...unlockedToolsets])
+                tools = buildTools()
                 runtime?.onToolsetUnlocked?.(keyword)
               },
               onReviewTrail: (toolCallId: string, steps: CommandReviewStep[]): void => {

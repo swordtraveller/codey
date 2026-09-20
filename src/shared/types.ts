@@ -376,6 +376,118 @@ export const defaultCommandExecutionConfig: CommandExecutionConfig = {
   review: null,
 }
 
+
+export type ResourceSelectionOverride = {
+  enabledIds: string[]
+  disabledIds: string[]
+}
+
+export const emptyResourceSelectionOverride: ResourceSelectionOverride = {
+  enabledIds: [],
+  disabledIds: [],
+}
+
+export type KnowledgeBaseMode = 'rg' | 'rag'
+
+export type KnowledgeBaseStatus = 'ready' | 'indexing' | 'error' | 'model-required'
+
+export type LocalEmbeddingProviderConfig = {
+  kind: 'local'
+  modelId: string
+}
+
+export type RemoteEmbeddingProviderConfig = {
+  kind: 'remote'
+  providerId: string
+  modelId: string
+}
+
+export type EmbeddingProviderConfig = LocalEmbeddingProviderConfig | RemoteEmbeddingProviderConfig
+
+export const defaultLocalEmbeddingModelId = 'Xenova/bge-small-zh-v1.5'
+
+export type KnowledgeBase = {
+  id: string
+  name: string
+  source: { kind: 'local-directory'; path: string }
+  mode: KnowledgeBaseMode
+  embeddingProvider: EmbeddingProviderConfig | null
+  status: KnowledgeBaseStatus
+  fileCount: number
+  totalBytes: number
+  createdAt: string
+  updatedAt: string
+  indexedAt: string | null
+  error?: string
+}
+
+export type KnowledgeBaseSearchResult = {
+  knowledgeBaseId: string
+  knowledgeBaseName: string
+  sourcePath: string
+  relativePath: string
+  lineStart?: number
+  lineEnd?: number
+  content: string
+  score?: number
+}
+
+export type KnowledgeBaseModelProgress = {
+  knowledgeBaseId?: string
+  modelId: string
+  status: 'downloading' | 'ready' | 'error'
+  progress?: number
+  file?: string
+  error?: string
+}
+
+export type SkillToolRuntime = 'node' | 'python'
+
+export type SkillTool = {
+  id: string
+  name: string
+  description: string
+  runtime: SkillToolRuntime
+  entry: string
+  timeoutMs: number
+}
+
+export type InstalledSkill = {
+  id: string
+  name: string
+  description: string
+  sourceUrl: string
+  sourceOwner: string
+  sourceRepo: string
+  sourcePath: string
+  sourceCommitSha: string
+  packageSha256: string
+  installedAt: string
+  instructions: string
+  tools: SkillTool[]
+}
+
+export type SkillImportCandidate = {
+  id: string
+  name: string
+  runtime: SkillToolRuntime
+  entry: string
+  description: string
+}
+
+export type SkillImportPreview = {
+  previewId: string
+  skillId: string
+  name: string
+  description: string
+  sourceUrl: string
+  sourceCommitSha: string
+  sourcePath: string
+  fileCount: number
+  totalBytes: number
+  candidates: SkillImportCandidate[]
+}
+
 export type AppConfig = {
   /** Legacy flat list — kept only for read-migration into the four-layer
    *  structure below; always empty after migration. */
@@ -401,6 +513,10 @@ export type AppConfig = {
   commandExecutionGlobal: CommandExecutionConfig
   /** Global agent-limits defaults; projects and conversations may override. */
   agentLimitsGlobal: AgentLimitsConfig
+  /** Skills enabled by default for every project. Users manage this list explicitly. */
+  defaultSkillIds: string[]
+  /** Knowledge bases enabled by default for every project. */
+  defaultKnowledgeBaseIds: string[]
 }
 
 export const defaultAppConfig: AppConfig = {
@@ -420,6 +536,8 @@ export const defaultAppConfig: AppConfig = {
   commandReviewGlobal: { ...defaultCommandReviewConfig },
   commandExecutionGlobal: { ...defaultCommandExecutionConfig, review: null },
   agentLimitsGlobal: { ...defaultAgentLimitsConfig },
+  defaultSkillIds: [],
+  defaultKnowledgeBaseIds: [],
 }
 
 export type ModelConfigSnapshot = Omit<ModelConfig, 'apiKey'>
@@ -675,6 +793,10 @@ export type Conversation = {
   /** Hidden toolsets unlocked in this conversation (e.g. ["python"]); the
    *  matching tools are included in every model request once unlocked. */
   unlockedToolsets?: string[]
+  /** Explicit per-conversation skill deltas over the project selection. */
+  skillSelection: ResourceSelectionOverride
+  /** Explicit per-conversation knowledge-base deltas over the project selection. */
+  knowledgeBaseSelection: ResourceSelectionOverride
   /** Agent-limits override; null = inherit the project default. */
   agentLimits: AgentLimitsConfig | null
   /** Full command-execution override; null = inherit the project default. */
@@ -704,6 +826,10 @@ export type Project = {
   commandExecutionDefault: CommandExecutionConfig | null
   /** Project-level agent-limits default; null = inherit the global default. */
   agentLimitsDefault: AgentLimitsConfig | null
+  /** Explicit project skill deltas over global defaults. */
+  skillSelection: ResourceSelectionOverride
+  /** Explicit project knowledge-base deltas over global defaults. */
+  knowledgeBaseSelection: ResourceSelectionOverride
   folders: ProjectFolder[]
   pythonEnvironmentFolderId: string | null
   conversations: Conversation[]

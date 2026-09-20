@@ -19,6 +19,12 @@ import type {
   ShellDetectionResult,
   Wsl2ManualConfig,
   Project,
+  InstalledSkill,
+  KnowledgeBase,
+  KnowledgeBaseMode,
+  EmbeddingProviderConfig,
+  SkillImportPreview,
+  ResourceSelectionOverride,
   PerformanceTraceEvent,
   PerformanceTraceFile,
   PerformanceTraceStatus,
@@ -54,6 +60,19 @@ contextBridge.exposeInMainWorld(
     listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
       ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),
+    previewGitHubSkill: (url: string): Promise<SkillImportPreview> => ipcRenderer.invoke('skills:preview-github', url),
+    installSkillPreview: (previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill> =>
+      ipcRenderer.invoke('skills:install-preview', previewId, selectedCandidateIds),
+    removeSkill: (skillId: string): Promise<void> => ipcRenderer.invoke('skills:remove', skillId),
+    listKnowledgeBases: (): Promise<KnowledgeBase[]> => ipcRenderer.invoke('knowledge-bases:list'),
+    chooseKnowledgeBaseDirectory: (): Promise<string | null> => ipcRenderer.invoke('knowledge-bases:choose-directory'),
+    createKnowledgeBase: (input: { name?: string; directoryPath: string; mode: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke('knowledge-bases:create', input),
+    updateKnowledgeBase: (id: string, patch: { name?: string; mode?: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke('knowledge-bases:update', id, patch),
+    refreshKnowledgeBase: (id: string): Promise<KnowledgeBase> => ipcRenderer.invoke('knowledge-bases:refresh', id),
+    removeKnowledgeBase: (id: string): Promise<void> => ipcRenderer.invoke('knowledge-bases:remove', id),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
     approveBridgeRequest: (channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:approve', channelId, requestId, devicePublicKey),
@@ -70,6 +89,10 @@ contextBridge.exposeInMainWorld(
       projectId: string,
       contextConfig: ContextManagementConfig | null,
     ) => ipcRenderer.invoke('projects:set-context-config', projectId, contextConfig),
+    setProjectSkillSelection: (projectId: string, selection: ResourceSelectionOverride): Promise<Project> =>
+      ipcRenderer.invoke('projects:set-skill-selection', projectId, selection),
+    setProjectKnowledgeBaseSelection: (projectId: string, selection: ResourceSelectionOverride): Promise<Project> =>
+      ipcRenderer.invoke('projects:set-knowledge-base-selection', projectId, selection),
     setProjectArchived: (projectId: string, archived: boolean) =>
       ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
@@ -93,6 +116,26 @@ contextBridge.exposeInMainWorld(
       projectId,
       conversationId,
       contextConfig,
+    ),
+    setConversationSkillSelection: (
+      projectId: string,
+      conversationId: string,
+      selection: ResourceSelectionOverride,
+    ): Promise<Project> => ipcRenderer.invoke(
+      'conversations:set-skill-selection',
+      projectId,
+      conversationId,
+      selection,
+    ),
+    setConversationKnowledgeBaseSelection: (
+      projectId: string,
+      conversationId: string,
+      selection: ResourceSelectionOverride,
+    ): Promise<Project> => ipcRenderer.invoke(
+      'conversations:set-knowledge-base-selection',
+      projectId,
+      conversationId,
+      selection,
     ),
     setConversationAgentLimits: (
       projectId: string,

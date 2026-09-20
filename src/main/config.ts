@@ -53,6 +53,8 @@ type StoredAppConfig = {
   commandReview?: Partial<CommandReviewConfig>
   agentLimits?: Partial<AgentLimitsConfig>
   commandExecutionGlobal?: Partial<CommandExecutionConfig> | null
+  defaultSkillIds?: string[]
+  defaultKnowledgeBaseIds?: string[]
 }
 
 type LegacyStoredConfig = LegacyStoredModel & {
@@ -65,6 +67,13 @@ function getConfigPath(): string {
 
 function isAppLanguage(value: unknown): value is AppLanguage {
   return value === 'system' || value === 'en' || value === 'zh-CN'
+}
+
+function normalizeSkillIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value
+    .filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
+    .map((entry) => entry.trim()))]
 }
 
 function toOptionalTokenCount(value: unknown): number | undefined {
@@ -356,6 +365,8 @@ export async function readConfig(): Promise<AppConfig> {
         commandReviewGlobal,
         agentLimitsGlobal,
         commandExecutionGlobal,
+        defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+        defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
       }
       const legacyMargin = stored.contextManagement?.safeOutputMargin
       const needsMigration = layers.migrated ||
@@ -368,6 +379,8 @@ export async function readConfig(): Promise<AppConfig> {
         stored.commandReview === undefined ||
         stored.agentLimits === undefined ||
         stored.commandExecutionGlobal === undefined ||
+        stored.defaultSkillIds === undefined ||
+        stored.defaultKnowledgeBaseIds === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || (stored.modelConfigs ?? []).some((model) =>
           !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -393,6 +406,8 @@ export async function readConfig(): Promise<AppConfig> {
           : normalizeCommandReviewConfig(stored.commandReview),
         agentLimitsGlobal: readAgentLimitsGlobal(stored),
         commandExecutionGlobal: readCommandExecutionGlobal(stored),
+        defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+        defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
       }
     }
 
@@ -416,6 +431,8 @@ export async function readConfig(): Promise<AppConfig> {
         : normalizeCommandReviewConfig(stored.commandReview),
       agentLimitsGlobal: readAgentLimitsGlobal(stored),
       commandExecutionGlobal: readCommandExecutionGlobal(stored),
+      defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
+      defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
     }
     await writeConfig(migrated)
     return migrated
@@ -476,6 +493,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     commandReviewGlobal,
     agentLimitsGlobal,
     commandExecutionGlobal,
+    defaultSkillIds: normalizeSkillIds(config.defaultSkillIds),
+    defaultKnowledgeBaseIds: normalizeSkillIds(config.defaultKnowledgeBaseIds),
   }
   await writeConfig(normalized)
   return normalized
