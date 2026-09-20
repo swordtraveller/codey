@@ -82,7 +82,7 @@ import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationMod
 import { fetchModelCapabilities } from './model-capabilities'
 import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
-import { createMcpToolProvider, testMcpStdioServer } from './mcp/tool-provider'
+import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
 import { buildRunCommandTool, createAgentTools } from './tools'
 import {
   exportPerformanceTraces,
@@ -377,10 +377,10 @@ const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean 
   { prefix: 'git_', toolset: 'git', hidden: true },
 ]
 
-/** Builds the read-only tool help snapshot for the help viewer, from the live
- *  tool definitions. The complete set is shown: network access on, an enabled
- *  command-execution sample, and every hidden toolset unlocked. */
-function buildToolHelpSnapshot(): ToolHelpSnapshot {
+/** Builds the read-only tool help snapshot from live built-in definitions and
+ *  tools discovered from enabled local MCP servers. The built-in catalog uses
+ *  representative settings and includes every hidden toolset. */
+async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot> {
   const sampleProject: Project = {
     id: 'sample',
     name: 'Sample',
@@ -408,17 +408,41 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
   ) as Array<{
     function: { name?: string; description?: string; parameters?: unknown }
   }>
+  const builtinEntries = tools
+    .filter((tool) => typeof tool.function.name === 'string')
+    .map((tool) => ({
+      name: tool.function.name ?? '',
+      description: tool.function.description ?? '',
+      parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
+      returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+      source: 'builtin' as const,
+      toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
+      toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
+    }))
+  const appConfig = await readConfig()
+  const mcpTools = await listMcpToolDefinitions(
+    appConfig.mcpServers,
+    projectRoot,
+    undefined,
+    (server, error) => log.warn('mcp.help.connect.failed', {
+      serverId: server.id,
+      serverName: server.name,
+      error,
+    }),
+  )
   return {
-    entries: tools
-      .filter((tool) => typeof tool.function.name === 'string')
-      .map((tool) => ({
-        name: tool.function.name ?? '',
-        description: tool.function.description ?? '',
-        parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
-        returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
-        toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
-        toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
+    entries: [
+      ...builtinEntries,
+      ...mcpTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: JSON.stringify(tool.parameters, null, 2),
+        returns: 'A JSON string returned by the configured MCP server.',
+        source: 'mcp' as const,
+        toolset: tool.serverName,
+        toolsetHidden: false,
       })),
+    ],
   }
 }
 
@@ -1454,7 +1478,7 @@ app.whenReady().then(() => {
   ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
   ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
   ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
-  ipcMain.handle('tools:help-snapshot', () => buildToolHelpSnapshot())
+  ipcMain.handle('tools:help-snapshot', (_event, projectRoot?: string) => buildToolHelpSnapshot(projectRoot))
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)

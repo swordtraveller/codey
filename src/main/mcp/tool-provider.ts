@@ -8,6 +8,20 @@ type ConnectedServer = {
   client: McpStdioClient
 }
 
+export type McpToolDefinition = {
+  name: string
+  serverId: string
+  serverName: string
+  originalName: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+type DiscoveredMcpTools = {
+  connected: ConnectedServer[]
+  definitions: Array<McpToolDefinition & { server: ConnectedServer }>
+}
+
 function safePart(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'tool'
 }
@@ -27,20 +41,14 @@ function modelToolName(server: McpStdioServerConfig, toolName: string, used: Set
   return candidate
 }
 
-export function resolveMcpCwd(config: McpStdioServerConfig, projectRoot?: string): string | undefined {
-  if (config.cwdMode === 'custom') return config.customCwd
-  return projectRoot
-}
-
-export async function createMcpToolProvider(
+async function discoverMcpTools(
   configs: McpStdioServerConfig[],
   projectRoot: string | undefined,
   signal?: AbortSignal,
   onConnectionError?: (config: McpStdioServerConfig, error: unknown) => void,
-): Promise<AgentToolProvider> {
+): Promise<DiscoveredMcpTools> {
   const connected: ConnectedServer[] = []
-  const tools: object[] = []
-  const routes = new Map<string, { server: ConnectedServer; originalName: string }>()
+  const definitions: DiscoveredMcpTools['definitions'] = []
   const usedNames = new Set<string>()
 
   for (const config of configs.filter((entry) => entry.enabled)) {
@@ -52,14 +60,14 @@ export async function createMcpToolProvider(
       for (const tool of await client.listTools(signal)) {
         const name = modelToolName(config, tool.name, usedNames)
         usedNames.add(name)
-        routes.set(name, { server, originalName: tool.name })
-        tools.push({
-          type: 'function',
-          function: {
-            name,
-            description: `[MCP: ${config.name}] ${tool.description ?? tool.name}`,
-            parameters: tool.inputSchema,
-          },
+        definitions.push({
+          name,
+          serverId: config.id,
+          serverName: config.name,
+          originalName: tool.name,
+          description: `[MCP: ${config.name}] ${tool.description ?? tool.name}`,
+          parameters: tool.inputSchema,
+          server,
         })
       }
     } catch (error) {
@@ -67,6 +75,43 @@ export async function createMcpToolProvider(
       onConnectionError?.(config, error)
     }
   }
+
+  return { connected, definitions }
+}
+
+async function closeConnectedServers(connected: ConnectedServer[]): Promise<void> {
+  await Promise.allSettled(connected.map(({ client }) => client.close()))
+}
+
+export function resolveMcpCwd(config: McpStdioServerConfig, projectRoot?: string): string | undefined {
+  if (config.cwdMode === 'custom') return config.customCwd
+  return projectRoot
+}
+
+export async function createMcpToolProvider(
+  configs: McpStdioServerConfig[],
+  projectRoot: string | undefined,
+  signal?: AbortSignal,
+  onConnectionError?: (config: McpStdioServerConfig, error: unknown) => void,
+): Promise<AgentToolProvider> {
+  const { connected, definitions } = await discoverMcpTools(
+    configs,
+    projectRoot,
+    signal,
+    onConnectionError,
+  )
+  const routes = new Map(definitions.map((definition) => [
+    definition.name,
+    { server: definition.server, originalName: definition.originalName },
+  ]))
+  const tools = definitions.map((definition) => ({
+    type: 'function',
+    function: {
+      name: definition.name,
+      description: definition.description,
+      parameters: definition.parameters,
+    },
+  }))
 
   return {
     tools,
@@ -85,8 +130,29 @@ export async function createMcpToolProvider(
       return route.server.client.callTool(route.originalName, args, callSignal)
     },
     async close() {
-      await Promise.allSettled(connected.map(({ client }) => client.close()))
+      await closeConnectedServers(connected)
     },
+  }
+}
+
+/** Lists the same model-visible MCP tools used by an Agent run, then closes
+ *  the temporary server connections. Used by read-only UI such as Help. */
+export async function listMcpToolDefinitions(
+  configs: McpStdioServerConfig[],
+  projectRoot: string | undefined,
+  signal?: AbortSignal,
+  onConnectionError?: (config: McpStdioServerConfig, error: unknown) => void,
+): Promise<McpToolDefinition[]> {
+  const { connected, definitions } = await discoverMcpTools(
+    configs,
+    projectRoot,
+    signal,
+    onConnectionError,
+  )
+  try {
+    return definitions.map(({ server: _server, ...definition }) => definition)
+  } finally {
+    await closeConnectedServers(connected)
   }
 }
 

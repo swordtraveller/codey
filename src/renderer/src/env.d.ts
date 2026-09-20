@@ -140,7 +140,7 @@ declare global {
       getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
       setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
       getPromptSnapshot(): Promise<PromptSnapshot>
-      getToolHelpSnapshot(): Promise<ToolHelpSnapshot>
+      getToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project>
       develop(

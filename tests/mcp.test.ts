@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { McpStdioClient } from '../src/main/mcp/client'
 import {
   createMcpToolProvider,
+  listMcpToolDefinitions,
   resolveMcpCwd,
   testMcpStdioServer,
 } from '../src/main/mcp/tool-provider'
@@ -97,6 +98,21 @@ describe('MCP Agent tool provider', () => {
     } finally {
       await provider.close?.()
     }
+  })
+
+  it('lists model-visible MCP definitions for the Help catalog', async () => {
+    const definitions = await listMcpToolDefinitions([server()], undefined)
+
+    expect(definitions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'mcp__fake_server__echo',
+        serverId: 'fake-server',
+        serverName: 'fake server',
+        originalName: 'echo',
+        description: expect.stringContaining('[MCP: fake server]'),
+        parameters: expect.objectContaining({ type: 'object' }),
+      }),
+    ]))
   })
 
   it('creates stable unique names for colliding servers and tools', async () => {

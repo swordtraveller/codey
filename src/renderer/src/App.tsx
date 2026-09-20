@@ -2964,11 +2964,17 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function loadToolHelp(): void {
+    setToolHelp(null)
+    void window.codey
+      .getToolHelpSnapshot(activeProject?.folders[0]?.path)
+      .then(setToolHelp)
+      .catch(() => setToolHelp(null))
+  }
+
   function openHelp(): void {
     setHelpDialogOpen(true)
-    if (!toolHelp) {
-      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
-    }
+    loadToolHelp()
   }
 
   const toolKeyword = toolSearch.trim().toLowerCase()
@@ -3404,9 +3410,6 @@ export function App(): React.JSX.Element {
   function openCommandRulesHelp(): void {
     setHelpTab('commandRules')
     setHelpDialogOpen(true)
-    if (!toolHelp) {
-      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
-    }
   }
 
   useEffect(() => window.codey.onCommandReviewRequest((request) => setApprovalRequest(request)), [])
@@ -3863,6 +3866,7 @@ export function App(): React.JSX.Element {
       setConfig(saved)
       setConfigDraft(saved)
       setAppLanguage(saved.language)
+      setToolHelp(null)
       setError('')
       setSettingsOpen(false)
     } catch {
@@ -4562,7 +4566,11 @@ export function App(): React.JSX.Element {
             <DialogContent className="dialog-fields">
               <TabList
                 selectedValue={helpTab}
-                onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
+                onTabSelect={(_, data) => {
+                  const nextTab = data.value as typeof helpTab
+                  setHelpTab(nextTab)
+                  if (nextTab === 'tools' && !toolHelp) loadToolHelp()
+                }}
               >
                 <Tab value="tools">{t('helpTools')}</Tab>
                 <Tab value="commandRules">{t('helpCommandRules')}</Tab>
@@ -4645,24 +4653,30 @@ export function App(): React.JSX.Element {
                       const groupEntries = (hidden: boolean) => {
                         const groups = new Map<string, typeof toolHelp.entries>()
                         for (const entry of toolHelp.entries) {
-                          if (!entry.toolset || entry.toolsetHidden !== hidden) continue
+                          if (entry.source === 'mcp' || !entry.toolset || entry.toolsetHidden !== hidden) continue
                           const bucket = groups.get(entry.toolset) ?? []
                           bucket.push(entry)
                           groups.set(entry.toolset, bucket)
                         }
                         return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
                       }
+                      const mcpGroups = new Map<string, typeof toolHelp.entries>()
+                      for (const entry of toolHelp.entries) {
+                        if (entry.source !== 'mcp' || !entry.toolset) continue
+                        const bucket = mcpGroups.get(entry.toolset) ?? []
+                        bucket.push(entry)
+                        mcpGroups.set(entry.toolset, bucket)
+                      }
                       // Search keeps the flat list so match navigation stays
-                      // contiguous; the catalog view groups by toolset: meta
-                      // tool first, then always-unlocked sets, then sets that
-                      // unlock on demand — each section alphabetically.
+                      // contiguous; the catalog view groups built-in tools by
+                      // toolset and MCP tools by their configured server.
                       if (toolSearch.trim()) {
                         return toolMatches.map((entry) => renderEntry(entry, true))
                       }
                       return (
                         <>
                           <h4 className="tool-help-group-header">{t('helpToolMetaSection')}</h4>
-                          {toolHelp.entries.filter((entry) => !entry.toolset).map((entry) => renderEntry(entry, false))}
+                          {toolHelp.entries.filter((entry) => entry.source !== 'mcp' && !entry.toolset).map((entry) => renderEntry(entry, false))}
                           <h4 className="tool-help-group-header">{t('helpToolsetUnlockedSection')}</h4>
                           {groupEntries(false).map(([toolset, entries]) => (
                             <div key={toolset}>
@@ -4683,6 +4697,22 @@ export function App(): React.JSX.Element {
                               {entries.map((entry) => renderEntry(entry, false))}
                             </div>
                           ))}
+                          {mcpGroups.size > 0 && (
+                            <>
+                              <h4 className="tool-help-group-header">{t('helpMcpSection')}</h4>
+                              {[...mcpGroups.entries()]
+                                .sort(([a], [b]) => a.localeCompare(b))
+                                .map(([server, entries]) => (
+                                  <div key={server}>
+                                    <h5 className="tool-help-toolset-header">
+                                      {server}
+                                      <span className="tool-help-toolset-state">{t('helpMcpRuntimeLabel')}</span>
+                                    </h5>
+                                    {entries.map((entry) => renderEntry(entry, false))}
+                                  </div>
+                                ))}
+                            </>
+                          )}
                         </>
                       )
                     })()}

@@ -794,6 +794,8 @@ export type ToolHelpEntry = {
   description: string
   parameters: string
   returns: string
+  /** Runtime source. Omitted for built-in tools kept for backward compatibility. */
+  source?: 'builtin' | 'mcp'
   /** Toolset this tool belongs to; absent for the meta tool. */
   toolset?: string
   /** True when the toolset stays hidden until unlocked via find_hidden_toolset. */
