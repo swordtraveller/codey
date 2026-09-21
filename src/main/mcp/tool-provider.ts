@@ -51,13 +51,19 @@ type McpToolResult = {
   [key: string]: unknown
 }
 
-const MCP_FAILURE_INSTRUCTIONS = [
-  'MCP operations are exposed through a compact facade. Use mcp_catalog to list or describe operations, then call a category tool with server, operation, and arguments.',
+const MCP_BASE_INSTRUCTIONS = [
+  'Only the mcp_* facade names are top-level model tools; operation names returned by mcp_catalog are downstream MCP operations, not additional tool calls.',
+  'Use mcp_catalog list for a compact capability overview, search or a category-filtered list to discover a few relevant operations, and describe to retrieve one operation input schema before calling its category facade with server, operation, and arguments.',
   'Treat an MCP result with success:false as a failed operation.',
   'Do not claim that a prerequisite, installation, or capability was verified unless a successful tool result explicitly confirms it.',
   'Do not retry a failed operation by changing unrelated arguments such as path separators.',
   'Follow recovery guidance returned by the tool and do not call operations that depend on a failed initialization.',
-].join(' ')
+]
+
+const AGENT_LSP_INSTRUCTIONS = [
+  'For code symbols, definitions, references, diagnostics, call relationships, impact analysis, or semantic edits, prefer the agent-lsp MCP operations over text-only inspection when available.',
+  'Typical workflows are: mcp_workspace with operation=start_lsp before initialized-client operations; mcp_diagnostics/get_diagnostics for type errors; mcp_symbols/list_symbols plus mcp_navigation/find_references for code understanding; mcp_analysis/blast_radius before edit operations; and mcp_diagnostics/get_diagnostics after edits.',
+]
 
 const FACADE_CATEGORIES: McpFacadeCategory[] = [
   'workspace', 'diagnostics', 'symbols', 'navigation', 'analysis', 'edit', 'other',
@@ -147,12 +153,11 @@ function facadeName(category: McpFacadeCategory | 'catalog'): string {
   return category === 'catalog' ? 'mcp_catalog' : `mcp_${category}`
 }
 
-function facadeDescription(category: McpFacadeCategory | 'catalog', operations: McpOperation[]): string {
+function facadeDescription(category: McpFacadeCategory | 'catalog'): string {
   if (category === 'catalog') {
-    return 'Inspect configured MCP servers and their downstream operations. Use action=list to discover operations or action=describe to retrieve one operation’s input schema.'
+    return 'Discover downstream MCP capabilities progressively. Use list for an overview or category page, search for relevant operations, and describe for one operation input schema.'
   }
-  const names = operations.map((operation) => operation.originalName).filter((name, index, all) => all.indexOf(name) === index)
-  return `Route MCP ${category} operations from configured servers. Provide server, operation, and arguments. Available operations: ${names.join(', ')}.`
+  return `Route a downstream MCP ${category} operation. Discover the operation with mcp_catalog and provide its server, operation, and arguments.`
 }
 
 function facadeParameters(category: McpFacadeCategory | 'catalog', operations: McpOperation[]): Record<string, unknown> {
@@ -160,23 +165,24 @@ function facadeParameters(category: McpFacadeCategory | 'catalog', operations: M
     return {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'describe'], description: 'Whether to list available operations or describe one operation.' },
+        action: { type: 'string', enum: ['list', 'search', 'describe'], description: 'Use list for an overview or category page, search to find relevant operations, or describe for one input schema.' },
         server: { type: 'string', description: 'Configured MCP server id. Required for describe.' },
         operation: { type: 'string', description: 'Downstream operation name. Required for describe.' },
-        category: { type: 'string', enum: FACADE_CATEGORIES, description: 'Optional facade category filter for list.' },
-        query: { type: 'string', description: 'Optional name or description filter for list.' },
+        category: { type: 'string', enum: FACADE_CATEGORIES, description: 'Optional facade category filter for list or search.' },
+        query: { type: 'string', description: 'Task keywords for search. May also narrow a list.' },
+        offset: { type: 'integer', minimum: 0, description: 'Zero-based operation offset for a filtered list or search.' },
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum operations to return. Defaults to 10.' },
       },
       required: ['action'],
       additionalProperties: false,
     }
   }
   const serverIds = [...new Set(operations.map((operation) => operation.serverId))]
-  const operationNames = [...new Set(operations.map((operation) => operation.originalName))]
   return {
     type: 'object',
     properties: {
       server: { type: 'string', enum: serverIds, description: 'Configured MCP server id.' },
-      operation: { type: 'string', enum: operationNames, description: 'Downstream operation belonging to this category.' },
+      operation: { type: 'string', description: 'Downstream operation name discovered through mcp_catalog.' },
       arguments: { type: 'object', description: 'Arguments for the downstream MCP operation.', additionalProperties: true },
     },
     required: ['server', 'operation'],
@@ -190,7 +196,7 @@ function buildFacadeDefinitions(operations: McpOperation[]): McpToolDefinition[]
     definitions.push({
       name: facadeName('catalog'),
       category: 'catalog',
-      description: facadeDescription('catalog', operations),
+      description: facadeDescription('catalog'),
       parameters: facadeParameters('catalog', operations),
       operations: operations.map((operation) => ({
         serverId: operation.serverId,
@@ -207,7 +213,7 @@ function buildFacadeDefinitions(operations: McpOperation[]): McpToolDefinition[]
     definitions.push({
       name: facadeName(category),
       category,
-      description: facadeDescription(category, categoryOperations),
+      description: facadeDescription(category),
       parameters: facadeParameters(category, categoryOperations),
       operations: categoryOperations.map((operation) => ({
         serverId: operation.serverId,
@@ -275,19 +281,129 @@ function parseArguments(toolName: string, raw: string | undefined): Record<strin
   }
 }
 
+function categoryCounts(operations: McpOperation[]): Record<McpFacadeCategory, number> {
+  const counts = Object.fromEntries(FACADE_CATEGORIES.map((category) => [category, 0])) as Record<McpFacadeCategory, number>
+  for (const operation of operations) counts[operation.category] += 1
+  return counts
+}
+
+function operationSummary(operation: McpOperation): Record<string, unknown> {
+  return {
+    server: { id: operation.serverId, name: operation.serverName },
+    operation: operation.originalName,
+    category: operation.category,
+    description: operation.description,
+    facade: facadeName(operation.category),
+  }
+}
+
+function normalizedSearchText(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+}
+
+function expandedSearchText(value: string): string {
+  const normalized = normalizedSearchText(value)
+  const aliases: Array<[string, string]> = [
+    ['诊断', 'diagnostic error'],
+    ['错误', 'diagnostic error'],
+    ['引用', 'reference'],
+    ['定义', 'definition'],
+    ['声明', 'declaration'],
+    ['实现', 'implementation'],
+    ['符号', 'symbol'],
+    ['重命名', 'rename'],
+    ['调用', 'caller call'],
+    ['影响', 'blast radius'],
+    ['测试', 'test'],
+    ['构建', 'build'],
+    ['补全', 'completion'],
+    ['格式化', 'format'],
+    ['文档', 'documentation'],
+    ['工作区', 'workspace'],
+    ['启动', 'start lsp'],
+    ['编辑', 'edit'],
+  ]
+  return [normalized, ...aliases.filter(([term]) => normalized.includes(term)).map(([, expansion]) => expansion)]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function searchScore(operation: McpOperation, rawQuery: string): number {
+  const query = expandedSearchText(rawQuery)
+  if (!query) return 0
+  const name = normalizedSearchText(operation.originalName)
+  const description = normalizedSearchText(operation.description)
+  const category = normalizedSearchText(operation.category)
+  const server = normalizedSearchText(operation.serverName)
+  let score = name === query ? 100 : name.includes(query) ? 60 : description.includes(query) ? 30 : 0
+  for (const token of query.split(/\s+/).filter(Boolean)) {
+    if (name.split(' ').includes(token)) score += 16
+    else if (name.includes(token)) score += 10
+    if (description.includes(token)) score += 4
+    if (category.includes(token) || server.includes(token)) score += 2
+  }
+  return score
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index)
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex]
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      )
+    }
+    previous.splice(0, previous.length, ...current)
+  }
+  return previous[right.length]
+}
+
+function operationSuggestions(operations: McpOperation[], serverId: string, operationName: string): Array<Record<string, unknown>> {
+  const normalizedName = normalizedSearchText(operationName)
+  return operations
+    .filter((operation) => !serverId || operation.serverId === serverId)
+    .map((operation) => ({
+      operation,
+      score: searchScore(operation, operationName),
+      distance: levenshteinDistance(normalizedSearchText(operation.originalName), normalizedName),
+    }))
+    .filter(({ score, distance }) => score > 0 || distance <= Math.max(2, Math.floor(normalizedName.length * 0.3)))
+    .sort((left, right) => right.score - left.score || left.distance - right.distance || left.operation.originalName.localeCompare(right.operation.originalName))
+    .slice(0, 3)
+    .map(({ operation }) => ({
+      operation: operation.originalName,
+      category: operation.category,
+      facade: facadeName(operation.category),
+    }))
+}
+
 function catalogResult(operations: McpOperation[], args: Record<string, unknown>): string {
   const action = args.action
-  if (action !== 'list' && action !== 'describe') return JSON.stringify({ success: false, content: 'action must be list or describe' })
+  if (action !== 'list' && action !== 'search' && action !== 'describe') {
+    return JSON.stringify({ success: false, content: 'action must be list, search, or describe' })
+  }
   if (action === 'describe') {
     const serverId = typeof args.server === 'string' ? args.server : ''
     const operationName = typeof args.operation === 'string' ? args.operation : ''
     const operation = operations.find((item) => item.serverId === serverId && item.originalName === operationName)
-    if (!operation) return JSON.stringify({ success: false, content: `Unknown MCP operation ${serverId}/${operationName}` })
+    if (!operation) {
+      return JSON.stringify({
+        success: false,
+        error: 'unknown_operation',
+        content: `Unknown MCP operation ${serverId}/${operationName}`,
+        suggestions: operationSuggestions(operations, serverId, operationName),
+        next_action: 'Use mcp_catalog search to discover the operation, then describe it.',
+      })
+    }
     return JSON.stringify({
       success: true,
       server: { id: operation.serverId, name: operation.serverName },
       operation: operation.originalName,
       category: operation.category,
+      facade: facadeName(operation.category),
       description: operation.description,
       parameters: operation.parameters,
     })
@@ -300,18 +416,57 @@ function catalogResult(operations: McpOperation[], args: Record<string, unknown>
   if (category && !FACADE_CATEGORIES.includes(category as McpFacadeCategory)) {
     return JSON.stringify({ success: false, content: `Unknown MCP category ${category}` })
   }
-  const query = typeof args.query === 'string' ? args.query.toLowerCase() : undefined
-  const result = operations
+  const query = typeof args.query === 'string' ? args.query.trim() : ''
+  if (action === 'search' && !query) {
+    return JSON.stringify({ success: false, content: 'query is required for search' })
+  }
+  const pagedRequest = args.offset !== undefined || args.limit !== undefined
+  if (action === 'list' && !serverId && !category && !query && !pagedRequest) {
+    const serverMap = new Map<string, { id: string; name: string; operation_count: number; categories: Record<McpFacadeCategory, number> }>()
+    for (const operation of operations) {
+      const entry = serverMap.get(operation.serverId) ?? {
+        id: operation.serverId,
+        name: operation.serverName,
+        operation_count: 0,
+        categories: categoryCounts([]),
+      }
+      entry.operation_count += 1
+      entry.categories[operation.category] += 1
+      serverMap.set(operation.serverId, entry)
+    }
+    return JSON.stringify({
+      success: true,
+      total_operations: operations.length,
+      categories: categoryCounts(operations),
+      servers: [...serverMap.values()],
+      next_action: 'Use action=search with task keywords or action=list with a category, then action=describe for the selected operation schema.',
+    })
+  }
+
+  const offset = Number.isInteger(args.offset) && Number(args.offset) >= 0 ? Number(args.offset) : 0
+  const limit = Number.isInteger(args.limit) ? Math.min(20, Math.max(1, Number(args.limit))) : 10
+  const filtered = operations
     .filter((operation) => !serverId || operation.serverId === serverId)
     .filter((operation) => !category || operation.category === category)
-    .filter((operation) => !query || `${operation.originalName} ${operation.description}`.toLowerCase().includes(query))
-    .map((operation) => ({
-      server: { id: operation.serverId, name: operation.serverName },
-      operation: operation.originalName,
-      category: operation.category,
-      description: operation.description,
-    }))
-  return JSON.stringify({ success: true, operations: result })
+    .map((operation) => ({ operation, score: query ? searchScore(operation, query) : 0 }))
+    .filter(({ score }) => !query || score > 0)
+    .sort((left, right) => right.score - left.score
+      || left.operation.serverName.localeCompare(right.operation.serverName)
+      || left.operation.originalName.localeCompare(right.operation.originalName))
+  const page = filtered.slice(offset, offset + limit).map(({ operation }) => operationSummary(operation))
+  const nextOffset = offset + page.length
+  return JSON.stringify({
+    success: true,
+    total: filtered.length,
+    offset,
+    limit,
+    has_more: nextOffset < filtered.length,
+    next_offset: nextOffset < filtered.length ? nextOffset : null,
+    operations: page,
+    next_action: page.length > 0
+      ? 'Use action=describe for the selected operation before calling its facade.'
+      : 'Broaden the search query or list a category from the overview.',
+  })
 }
 
 export async function createMcpToolProvider(
@@ -328,10 +483,14 @@ export async function createMcpToolProvider(
     type: 'function',
     function: { name: definition.name, description: definition.description, parameters: definition.parameters },
   }))
+  const instructions = [
+    ...MCP_BASE_INSTRUCTIONS,
+    ...(connected.some(({ config }) => isAgentLspServer(config)) ? AGENT_LSP_INSTRUCTIONS : []),
+  ].join(' ')
 
   return {
     tools,
-    instructions: tools.length > 0 ? MCP_FAILURE_INSTRUCTIONS : undefined,
+    instructions: tools.length > 0 ? instructions : undefined,
     async execute(toolCall, callSignal) {
       const definition = definitions.find((item) => item.name === toolCall.function.name)
       if (!definition) return undefined
@@ -344,8 +503,27 @@ export async function createMcpToolProvider(
         return JSON.stringify({ success: false, content: 'server and operation are required' })
       }
       const route = operationRoutes.get(`${serverId}\0${operationName}`)
-      if (!route || route.category !== definition.category) {
-        return JSON.stringify({ success: false, content: `Unknown ${definition.category} MCP operation ${serverId}/${operationName}` })
+      if (!route) {
+        const serverExists = operations.some((operation) => operation.serverId === serverId)
+        return JSON.stringify({
+          success: false,
+          error: serverExists ? 'unknown_operation' : 'unknown_server',
+          content: serverExists ? `Unknown MCP operation ${serverId}/${operationName}` : `Unknown MCP server ${serverId}`,
+          suggestions: serverExists ? operationSuggestions(operations, serverId, operationName) : [],
+          next_action: serverExists
+            ? 'Use mcp_catalog search to discover the operation, then describe it.'
+            : 'Use mcp_catalog list to discover configured server ids.',
+        })
+      }
+      if (route.category !== definition.category) {
+        return JSON.stringify({
+          success: false,
+          error: 'wrong_category',
+          content: `${operationName} belongs to the ${route.category} MCP category.`,
+          operation: operationName,
+          expected_tool: facadeName(route.category),
+          next_action: `Call ${facadeName(route.category)} with the same server, operation, and arguments.`,
+        })
       }
       const downstreamArgs = args.arguments
       if (downstreamArgs !== undefined && (!downstreamArgs || typeof downstreamArgs !== 'object' || Array.isArray(downstreamArgs))) {

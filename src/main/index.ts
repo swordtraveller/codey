@@ -438,7 +438,7 @@ async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnap
         description: tool.description,
         parameters: JSON.stringify(tool.parameters, null, 2),
         returns: tool.category === 'catalog'
-          ? 'A local JSON catalog of downstream MCP operations or one operation schema.'
+          ? 'A compact capability overview, a paged operation search/list, or one downstream operation schema.'
           : 'A JSON string returned by the selected configured MCP server operation.',
         source: 'mcp' as const,
         toolset: 'MCP',

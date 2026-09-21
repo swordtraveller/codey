@@ -44,6 +44,7 @@ function parseToolResult(value: string | undefined): {
   tool?: string
   retryableWithoutChange?: boolean
   guidance?: string[]
+  [key: string]: unknown
 } {
   expect(value).toBeTypeOf('string')
   return JSON.parse(value as string) as {
@@ -53,6 +54,7 @@ function parseToolResult(value: string | undefined): {
     tool?: string
     retryableWithoutChange?: boolean
     guidance?: string[]
+    [key: string]: unknown
   }
 }
 
@@ -124,24 +126,52 @@ describe('MCP Agent tool provider', () => {
     }
   })
 
-  it('lists and describes downstream operations through the local catalog', async () => {
+  it('discovers downstream operations progressively through the local catalog', async () => {
     const provider = await createMcpToolProvider([server()], undefined)
     try {
+      const overview = JSON.parse((await provider.execute(toolCall('mcp_catalog', {
+        action: 'list',
+      }))) as string) as {
+        success: boolean
+        total_operations: number
+        categories: Record<string, number>
+        servers: Array<{ id: string; operation_count: number }>
+        operations?: unknown[]
+      }
+      expect(overview).toMatchObject({
+        success: true,
+        total_operations: 9,
+        categories: { navigation: 1 },
+        servers: [expect.objectContaining({ id: 'fake-server', operation_count: 9 })],
+      })
+      expect(overview.operations).toBeUndefined()
+
       const listed = parseToolResult(await provider.execute(toolCall('mcp_catalog', {
         action: 'list',
         category: 'navigation',
       }))) as ReturnType<typeof parseToolResult> & { operations: Array<{ operation: string; category: string }> }
       expect(listed.success).toBe(true)
       expect(listed.operations).toEqual([
-        expect.objectContaining({ operation: 'find_references', category: 'navigation' }),
+        expect.objectContaining({ operation: 'find_references', category: 'navigation', facade: 'mcp_navigation' }),
       ])
+
+      const searched = JSON.parse((await provider.execute(toolCall('mcp_catalog', {
+        action: 'search',
+        query: 'symbol references',
+        limit: 2,
+      }))) as string) as { success: boolean; total: number; operations: Array<{ operation: string }>; has_more: boolean }
+      expect(searched.success).toBe(true)
+      expect(searched.operations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ operation: 'find_references' }),
+      ]))
+      expect(searched.operations.length).toBeLessThanOrEqual(2)
 
       const described = parseToolResult(await provider.execute(toolCall('mcp_catalog', {
         action: 'describe',
         server: 'fake-server',
         operation: 'echo',
       }))) as ReturnType<typeof parseToolResult> & { operation: string; parameters: Record<string, unknown> }
-      expect(described).toMatchObject({ success: true, operation: 'echo' })
+      expect(described).toMatchObject({ success: true, operation: 'echo', facade: 'mcp_other' })
       expect(described.parameters).toMatchObject({ type: 'object', required: ['text'] })
     } finally {
       await provider.close?.()
@@ -167,7 +197,9 @@ describe('MCP Agent tool provider', () => {
       })))
       expect(result).toMatchObject({
         success: false,
-        content: 'Unknown symbols MCP operation fake-server/find_references',
+        error: 'wrong_category',
+        content: 'find_references belongs to the navigation MCP category.',
+        expected_tool: 'mcp_navigation',
       })
       expect(parseToolResult(await provider.execute(toolCall('mcp_navigation', {
         server: 'unknown',
@@ -280,6 +312,33 @@ describe('MCP Agent tool provider', () => {
         parameters: expect.objectContaining({ type: 'object' }),
       }),
     ]))
+    const catalog = definitions.find((definition) => definition.name === 'mcp_catalog')
+    const navigation = definitions.find((definition) => definition.name === 'mcp_navigation')
+    expect(catalog?.description).not.toContain('find_references')
+    expect(navigation?.description).not.toContain('find_references')
+    expect((navigation?.parameters.properties as Record<string, { enum?: string[] }>).operation.enum).toBeUndefined()
+  })
+
+  it('suggests close operation names and the correct facade', async () => {
+    const provider = await createMcpToolProvider([server()], undefined)
+    try {
+      const result = JSON.parse((await provider.execute(toolCall('mcp_navigation', {
+        server: 'fake-server',
+        operation: 'find_reference',
+      }))) as string) as {
+        success: boolean
+        error: string
+        suggestions: Array<{ operation: string; facade: string }>
+      }
+      expect(result).toMatchObject({ success: false, error: 'unknown_operation' })
+      expect(result.suggestions[0]).toEqual({
+        operation: 'find_references',
+        category: 'navigation',
+        facade: 'mcp_navigation',
+      })
+    } finally {
+      await provider.close?.()
+    }
   })
 
   it('omits empty categories for a generic MCP server', async () => {
