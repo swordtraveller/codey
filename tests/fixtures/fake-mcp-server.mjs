@@ -27,7 +27,38 @@ const tools = [
     description: 'Inspect the test server process.',
     inputSchema: { type: 'object', additionalProperties: false },
   },
+  {
+    name: 'start_lsp',
+    description: 'Start an LSP server.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
+  {
+    name: 'get_diagnostics',
+    description: 'Get language diagnostics.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
+  {
+    name: 'list_symbols',
+    description: 'List document symbols.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
+  {
+    name: 'find_references',
+    description: 'Find symbol references.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
+  {
+    name: 'blast_radius',
+    description: 'Analyze change impact.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
+  {
+    name: 'rename_symbol',
+    description: 'Rename a symbol.',
+    inputSchema: { type: 'object', additionalProperties: true },
+  },
 ]
+const availableTools = process.env.FAKE_TOOLS === 'basic' ? tools.slice(0, 3) : tools
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -60,7 +91,7 @@ input.on('line', (line) => {
   if (request.method === 'notifications/initialized') return
 
   if (request.method === 'tools/list') {
-    result(request.id, { tools })
+    result(request.id, { tools: availableTools })
     return
   }
 
@@ -85,6 +116,10 @@ input.on('line', (line) => {
           text: JSON.stringify({ cwd: process.cwd(), env: process.env.FAKE_ENV, pid: process.pid }),
         }],
       })
+      return
+    }
+    if (availableTools.some((tool) => tool.name === name)) {
+      result(request.id, { content: [{ type: 'text', text: JSON.stringify({ name, args }) }] })
       return
     }
     send({

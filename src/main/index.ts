@@ -378,7 +378,7 @@ const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean 
 ]
 
 /** Builds the read-only tool help snapshot from live built-in definitions and
- *  tools discovered from enabled local MCP servers. The built-in catalog uses
+ *  facade tools aggregated from enabled local MCP servers. The built-in catalog uses
  *  representative settings and includes every hidden toolset. */
 async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot> {
   const sampleProject: Project = {
@@ -437,9 +437,11 @@ async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnap
         name: tool.name,
         description: tool.description,
         parameters: JSON.stringify(tool.parameters, null, 2),
-        returns: 'A JSON string returned by the configured MCP server.',
+        returns: tool.category === 'catalog'
+          ? 'A local JSON catalog of downstream MCP operations or one operation schema.'
+          : 'A JSON string returned by the selected configured MCP server operation.',
         source: 'mcp' as const,
-        toolset: tool.serverName,
+        toolset: 'MCP',
         toolsetHidden: false,
       })),
     ],

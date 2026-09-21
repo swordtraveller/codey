@@ -2980,7 +2980,7 @@ export function App(): React.JSX.Element {
   const toolKeyword = toolSearch.trim().toLowerCase()
   const toolMatches = useMemo(
     () => (toolHelp && toolKeyword
-      ? toolHelp.entries.filter((entry) => entry.name.toLowerCase().includes(toolKeyword))
+      ? toolHelp.entries.filter((entry) => `${entry.name} ${entry.description}`.toLowerCase().includes(toolKeyword))
       : []),
     [toolHelp, toolKeyword],
   )
@@ -4669,7 +4669,7 @@ export function App(): React.JSX.Element {
                       }
                       // Search keeps the flat list so match navigation stays
                       // contiguous; the catalog view groups built-in tools by
-                      // toolset and MCP tools by their configured server.
+                      // toolset and MCP tools by the compact facade group.
                       if (toolSearch.trim()) {
                         return toolMatches.map((entry) => renderEntry(entry, true))
                       }
@@ -4702,10 +4702,10 @@ export function App(): React.JSX.Element {
                               <h4 className="tool-help-group-header">{t('helpMcpSection')}</h4>
                               {[...mcpGroups.entries()]
                                 .sort(([a], [b]) => a.localeCompare(b))
-                                .map(([server, entries]) => (
-                                  <div key={server}>
+                                .map(([toolset, entries]) => (
+                                  <div key={toolset}>
                                     <h5 className="tool-help-toolset-header">
-                                      {server}
+                                      {toolset}
                                       <span className="tool-help-toolset-state">{t('helpMcpRuntimeLabel')}</span>
                                     </h5>
                                     {entries.map((entry) => renderEntry(entry, false))}
