@@ -22,6 +22,82 @@ type DiscoveredMcpTools = {
   definitions: Array<McpToolDefinition & { server: ConnectedServer }>
 }
 
+type McpToolResult = {
+  success?: boolean
+  content?: string
+  [key: string]: unknown
+}
+
+const MCP_FAILURE_INSTRUCTIONS = [
+  'Treat an MCP result with success:false as a failed operation.',
+  'Do not claim that a prerequisite, installation, or capability was verified unless a successful tool result explicitly confirms it.',
+  'Do not retry a failed operation by changing unrelated arguments such as path separators.',
+  'Follow recovery guidance returned by the tool and do not call operations that depend on a failed initialization.',
+].join(' ')
+
+function isAgentLspServer(config: McpStdioServerConfig): boolean {
+  const identity = [config.id, config.name, config.command, ...config.args]
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+  return identity.includes('agentlsp')
+}
+
+function augmentMcpToolResult(
+  config: McpStdioServerConfig,
+  toolName: string,
+  serializedResult: string,
+  repeatedFailureCount: number,
+): string {
+  let result: McpToolResult
+  try {
+    result = JSON.parse(serializedResult) as McpToolResult
+  } catch {
+    return serializedResult
+  }
+  if (result.success !== false) return serializedResult
+
+  const content = typeof result.content === 'string' ? result.content : ''
+  const guidance = [
+    'Treat this operation as failed; do not report it as a successful verification.',
+    'Only infer prerequisites or capabilities that a successful tool result explicitly confirmed.',
+  ]
+  const retryableWithoutChange = false
+
+  if (/lsp client not initialized; call start_lsp first/i.test(content)) {
+    guidance.push(
+      'start_lsp must succeed before restart_lsp_server, get_server_capabilities, or other initialized-client operations.',
+      'Do not retry this dependent operation until start_lsp succeeds.',
+    )
+  }
+
+  if (isAgentLspServer(config) && /daemon:\s*broker did not start within\s+\d+(?:\.\d+)?s/i.test(content)) {
+    guidance.push(
+      'ready_timeout_seconds applies after the broker starts; changing it cannot fix this broker-startup timeout.',
+      'Do not retry only by changing path separators or ready_timeout_seconds.',
+      'Do not call restart_lsp_server, get_server_capabilities, or other client operations until start_lsp succeeds.',
+      'Check the installed agent-lsp version and upgrade if needed; agent-lsp v0.12.0 fixed a known Windows broker-spawn path issue.',
+      'Use detect_lsp_servers or a direct binary version check before claiming that the requested language server is installed.',
+      'Inspect ~/.cache/agent-lsp/spawn-logs/<language>.log for the broker startup error.',
+      'AGENT_LSP_BROKER_TIMEOUT_MS controls this startup wait, but increasing it may only hide a startup failure.',
+    )
+  }
+
+  if (repeatedFailureCount > 1) {
+    guidance.push(
+      `The same tool returned the same failure ${repeatedFailureCount} times in this run; stop retrying until configuration or environment changes.`,
+    )
+  }
+
+  return JSON.stringify({
+    ...result,
+    server: config.name,
+    tool: toolName,
+    retryableWithoutChange,
+    guidance,
+  })
+}
+
 function safePart(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'tool'
 }
@@ -104,6 +180,7 @@ export async function createMcpToolProvider(
     definition.name,
     { server: definition.server, originalName: definition.originalName },
   ]))
+  const failureCounts = new Map<string, number>()
   const tools = definitions.map((definition) => ({
     type: 'function',
     function: {
@@ -116,7 +193,7 @@ export async function createMcpToolProvider(
   return {
     tools,
     instructions: tools.length > 0
-      ? 'Tools prefixed with mcp__ are provided by user-configured local MCP servers. Use them for semantic code intelligence when appropriate.'
+      ? `Tools prefixed with mcp__ are provided by user-configured local MCP servers. Use them for semantic code intelligence when appropriate. ${MCP_FAILURE_INSTRUCTIONS}`
       : undefined,
     async execute(toolCall, callSignal) {
       const route = routes.get(toolCall.function.name)
@@ -127,7 +204,19 @@ export async function createMcpToolProvider(
       } catch {
         throw new Error(`Invalid arguments for MCP tool ${toolCall.function.name}`)
       }
-      return route.server.client.callTool(route.originalName, args, callSignal)
+      const result = await route.server.client.callTool(route.originalName, args, callSignal)
+      let failureCount = 0
+      try {
+        const parsed = JSON.parse(result) as McpToolResult
+        if (parsed.success === false) {
+          const signature = `${route.server.config.id}\0${route.originalName}\0${String(parsed.content ?? '')}`
+          failureCount = (failureCounts.get(signature) ?? 0) + 1
+          failureCounts.set(signature, failureCount)
+        }
+      } catch {
+        // Preserve unexpected non-JSON MCP output without adding recovery metadata.
+      }
+      return augmentMcpToolResult(route.server.config, route.originalName, result, failureCount)
     },
     async close() {
       await closeConnectedServers(connected)
@@ -184,5 +273,3 @@ export async function testMcpStdioServer(
     await client.close()
   }
 }
-
-

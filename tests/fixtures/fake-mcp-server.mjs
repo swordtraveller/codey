@@ -16,7 +16,11 @@ const tools = [
   {
     name: 'fail',
     description: 'Return an MCP tool error.',
-    inputSchema: { type: 'object', additionalProperties: false },
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      additionalProperties: false,
+    },
   },
   {
     name: 'inspect',
@@ -68,7 +72,10 @@ input.on('line', (line) => {
       return
     }
     if (name === 'fail') {
-      result(request.id, { isError: true, content: [{ type: 'text', text: 'expected failure' }] })
+      result(request.id, {
+        isError: true,
+        content: [{ type: 'text', text: String(args.message ?? 'expected failure') }],
+      })
       return
     }
     if (name === 'inspect') {

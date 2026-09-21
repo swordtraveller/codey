@@ -40,6 +40,8 @@ Codey can connect to user-installed MCP servers over stdio. To use Python langua
 
 The preset uses the `agent-lsp` command with no arguments, so agent-lsp auto-detects language servers on `PATH`. Use the arguments field for an explicit server selection such as `python:pyright-langserver,--stdio`.
 
+If `start_lsp` reports `daemon: broker did not start within 30s`, changing `ready_timeout_seconds` or path separators will not fix that startup stage. Check the installed agent-lsp version (v0.12.0 fixed a known Windows broker-spawn path issue), inspect `~/.cache/agent-lsp/spawn-logs/<language>.log`, and upgrade or fix the broker error before calling tools that require an initialized LSP client. `AGENT_LSP_BROKER_TIMEOUT_MS` can extend the broker wait in the MCP server environment, but a longer wait may only mask an actual startup failure.
+
 ## Development
 
 ```bash
