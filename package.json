@@ -32,6 +32,7 @@
     "@huggingface/transformers": "^4.3.0",
     "@mdit/plugin-katex": "^1.1.0",
     "@mdit/plugin-tasklist": "^1.1.0",
+    "@modelcontextprotocol/client": "2.0.0",
     "@vscode/ripgrep": "^1.18.0",
     "dompurify": "^3.4.14",
     "i18next": "^26.3.6",

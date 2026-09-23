@@ -15,6 +15,7 @@ import {
   type ModelDefinition,
   type ModelGroupConfig,
   type ModelLink,
+  type McpStdioServerConfig,
   type ProviderConfig,
 } from '../shared/types'
 import { modelGroupDefaultRetries, modelGroupMaxRetries, modelGroupMinRetries } from '../shared/types'
@@ -55,6 +56,7 @@ type StoredAppConfig = {
   commandExecutionGlobal?: Partial<CommandExecutionConfig> | null
   defaultSkillIds?: string[]
   defaultKnowledgeBaseIds?: string[]
+  mcpServers?: Partial<McpStdioServerConfig>[]
 }
 
 type LegacyStoredConfig = LegacyStoredModel & {
@@ -74,6 +76,46 @@ function normalizeSkillIds(value: unknown): string[] {
   return [...new Set(value
     .filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
     .map((entry) => entry.trim()))]
+}
+
+function normalizeMcpServers(value: unknown): McpStdioServerConfig[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const servers: McpStdioServerConfig[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const raw = entry as Partial<McpStdioServerConfig>
+    const command = typeof raw.command === 'string' ? raw.command.trim() : ''
+    if (!command) continue
+    let id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : randomUUID()
+    if (seen.has(id)) id = randomUUID()
+    seen.add(id)
+    const env = raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)
+      ? Object.fromEntries(Object.entries(raw.env)
+          .filter(([key, item]) => key.trim() !== '' && typeof item === 'string')
+          .map(([key, item]) => [key.trim(), item]))
+      : {}
+    servers.push({
+      id,
+      name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : command,
+      enabled: raw.enabled === true,
+      command,
+      args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
+      env,
+      cwdMode: raw.cwdMode === 'custom' ? 'custom' : 'project-root',
+      customCwd: typeof raw.customCwd === 'string' && raw.customCwd.trim() ? raw.customCwd.trim() : undefined,
+    })
+  }
+  return servers
+}
+
+function isValidMcpServers(servers: McpStdioServerConfig[]): boolean {
+  const ids = new Set<string>()
+  return servers.every((server) => {
+    if (!server.id || ids.has(server.id) || !server.name || !server.command) return false
+    ids.add(server.id)
+    return server.cwdMode !== 'custom' || Boolean(server.customCwd)
+  })
 }
 
 function toOptionalTokenCount(value: unknown): number | undefined {
@@ -367,6 +409,7 @@ export async function readConfig(): Promise<AppConfig> {
         commandExecutionGlobal,
         defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
         defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
+        mcpServers: normalizeMcpServers(stored.mcpServers),
       }
       const legacyMargin = stored.contextManagement?.safeOutputMargin
       const needsMigration = layers.migrated ||
@@ -381,6 +424,7 @@ export async function readConfig(): Promise<AppConfig> {
         stored.commandExecutionGlobal === undefined ||
         stored.defaultSkillIds === undefined ||
         stored.defaultKnowledgeBaseIds === undefined ||
+        stored.mcpServers === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || (stored.modelConfigs ?? []).some((model) =>
           !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -408,6 +452,7 @@ export async function readConfig(): Promise<AppConfig> {
         commandExecutionGlobal: readCommandExecutionGlobal(stored),
         defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
         defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
+        mcpServers: normalizeMcpServers(stored.mcpServers),
       }
     }
 
@@ -433,6 +478,7 @@ export async function readConfig(): Promise<AppConfig> {
       commandExecutionGlobal: readCommandExecutionGlobal(stored),
       defaultSkillIds: normalizeSkillIds(stored.defaultSkillIds),
       defaultKnowledgeBaseIds: normalizeSkillIds(stored.defaultKnowledgeBaseIds),
+      mcpServers: normalizeMcpServers(stored.mcpServers),
     }
     await writeConfig(migrated)
     return migrated
@@ -453,6 +499,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const commandReviewGlobal = normalizeCommandReviewConfig(config.commandReviewGlobal)
   const agentLimitsGlobal = normalizeAgentLimitsConfig(config.agentLimitsGlobal)
   const commandExecutionGlobal = { ...normalizeCommandExecutionConfig(config.commandExecutionGlobal), review: null }
+  const mcpServers = normalizeMcpServers(config.mcpServers)
   const activeModelConfigId = repairActiveTarget(
     { models, modelGroups },
     config.activeModelConfigId ?? models[0]?.id ?? null,
@@ -471,7 +518,8 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     !isValidContextManagementConfig(contextManagement) ||
     !isValidCommandReviewConfig(commandReviewGlobal) ||
     !isValidAgentLimitsConfig(agentLimitsGlobal) ||
-    !isValidCommandExecutionConfig(commandExecutionGlobal)
+    !isValidCommandExecutionConfig(commandExecutionGlobal) ||
+    !isValidMcpServers(mcpServers)
   ) {
     throw new Error('Enter valid model and context settings')
   }
@@ -495,6 +543,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     commandExecutionGlobal,
     defaultSkillIds: normalizeSkillIds(config.defaultSkillIds),
     defaultKnowledgeBaseIds: normalizeSkillIds(config.defaultKnowledgeBaseIds),
+    mcpServers,
   }
   await writeConfig(normalized)
   return normalized

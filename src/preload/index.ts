@@ -10,6 +10,8 @@ import type {
   DevelopmentProgressState,
   ImageAttachment,
   MediaAttachment,
+  McpServerTestResult,
+  McpStdioServerConfig,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -51,6 +53,8 @@ contextBridge.exposeInMainWorld(
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    testMcpServer: (config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult> =>
+      ipcRenderer.invoke('mcp:test-stdio-server', config, projectRoot),
     fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
       ipcRenderer.invoke('models:fetch-capabilities', modelName),
     testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
@@ -187,7 +191,7 @@ contextBridge.exposeInMainWorld(
     getWsl2ManualConfig: (): Promise<Wsl2ManualConfig | null> => ipcRenderer.invoke('shells:get-wsl2-config'),
     setWsl2ManualConfig: (config: Wsl2ManualConfig | null): Promise<void> => ipcRenderer.invoke('shells:set-wsl2-config', config),
     getPromptSnapshot: (): Promise<PromptSnapshot> => ipcRenderer.invoke('prompts:snapshot'),
-    getToolHelpSnapshot: (): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot'),
+    getToolHelpSnapshot: (projectRoot?: string): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot', projectRoot),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     setConversationReadState: (projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) =>

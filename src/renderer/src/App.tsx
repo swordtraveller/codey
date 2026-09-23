@@ -99,6 +99,7 @@ import {
   type NotificationSettings,
 } from '../../shared/types'
 import { UnreadBadge } from './components/UnreadBadge'
+import { McpSettings } from './components/McpSettings'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
@@ -2309,7 +2310,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
@@ -2963,17 +2964,23 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function loadToolHelp(): void {
+    setToolHelp(null)
+    void window.codey
+      .getToolHelpSnapshot(activeProject?.folders[0]?.path)
+      .then(setToolHelp)
+      .catch(() => setToolHelp(null))
+  }
+
   function openHelp(): void {
     setHelpDialogOpen(true)
-    if (!toolHelp) {
-      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
-    }
+    loadToolHelp()
   }
 
   const toolKeyword = toolSearch.trim().toLowerCase()
   const toolMatches = useMemo(
     () => (toolHelp && toolKeyword
-      ? toolHelp.entries.filter((entry) => entry.name.toLowerCase().includes(toolKeyword))
+      ? toolHelp.entries.filter((entry) => `${entry.name} ${entry.description}`.toLowerCase().includes(toolKeyword))
       : []),
     [toolHelp, toolKeyword],
   )
@@ -3403,9 +3410,6 @@ export function App(): React.JSX.Element {
   function openCommandRulesHelp(): void {
     setHelpTab('commandRules')
     setHelpDialogOpen(true)
-    if (!toolHelp) {
-      void window.codey.getToolHelpSnapshot().then(setToolHelp).catch(() => setToolHelp(null))
-    }
   }
 
   useEffect(() => window.codey.onCommandReviewRequest((request) => setApprovalRequest(request)), [])
@@ -3862,6 +3866,7 @@ export function App(): React.JSX.Element {
       setConfig(saved)
       setConfigDraft(saved)
       setAppLanguage(saved.language)
+      setToolHelp(null)
       setError('')
       setSettingsOpen(false)
     } catch {
@@ -4561,7 +4566,11 @@ export function App(): React.JSX.Element {
             <DialogContent className="dialog-fields">
               <TabList
                 selectedValue={helpTab}
-                onTabSelect={(_, data) => setHelpTab(data.value as typeof helpTab)}
+                onTabSelect={(_, data) => {
+                  const nextTab = data.value as typeof helpTab
+                  setHelpTab(nextTab)
+                  if (nextTab === 'tools' && !toolHelp) loadToolHelp()
+                }}
               >
                 <Tab value="tools">{t('helpTools')}</Tab>
                 <Tab value="commandRules">{t('helpCommandRules')}</Tab>
@@ -4644,24 +4653,30 @@ export function App(): React.JSX.Element {
                       const groupEntries = (hidden: boolean) => {
                         const groups = new Map<string, typeof toolHelp.entries>()
                         for (const entry of toolHelp.entries) {
-                          if (!entry.toolset || entry.toolsetHidden !== hidden) continue
+                          if (entry.source === 'mcp' || !entry.toolset || entry.toolsetHidden !== hidden) continue
                           const bucket = groups.get(entry.toolset) ?? []
                           bucket.push(entry)
                           groups.set(entry.toolset, bucket)
                         }
                         return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
                       }
+                      const mcpGroups = new Map<string, typeof toolHelp.entries>()
+                      for (const entry of toolHelp.entries) {
+                        if (entry.source !== 'mcp' || !entry.toolset) continue
+                        const bucket = mcpGroups.get(entry.toolset) ?? []
+                        bucket.push(entry)
+                        mcpGroups.set(entry.toolset, bucket)
+                      }
                       // Search keeps the flat list so match navigation stays
-                      // contiguous; the catalog view groups by toolset: meta
-                      // tool first, then always-unlocked sets, then sets that
-                      // unlock on demand — each section alphabetically.
+                      // contiguous; the catalog view groups built-in tools by
+                      // toolset and MCP tools by the compact facade group.
                       if (toolSearch.trim()) {
                         return toolMatches.map((entry) => renderEntry(entry, true))
                       }
                       return (
                         <>
                           <h4 className="tool-help-group-header">{t('helpToolMetaSection')}</h4>
-                          {toolHelp.entries.filter((entry) => !entry.toolset).map((entry) => renderEntry(entry, false))}
+                          {toolHelp.entries.filter((entry) => entry.source !== 'mcp' && !entry.toolset).map((entry) => renderEntry(entry, false))}
                           <h4 className="tool-help-group-header">{t('helpToolsetUnlockedSection')}</h4>
                           {groupEntries(false).map(([toolset, entries]) => (
                             <div key={toolset}>
@@ -4682,6 +4697,22 @@ export function App(): React.JSX.Element {
                               {entries.map((entry) => renderEntry(entry, false))}
                             </div>
                           ))}
+                          {mcpGroups.size > 0 && (
+                            <>
+                              <h4 className="tool-help-group-header">{t('helpMcpSection')}</h4>
+                              {[...mcpGroups.entries()]
+                                .sort(([a], [b]) => a.localeCompare(b))
+                                .map(([toolset, entries]) => (
+                                  <div key={toolset}>
+                                    <h5 className="tool-help-toolset-header">
+                                      {toolset}
+                                      <span className="tool-help-toolset-state">{t('helpMcpRuntimeLabel')}</span>
+                                    </h5>
+                                    {entries.map((entry) => renderEntry(entry, false))}
+                                  </div>
+                                ))}
+                            </>
+                          )}
                         </>
                       )
                     })()}
@@ -4725,6 +4756,7 @@ export function App(): React.JSX.Element {
                 <Tab value="global">{t('globalSettings')}</Tab>
                 <Tab value="skills">{t('skills')}</Tab>
                 <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
+                <Tab value="mcp">{t('mcp')}</Tab>
                 <Tab value="language">{t('language')}</Tab>
                 <Tab value="power">{t('powerSettings')}</Tab>
                 <Tab value="notifications">{t('notifications')}</Tab>
@@ -5523,6 +5555,14 @@ export function App(): React.JSX.Element {
                   </div>
                   {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
                 </section>
+              )}
+              {settingsTab === 'mcp' && (
+                <McpSettings
+                  servers={configDraft.mcpServers}
+                  onChange={(mcpServers) => setConfigDraft((current) => ({ ...current, mcpServers }))}
+                  disabled={interactionLocked}
+                  projectRoot={activeProject?.folders[0]?.path}
+                />
               )}
               {settingsTab === 'language' && (
               <section className="settings-group">

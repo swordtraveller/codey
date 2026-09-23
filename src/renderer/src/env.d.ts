@@ -14,6 +14,8 @@ import type {
   DevelopmentResult,
   ImageAttachment,
   MediaAttachment,
+  McpServerTestResult,
+  McpStdioServerConfig,
   ModelCapabilitiesResult,
   CommandExecutionConfig,
   ModelConfig,
@@ -57,6 +59,7 @@ declare global {
       revealPerformanceTraces(): Promise<void>
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
+      testMcpServer(config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
       testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
@@ -137,7 +140,7 @@ declare global {
       getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
       setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
       getPromptSnapshot(): Promise<PromptSnapshot>
-      getToolHelpSnapshot(): Promise<ToolHelpSnapshot>
+      getToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
       setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project>
       develop(

@@ -74,6 +74,7 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     commandExecutionGlobal: { ...defaultCommandExecutionConfig },
     defaultSkillIds: [],
     defaultKnowledgeBaseIds: [],
+    mcpServers: [],
   }
 }
 
