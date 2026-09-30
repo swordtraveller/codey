@@ -2,12 +2,31 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
   AppConfig,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextManagementConfig,
   ConversationStateChange,
   DevelopmentProgress,
   DevelopmentProgressState,
   ImageAttachment,
+  MediaAttachment,
+  McpServerTestResult,
+  McpStdioServerConfig,
+  ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
+  PromptSnapshot,
+  ToolHelpSnapshot,
+  ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
+  InstalledSkill,
+  KnowledgeBase,
+  KnowledgeBaseMode,
+  EmbeddingProviderConfig,
+  SkillImportPreview,
+  ResourceSelectionOverride,
   PerformanceTraceEvent,
   PerformanceTraceFile,
   PerformanceTraceStatus,
@@ -34,7 +53,30 @@ contextBridge.exposeInMainWorld(
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
     saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    testMcpServer: (config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult> =>
+      ipcRenderer.invoke('mcp:test-stdio-server', config, projectRoot),
+    fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
+      ipcRenderer.invoke('models:fetch-capabilities', modelName),
+    testModelConnectivity: (model: ModelConfig): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-connectivity', model),
+    testProviderConnectivity: (provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult> =>
+      ipcRenderer.invoke('models:test-provider', provider),
+    listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
+      ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),
+    previewGitHubSkill: (url: string): Promise<SkillImportPreview> => ipcRenderer.invoke('skills:preview-github', url),
+    installSkillPreview: (previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill> =>
+      ipcRenderer.invoke('skills:install-preview', previewId, selectedCandidateIds),
+    removeSkill: (skillId: string): Promise<void> => ipcRenderer.invoke('skills:remove', skillId),
+    listKnowledgeBases: (): Promise<KnowledgeBase[]> => ipcRenderer.invoke('knowledge-bases:list'),
+    chooseKnowledgeBaseDirectory: (): Promise<string | null> => ipcRenderer.invoke('knowledge-bases:choose-directory'),
+    createKnowledgeBase: (input: { name?: string; directoryPath: string; mode: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke('knowledge-bases:create', input),
+    updateKnowledgeBase: (id: string, patch: { name?: string; mode?: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke('knowledge-bases:update', id, patch),
+    refreshKnowledgeBase: (id: string): Promise<KnowledgeBase> => ipcRenderer.invoke('knowledge-bases:refresh', id),
+    removeKnowledgeBase: (id: string): Promise<void> => ipcRenderer.invoke('knowledge-bases:remove', id),
     getBridgeChannels: (): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:status'),
     createBridgeChannel: (bridgeUrl: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:create', bridgeUrl),
     approveBridgeRequest: (channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:approve', channelId, requestId, devicePublicKey),
@@ -51,6 +93,10 @@ contextBridge.exposeInMainWorld(
       projectId: string,
       contextConfig: ContextManagementConfig | null,
     ) => ipcRenderer.invoke('projects:set-context-config', projectId, contextConfig),
+    setProjectSkillSelection: (projectId: string, selection: ResourceSelectionOverride): Promise<Project> =>
+      ipcRenderer.invoke('projects:set-skill-selection', projectId, selection),
+    setProjectKnowledgeBaseSelection: (projectId: string, selection: ResourceSelectionOverride): Promise<Project> =>
+      ipcRenderer.invoke('projects:set-knowledge-base-selection', projectId, selection),
     setProjectArchived: (projectId: string, archived: boolean) =>
       ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
@@ -75,20 +121,83 @@ contextBridge.exposeInMainWorld(
       conversationId,
       contextConfig,
     ),
+    setConversationSkillSelection: (
+      projectId: string,
+      conversationId: string,
+      selection: ResourceSelectionOverride,
+    ): Promise<Project> => ipcRenderer.invoke(
+      'conversations:set-skill-selection',
+      projectId,
+      conversationId,
+      selection,
+    ),
+    setConversationKnowledgeBaseSelection: (
+      projectId: string,
+      conversationId: string,
+      selection: ResourceSelectionOverride,
+    ): Promise<Project> => ipcRenderer.invoke(
+      'conversations:set-knowledge-base-selection',
+      projectId,
+      conversationId,
+      selection,
+    ),
     setConversationAgentLimits: (
       projectId: string,
       conversationId: string,
-      agentLimits: AgentLimitsConfig,
+      agentLimits: AgentLimitsConfig | null,
     ) => ipcRenderer.invoke(
       'conversations:set-agent-limits',
       projectId,
       conversationId,
       agentLimits,
     ),
+    setConversationCommandExecution: (
+      projectId: string,
+      conversationId: string,
+      commandExecution: CommandExecutionConfig | null,
+    ) => ipcRenderer.invoke(
+      'conversations:set-command-execution',
+      projectId,
+      conversationId,
+      commandExecution,
+    ),
+    setProjectCommandExecutionDefault: (
+      projectId: string,
+      commandExecution: CommandExecutionConfig | null,
+    ) => ipcRenderer.invoke(
+      'projects:set-command-execution-default',
+      projectId,
+      commandExecution,
+    ),
+    setProjectAgentLimitsDefault: (
+      projectId: string,
+      agentLimits: AgentLimitsConfig | null,
+    ) => ipcRenderer.invoke(
+      'projects:set-agent-limits-default',
+      projectId,
+      agentLimits,
+    ),
+    onCommandReviewRequest: (listener: (request: CommandApprovalRequest) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, request: CommandApprovalRequest) => listener(request)
+      ipcRenderer.on('command-review:request', handler)
+      return () => ipcRenderer.removeListener('command-review:request', handler)
+    },
+    respondCommandReview: (requestId: string, response: CommandApprovalResponse) =>
+      ipcRenderer.invoke('command-review:respond', requestId, response),
+    detectShells: (): Promise<ShellDetectionResult> => ipcRenderer.invoke('shells:detect'),
+    getCachedShellDetection: (): Promise<ShellDetectionResult | null> => ipcRenderer.invoke('shells:cached'),
+    pickBashExecutable: (): Promise<string | null> => ipcRenderer.invoke('shells:pick-bash'),
+    listWslDistros: (): Promise<string[]> => ipcRenderer.invoke('shells:list-wsl-distros'),
+    getWsl2ManualConfig: (): Promise<Wsl2ManualConfig | null> => ipcRenderer.invoke('shells:get-wsl2-config'),
+    setWsl2ManualConfig: (config: Wsl2ManualConfig | null): Promise<void> => ipcRenderer.invoke('shells:set-wsl2-config', config),
+    getPromptSnapshot: (): Promise<PromptSnapshot> => ipcRenderer.invoke('prompts:snapshot'),
+    getToolHelpSnapshot: (projectRoot?: string): Promise<ToolHelpSnapshot> => ipcRenderer.invoke('tools:help-snapshot', projectRoot),
     setConversationArchived: (projectId: string, conversationId: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
-    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, traceId),
+    setConversationReadState: (projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) =>
+      ipcRenderer.invoke('conversations:set-read-state', projectId, conversationId, lastReadMessageId, lastReadAt),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, attachments, traceId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
     onScreenshotSource: (listener: (source: ScreenshotSource) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, source: ScreenshotSource) => listener(source)
@@ -148,5 +257,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('context-debug:unpin-lowest', projectId, conversationId),
     simulateTokenLimit: (projectId: string, conversationId: string, requestTokens: number) =>
       ipcRenderer.invoke('context-debug:simulate', projectId, conversationId, requestTokens),
+    showNotification: (payload: { type: string; title: string; body: string; projectId?: string; conversationId?: string; messageId?: string }) =>
+      ipcRenderer.invoke('notifications:show', payload),
+    getNotificationSettings: () => ipcRenderer.invoke('notifications:get-settings'),
+    setNotificationSettings: (settings: any) => ipcRenderer.invoke('notifications:set-settings', settings),
+    onNotificationClicked: (callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data)
+      ipcRenderer.on('notification:clicked', handler)
+      return () => ipcRenderer.removeListener('notification:clicked', handler)
+    },
   }),
 )

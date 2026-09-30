@@ -4,55 +4,79 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import {
   defaultAgentLimitsConfig,
+  defaultCommandExecutionConfig,
   type AgentContextMessage,
   type AgentLimitsConfig,
   type AssistantMessageBlock,
   type ChatMessage,
+  type CommandExecutionConfig,
   type ContextCompressionNotice,
   type ContextManagementConfig,
   type ConversationTurnRecord,
   type Conversation,
   type ImageAttachment,
+  type MediaAttachment,
   type ModelConfigSnapshot,
   type Project,
   type ProjectFolder,
+  type ResourceSelectionOverride,
 } from '../shared/types'
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
+import { isValidCommandExecutionConfig, normalizeCommandExecutionConfig } from './command-execution-config'
 import { log } from './logger'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
+import { sanitizeResourceSelection } from './skills'
 import {
   hydrateImageAttachments,
   imageReferences,
   persistImageAttachments,
   type StoredImageReference,
 } from './image-store'
+import {
+  hydrateMediaAttachments,
+  mediaReferences,
+  persistMediaAttachments,
+  type StoredMediaReference,
+} from './media-store'
 
-type PersistedChatMessage = Omit<ChatMessage, 'images'> & {
+type PersistedChatMessage = Omit<ChatMessage, 'images' | 'attachments'> & {
   images?: ImageAttachment[] | StoredImageReference[]
+  attachments?: MediaAttachment[] | StoredMediaReference[]
 }
-type PersistedAgentMessage = Omit<AgentContextMessage, 'images'> & {
+type PersistedAgentMessage = Omit<AgentContextMessage, 'images' | 'attachments'> & {
   images?: ImageAttachment[] | StoredImageReference[]
+  attachments?: MediaAttachment[] | StoredMediaReference[]
 }
-type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits'> & {
+type StoredConversation = Omit<Conversation, 'messages' | 'agentMessages' | 'modelConfigId' | 'contextConfigOverride' | 'agentLimits' | 'commandExecution' | 'skillSelection' | 'knowledgeBaseSelection'> & {
   messages: PersistedChatMessage[]
   agentMessages?: PersistedAgentMessage[]
   modelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
-  agentLimits?: Partial<AgentLimitsConfig>
+  agentLimits?: Partial<AgentLimitsConfig> | null
+  commandExecution?: Partial<CommandExecutionConfig> | null
+  skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
+  unlockedToolsets?: string[]
 }
 type LegacyStoredProject = Omit<
   Project,
-  'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations'
+  'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'conversations' | 'skillSelection' | 'knowledgeBaseSelection'
 > & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversations: StoredConversation[]
+  skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
 }
-type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId'> & {
+type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfigId' | 'contextConfigOverride' | 'folders' | 'pythonEnvironmentFolderId' | 'commandExecutionDefault' | 'agentLimitsDefault' | 'skillSelection' | 'knowledgeBaseSelection'> & {
   defaultModelConfigId?: string | null
   contextConfigOverride?: Partial<ContextManagementConfig> | null
+  commandExecutionDefault?: Partial<CommandExecutionConfig> | null
+  agentLimitsDefault?: Partial<AgentLimitsConfig> | null
+  skillSelection?: Partial<ResourceSelectionOverride>
+  knowledgeBaseSelection?: Partial<ResourceSelectionOverride>
   folders: Array<ProjectFolder | string>
   pythonEnvironmentFolderId?: string | null
   conversationIds: string[]
@@ -185,12 +209,29 @@ function normalizeOverride(
 }
 
 function normalizeStoredAgentLimits(
-  value: Partial<AgentLimitsConfig> | undefined,
-): AgentLimitsConfig {
+  value: Partial<AgentLimitsConfig> | null | undefined,
+): AgentLimitsConfig | null {
+  // null = inherit the upper layer (project for conversations, global for
+  // projects). Invalid stored configs fall back to inherit rather than a
+  // materialized default so a bad write never freezes stale settings.
+  if (value === null || value === undefined) return null
   const normalized = normalizeAgentLimitsConfig(value)
   return isValidAgentLimitsConfig(normalized)
     ? normalized
-    : { ...defaultAgentLimitsConfig }
+    : null
+}
+
+function normalizeStoredCommandExecution(
+  value: Partial<CommandExecutionConfig> | null | undefined,
+): CommandExecutionConfig | null {
+  // null = inherit the upper layer (project for conversations, global for
+  // projects). Invalid stored configs fall back to inherit rather than a
+  // materialized default so a bad write never freezes stale settings.
+  if (value === null || value === undefined) return null
+  const normalized = normalizeCommandExecutionConfig(value)
+  return isValidCommandExecutionConfig(normalized)
+    ? normalized
+    : null
 }
 
 function validateOverride(contextConfig: ContextManagementConfig | null): ContextManagementConfig | null {
@@ -204,11 +245,13 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   const messages = await Promise.all(value.messages.map(async (message) => ({
     ...message,
     images: await hydrateImageAttachments(message.images),
+    attachments: await hydrateMediaAttachments(message.attachments),
   })))
-  const storedAgentMessages = value.agentMessages ?? value.messages.map(({ role, content, images }) => ({ role, content, images }))
+  const storedAgentMessages = value.agentMessages ?? value.messages.map(({ role, content, images, attachments }) => ({ role, content, images, attachments }))
   const agentMessages = await Promise.all(storedAgentMessages.map(async (message) => ({
     ...message,
     images: await hydrateImageAttachments(message.images),
+    attachments: await hydrateMediaAttachments(message.attachments),
   })))
   return {
     ...value,
@@ -216,6 +259,12 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     modelConfigId: value.modelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
+    commandExecution: normalizeStoredCommandExecution(value.commandExecution),
+    skillSelection: sanitizeResourceSelection(value.skillSelection),
+    knowledgeBaseSelection: sanitizeResourceSelection(value.knowledgeBaseSelection),
+    unlockedToolsets: Array.isArray(value.unlockedToolsets)
+      ? [...new Set(value.unlockedToolsets.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== ''))]
+      : [],
     messages,
     agentMessages,
   }
@@ -235,6 +284,10 @@ async function normalizeProjectMetadata(
     archived: value.archived === true,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
+    commandExecutionDefault: normalizeStoredCommandExecution(value.commandExecutionDefault),
+    agentLimitsDefault: normalizeStoredAgentLimits(value.agentLimitsDefault),
+    skillSelection: sanitizeResourceSelection(value.skillSelection),
+    knowledgeBaseSelection: sanitizeResourceSelection(value.knowledgeBaseSelection),
     folders,
     conversations,
     pythonEnvironmentFolderId: configuredFolder
@@ -243,9 +296,10 @@ async function normalizeProjectMetadata(
   }
 }
 
-async function persistImagesForConversation(projectId: string, conversation: Conversation): Promise<void> {
+async function persistAttachmentsForConversation(projectId: string, conversation: Conversation): Promise<void> {
   for (const message of [...conversation.messages, ...conversation.agentMessages]) {
     await persistImageAttachments(projectId, conversation.id, message.images)
+    await persistMediaAttachments(projectId, conversation.id, message.attachments)
   }
 }
 
@@ -255,10 +309,12 @@ function storedConversation(projectId: string, conversation: Conversation): Stor
     messages: conversation.messages.map((message) => ({
       ...message,
       images: imageReferences(projectId, conversation.id, message.images),
+      attachments: mediaReferences(projectId, conversation.id, message.attachments),
     })),
     agentMessages: conversation.agentMessages.map((message) => ({
       ...message,
       images: imageReferences(projectId, conversation.id, message.images),
+      attachments: mediaReferences(projectId, conversation.id, message.attachments),
     })),
   }
 }
@@ -290,7 +346,7 @@ async function migrateLegacyProjects(stored: LegacyStoredProject[]): Promise<Pro
       conversationIds: conversations.map((conversation) => conversation.id),
     }, conversations)
     for (const conversation of project.conversations) {
-      await persistImagesForConversation(project.id, conversation)
+      await persistAttachmentsForConversation(project.id, conversation)
       await persistConversation(project.id, conversation)
     }
     await persistProjectMetadata(project)
@@ -432,7 +488,12 @@ function createConversationRecord(index: number): Conversation {
     archived: false,
     modelConfigId: null,
     contextConfigOverride: null,
-    agentLimits: { ...defaultAgentLimitsConfig },
+    // null = inherit the project agent-limits default.
+    agentLimits: null,
+    // null = inherit the project default (and, through it, the global review).
+    commandExecution: null,
+    skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     messages: [],
     agentMessages: [],
   }
@@ -487,6 +548,12 @@ export function createProject(name: string, defaultModelConfigId: string | null 
       archived: false,
       defaultModelConfigId,
       contextConfigOverride: null,
+      // null = inherit the built-in matrix defaults plus the global review.
+      commandExecutionDefault: null,
+      // null = inherit the global agent-limits default.
+      agentLimitsDefault: null,
+      skillSelection: { enabledIds: [], disabledIds: [] },
+      knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
       folders: [],
       pythonEnvironmentFolderId: null,
       conversations: [createConversationRecord(1)],
@@ -532,6 +599,24 @@ export function setProjectContextConfig(projectId: string, contextConfig: Contex
   })
 }
 
+export function setProjectSkillSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const project = await findProject(projectId)
+    project.skillSelection = sanitizeResourceSelection(selection)
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
+export function setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const project = await findProject(projectId)
+    project.knowledgeBaseSelection = sanitizeResourceSelection(selection)
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
 export function setProjectArchived(projectId: string, archived: boolean): Promise<Project> {
   return serializeWrite(projectWriteScope(projectId), async () => {
     const project = await findProject(projectId)
@@ -556,7 +641,18 @@ export function setConversationModelConfig(projectId: string, conversationId: st
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    // Remember the current context config for the outgoing model.
+    if (conversation.modelConfigId && conversation.contextConfigOverride) {
+      conversation.perModelContextConfigs = {
+        ...conversation.perModelContextConfigs,
+        [conversation.modelConfigId]: conversation.contextConfigOverride,
+      }
+    }
     conversation.modelConfigId = modelConfigId
+    // Restore the remembered config for the incoming model when present.
+    conversation.contextConfigOverride = modelConfigId
+      ? conversation.perModelContextConfigs?.[modelConfigId] ?? conversation.contextConfigOverride
+      : conversation.contextConfigOverride
     await persistConversation(projectId, conversation)
     return project
   })
@@ -572,6 +668,34 @@ export function setConversationContextConfig(projectId: string, conversationId: 
   })
 }
 
+export function setConversationSkillSelection(
+  projectId: string,
+  conversationId: string,
+  selection: ResourceSelectionOverride,
+): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.skillSelection = sanitizeResourceSelection(selection)
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setConversationKnowledgeBaseSelection(
+  projectId: string,
+  conversationId: string,
+  selection: ResourceSelectionOverride,
+): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.knowledgeBaseSelection = sanitizeResourceSelection(selection)
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
 export function setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
@@ -582,14 +706,83 @@ export function setConversationArchived(projectId: string, conversationId: strin
   })
 }
 
-export function setConversationAgentLimits(projectId: string, conversationId: string, agentLimits: AgentLimitsConfig): Promise<Project> {
+/** Marks a conversation as read up to a given message id and persists it. */
+export function setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
-    const normalized = normalizeAgentLimitsConfig(agentLimits)
-    if (!isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.lastReadMessageId = lastReadMessageId ?? undefined
+    conversation.lastReadAt = lastReadAt ?? undefined
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setConversationAgentLimits(projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const normalized = agentLimits === null
+      ? null
+      : normalizeAgentLimitsConfig(agentLimits)
+    if (normalized !== null && !isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     conversation.agentLimits = normalized
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function setProjectAgentLimitsDefault(projectId: string, agentLimits: AgentLimitsConfig | null): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalized = agentLimits === null
+      ? null
+      : normalizeAgentLimitsConfig(agentLimits)
+    if (normalized !== null && !isValidAgentLimitsConfig(normalized)) throw new Error('Enter valid Agent limits')
+    const project = await findProject(projectId)
+    project.agentLimitsDefault = normalized
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
+export function setConversationCommandExecution(projectId: string, conversationId: string, commandExecution: CommandExecutionConfig | null): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const normalized = commandExecution === null
+      ? null
+      : normalizeCommandExecutionConfig(commandExecution)
+    if (normalized !== null && !isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.commandExecution = normalized
+    await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+/** Unlocks a hidden toolset for the conversation (idempotent) and persists it. */
+export function unlockConversationToolset(projectId: string, conversationId: string, keyword: string): Promise<Project> {
+  const normalized = keyword.trim().toLowerCase()
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    if (!normalized) throw new Error('Toolset keyword is required')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    if (!(conversation.unlockedToolsets ?? []).includes(normalized)) {
+      conversation.unlockedToolsets = [...(conversation.unlockedToolsets ?? []), normalized]
+      await persistConversation(projectId, conversation)
+    }
+    return project
+  })
+}
+
+export function setProjectCommandExecutionDefault(projectId: string, commandExecution: CommandExecutionConfig | null): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalized = commandExecution === null
+      ? null
+      : normalizeCommandExecutionConfig(commandExecution)
+    if (normalized !== null && !isValidCommandExecutionConfig(normalized)) throw new Error('Enter valid command execution settings')
+    const project = await findProject(projectId)
+    project.commandExecutionDefault = normalized
+    await persistProjectMetadata(project)
     return project
   })
 }
@@ -610,6 +803,7 @@ export async function addMessageImmediately(
   contextConfig?: ContextManagementConfig,
   turn?: ConversationTurnRecord,
   images?: ImageAttachment[],
+  attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
 ): Promise<Project> {
@@ -621,6 +815,7 @@ export async function addMessageImmediately(
     role,
     content,
     images,
+    attachments,
     blocks,
     compression,
     modelConfig,
@@ -629,7 +824,7 @@ export async function addMessageImmediately(
   }
   conversation.messages.push(message)
   if (role === 'user' && conversation.messages.length === 1) {
-    const title = content || images?.[0]?.name || 'Image request'
+    const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
   }
 
@@ -637,6 +832,7 @@ export async function addMessageImmediately(
     // Yield once so the caller can publish the in-memory snapshot first.
     await new Promise<void>((resolve) => setImmediate(resolve))
     await persistImageAttachments(projectId, conversationId, message.images)
+    await persistMediaAttachments(projectId, conversationId, message.attachments)
     await persistConversation(projectId, conversation)
   }).catch((error) => {
     log.error('workspace.message.persist.failed', {
@@ -661,6 +857,7 @@ export function addMessage(
   contextConfig?: ContextManagementConfig,
   turn?: ConversationTurnRecord,
   images?: ImageAttachment[],
+  attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
 ): Promise<Project> {
@@ -668,12 +865,14 @@ export function addMessage(
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
     await persistImageAttachments(projectId, conversationId, images)
+    await persistMediaAttachments(projectId, conversationId, attachments)
     conversation.messages.push({
       id: messageId ?? randomUUID(),
       createdAt: createdAt ?? new Date().toISOString(),
       role,
       content,
       images,
+      attachments,
       blocks,
       compression,
       modelConfig,
@@ -681,7 +880,7 @@ export function addMessage(
       turn,
     })
     if (role === 'user' && conversation.messages.length === 1) {
-      const title = content || images?.[0]?.name || 'Image request'
+      const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
       conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
     }
     await persistConversation(projectId, conversation)
@@ -710,7 +909,10 @@ export function saveConversationContext(
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
-    for (const message of agentMessages) await persistImageAttachments(projectId, conversationId, message.images)
+    for (const message of agentMessages) {
+      await persistImageAttachments(projectId, conversationId, message.images)
+      await persistMediaAttachments(projectId, conversationId, message.attachments)
+    }
     conversation.agentMessages = agentMessages
     conversation.context = context
     await persistConversation(projectId, conversation)

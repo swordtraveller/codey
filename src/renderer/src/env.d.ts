@@ -3,6 +3,8 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   ColdRecallPreview,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
   ContextDebugMessage,
   ContextDebugOverview,
   ContextManagementConfig,
@@ -11,13 +13,32 @@ import type {
   DevelopmentProgressState,
   DevelopmentResult,
   ImageAttachment,
+  MediaAttachment,
+  McpServerTestResult,
+  McpStdioServerConfig,
+  ModelCapabilitiesResult,
+  CommandExecutionConfig,
+  ModelConfig,
+  ModelConnectivityResult,
+  PromptSnapshot,
+  ToolHelpSnapshot,
+  ShellDetectionResult,
+  Wsl2ManualConfig,
   Project,
+  InstalledSkill,
+  KnowledgeBase,
+  KnowledgeBaseMode,
+  EmbeddingProviderConfig,
+  SkillImportPreview,
+  ResourceSelectionOverride,
   PerformanceTraceEvent,
   PerformanceTraceFile,
   PerformanceTraceStatus,
   ScreenshotSelection,
   ScreenshotSource,
   TokenLimitSimulation,
+  NotificationOptions,
+  NotificationSettings,
 } from '../../shared/types'
 
 interface RuntimeInfo {
@@ -38,7 +59,22 @@ declare global {
       revealPerformanceTraces(): Promise<void>
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
+      testMcpServer(config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult>
+      fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
+      testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
+      testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
+      listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
       getProjects(): Promise<Project[]>
+      listSkills(): Promise<InstalledSkill[]>
+      previewGitHubSkill(url: string): Promise<SkillImportPreview>
+      installSkillPreview(previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill>
+      removeSkill(skillId: string): Promise<void>
+      listKnowledgeBases(): Promise<KnowledgeBase[]>
+      chooseKnowledgeBaseDirectory(): Promise<string | null>
+      createKnowledgeBase(input: { name?: string; directoryPath: string; mode: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase>
+      updateKnowledgeBase(id: string, patch: { name?: string; mode?: KnowledgeBaseMode; embeddingProvider?: EmbeddingProviderConfig | null }): Promise<KnowledgeBase>
+      refreshKnowledgeBase(id: string): Promise<KnowledgeBase>
+      removeKnowledgeBase(id: string): Promise<void>
       getBridgeChannels(): Promise<BridgeChannelStatus[]>
       createBridgeChannel(bridgeUrl: string): Promise<BridgeChannelStatus>
       approveBridgeRequest(channelId: string, requestId: string, devicePublicKey: JsonWebKey): Promise<BridgeChannelStatus[]>
@@ -53,6 +89,8 @@ declare global {
         projectId: string,
         contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
+      setProjectSkillSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
+      setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
       setProjectArchived(projectId: string, archived: boolean): Promise<Project>
       createConversation(projectId: string): Promise<Project>
       setConversationModelConfig(
@@ -65,17 +103,52 @@ declare global {
         conversationId: string,
         contextConfig: ContextManagementConfig | null,
       ): Promise<Project>
+      setConversationSkillSelection(
+        projectId: string,
+        conversationId: string,
+        selection: ResourceSelectionOverride,
+      ): Promise<Project>
+      setConversationKnowledgeBaseSelection(
+        projectId: string,
+        conversationId: string,
+        selection: ResourceSelectionOverride,
+      ): Promise<Project>
       setConversationAgentLimits(
         projectId: string,
         conversationId: string,
-        agentLimits: AgentLimitsConfig,
+        agentLimits: AgentLimitsConfig | null,
       ): Promise<Project>
+      setConversationCommandExecution(
+        projectId: string,
+        conversationId: string,
+        commandExecution: CommandExecutionConfig | null,
+      ): Promise<Project>
+      setProjectCommandExecutionDefault(
+        projectId: string,
+        commandExecution: CommandExecutionConfig | null,
+      ): Promise<Project>
+      setProjectAgentLimitsDefault(
+        projectId: string,
+        agentLimits: AgentLimitsConfig | null,
+      ): Promise<Project>
+      onCommandReviewRequest(listener: (request: CommandApprovalRequest) => void): () => void
+      respondCommandReview(requestId: string, response: CommandApprovalResponse): Promise<boolean>
+      detectShells(): Promise<ShellDetectionResult>
+      getCachedShellDetection(): Promise<ShellDetectionResult | null>
+      pickBashExecutable(): Promise<string | null>
+      listWslDistros(): Promise<string[]>
+      getWsl2ManualConfig(): Promise<Wsl2ManualConfig | null>
+      setWsl2ManualConfig(config: Wsl2ManualConfig | null): Promise<void>
+      getPromptSnapshot(): Promise<PromptSnapshot>
+      getToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot>
       setConversationArchived(projectId: string, conversationId: string, archived: boolean): Promise<Project>
+      setConversationReadState(projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null): Promise<Project>
       develop(
         projectId: string,
         conversationId: string,
         content: string,
         images?: ImageAttachment[],
+        attachments?: MediaAttachment[],
         traceId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
@@ -115,6 +188,10 @@ declare global {
         conversationId: string,
         requestTokens: number,
       ): Promise<TokenLimitSimulation>
+      showNotification(payload: NotificationOptions): Promise<void>
+      getNotificationSettings(): Promise<NotificationSettings>
+      setNotificationSettings(settings: Partial<NotificationSettings>): Promise<void>
+      onNotificationClicked(callback: (data: { conversationId?: string; projectId?: string; messageId?: string }) => void): () => void
     }
   }
 }

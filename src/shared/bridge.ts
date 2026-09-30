@@ -48,3 +48,10 @@ export type HandoverUserMessage = {
   clientMessageId: string
   content: string
 }
+  
+// Notification-related IPC events  
+export type NotificationClickedEvent = {  
+  conversationId?: string  
+  projectId?: string  
+  messageId?: string  
+} 

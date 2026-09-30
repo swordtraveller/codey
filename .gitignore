@@ -52,3 +52,11 @@ handover/dist/
 
 # Local packaging artifacts
 *.zip
+
+# RULER performance evaluation cache and results
+tests/performance/.cache/
+tests/performance/results/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

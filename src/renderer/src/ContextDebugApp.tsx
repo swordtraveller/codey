@@ -162,7 +162,7 @@ export function ContextDebugApp({ projectId, conversationId }: Props): React.JSX
     ? 'normal'
     : snapshot.requestTokens >= snapshot.modelMaxContext
       ? 'exceeded'
-      : snapshot.requestTokens >= snapshot.triggerThreshold
+      : snapshot.requestTokens >= snapshot.maxInputTokens
         ? 'warning'
         : 'normal'
   const layerSearchMatches = useMemo<Array<{ layer: Layer; id: string }>>(() => {

@@ -119,13 +119,13 @@ export function buildContextDebugSnapshot(result: ContextResult, config: import(
     roundCount,
     createdAt: new Date().toISOString(),
     modelMaxContext: result.metrics.modelMaxContext,
-    triggerThreshold: result.metrics.triggerThreshold,
+    maxInputTokens: result.metrics.maxInputTokens,
     systemTokens: countContextTokens(system),
     toolDefinitionTokens: result.toolDefinitionTokens,
-    hotTokens: countContextTokens(result.messages),
-    hotTokenBudget: result.hotTokenBudget ?? config.hotTokenBudget,
-    hotHighWatermark: result.hotHighWatermark ?? Math.floor(config.hotTokenBudget * 0.9),
-    hotLowWatermark: result.hotLowWatermark ?? Math.floor(config.hotTokenBudget * 0.8),
+    hotTokens: result.metrics.compressedTokens,
+    hotTokenBudget: config.hotTokenBudget,
+    hotHighWatermark: Math.floor(config.hotTokenBudget * 0.9),
+    hotLowWatermark: Math.floor(config.hotTokenBudget * 0.8),
     warmTokens: countContextTokens(result.warmMessages),
     warmTokenBudget: config.warmTokenBudget,
     pinnedHotTokens,
@@ -388,8 +388,8 @@ export async function demoteContext(projectId: string, conversationId: string, m
 export function simulateTokenLimit(projectId: string, conversationId: string, requestTokens: number): TokenLimitSimulation {
   const snapshot = snapshots.get(key(projectId, conversationId))
   const modelMaxContext = snapshot?.modelMaxContext ?? 128000
-  const triggerThreshold = snapshot?.triggerThreshold ?? modelMaxContext - 16000
-  const status = requestTokens >= modelMaxContext ? 'exceeded' : requestTokens >= triggerThreshold ? 'warning' : 'normal'
+  const maxInputTokens = snapshot?.maxInputTokens ?? Math.floor(modelMaxContext * 0.618)
+  const status = requestTokens >= modelMaxContext ? 'exceeded' : requestTokens >= maxInputTokens ? 'warning' : 'normal'
   addAudit(projectId, conversationId, { type: 'token_simulation', messageIds: [], description: `Simulated ${requestTokens} request tokens`, simulated: true })
-  return { requestTokens, triggerThreshold, modelMaxContext, status }
+  return { requestTokens, maxInputTokens, modelMaxContext, status }
 }

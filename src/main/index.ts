@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { access, appendFile } from 'node:fs/promises'
 import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -6,6 +7,11 @@ import type {
   AgentLimitsConfig,
   AppConfig,
   AssistantMessageBlock,
+  CommandApprovalMemory,
+  CommandApprovalRequest,
+  CommandApprovalResponse,
+  CommandExecutionConfig,
+  CommandReviewRule,
   ContextManagementConfig,
   ConversationRuntimeState,
   ConversationStateChange,
@@ -15,20 +21,32 @@ import type {
   DevelopmentProgressUpdate,
   DevelopmentResult,
   ImageAttachment,
+  MediaAttachment,
+  ModelConfig,
+  PromptSnapshot,
+  ToolHelpSnapshot,
   ScreenshotSelection,
   ScreenshotSource,
+  Wsl2ManualConfig,
   Conversation,
+  NotificationOptions,
+  NotificationSettings,
+  McpStdioServerConfig,
   Project,
+  ResourceSelectionOverride,
 } from '../shared/types'
+import { defaultCommandExecutionConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
+import { validateMediaAttachments } from '../shared/media-attachments'
 import {
   applyDevelopmentProgressUpdate,
   compactDevelopmentProgressUpdate,
   createDevelopmentProgressState,
 } from '../shared/development-progress'
-import { buildAgentContext, develop } from './agent'
+import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
+import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
   buildContextDebugSnapshot,
@@ -60,7 +78,12 @@ import { BridgeHandoverService } from './bridge'
 import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
-import { createModelConfigSnapshot, resolveModelConfig } from './model-config'
+import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveModelById } from './model-config'
+import { fetchModelCapabilities } from './model-capabilities'
+import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
+import { buildAuditPromptTemplate } from './command-executor'
+import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
+import { buildRunCommandTool, createAgentTools } from './tools'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -84,15 +107,47 @@ import {
   saveConversationContext,
   setConversationAgentLimits,
   setConversationArchived,
+  setConversationCommandExecution,
+  unlockConversationToolset,
   setConversationContextConfig,
   setConversationModelConfig,
+  setConversationReadState,
+  setConversationSkillSelection,
+  setConversationKnowledgeBaseSelection,
+  setProjectAgentLimitsDefault,
+  setProjectCommandExecutionDefault,
   setProjectContextConfig,
   setProjectArchived,
   setProjectModelConfig,
+  setProjectSkillSelection,
+  setProjectKnowledgeBaseSelection,
   updateConversationAgentMessages,
   updateConversationTurn,
 } from './workspace'
-
+import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
+import { isContextConfigValidForModel } from './context-config'
+import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
+import { notificationManager } from './notification-manager'
+import {
+  getInstalledSkillsByIds,
+  installSkillPreview,
+  listInstalledSkills,
+  previewGitHubSkill,
+  removeInstalledSkill,
+  resolveSkillSelection,
+  sanitizeResourceSelection,
+  validateResourceSelection,
+} from './skills'
+import {
+  createKnowledgeBase,
+  getKnowledgeBasesByIds,
+  listKnowledgeBases,
+  refreshKnowledgeBase,
+  removeKnowledgeBase,
+  resolveKnowledgeBaseSelection,
+  updateKnowledgeBase,
+} from './knowledge-bases'
 const conversationStates = new Map<string, ConversationRuntimeState>()
 const conversationControllers = new Map<string, AbortController>()
 const developmentProgressStates = new Map<string, DevelopmentProgressState>()
@@ -236,9 +291,354 @@ async function runDebugOperation<T>(
 async function validateModelConfigId(modelConfigId: string | null): Promise<void> {
   if (!modelConfigId) return
   const config = await readConfig()
-  if (!config.modelConfigs.some((model) => model.id === modelConfigId)) {
+  if (!isValidModelTargetId(config, modelConfigId)) {
     throw new Error('Model configuration not found')
   }
+}
+
+/** Validates an enabled command-execution config: the combo must be usable and
+ *  the audit model (when enabled) must resolve and differ from the session
+ *  model. Enforced again at execution time. */
+async function validateCommandExecution(config: CommandExecutionConfig): Promise<void> {
+  if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
+    throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
+  }
+  if (config.review?.reviewers.auditModel) {
+    const { auditModelConfigId } = config.review.reviewers
+    if (!auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
+    const appConfig = await readConfig()
+    const auditModel = resolveModelById(appConfig, auditModelConfigId)
+    if (!auditModel) throw new Error('The audit model configuration was not found')
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Builds a read-only snapshot of the live prompts for the settings viewer.
+ *  Reads directly from the source functions so the display never drifts
+ *  from what the agent actually sends. */
+/** Returns-tool descriptions for the help viewer; tools not in this map get a
+ *  generic note. Keys are tool function names. */
+const toolReturnsNotes: Record<string, string> = {
+  file_read: 'The UTF-8 text content of the file.',
+  file_write: 'Confirmation that the file was written.',
+  file_patch: 'Confirmation that the snippet was replaced.',
+  directory_list: 'JSON array of {name, type} entries.',
+  project_tree: 'A filtered directory tree as text.',
+  project_search_text: 'JSON array of matches with file, line, and preview.',
+  context_search: 'JSON array of matching context record metadata.',
+  context_read: 'JSON array of {id, role, content, representation, truthRefs, createdAt} records.',
+  web_search: 'JSON array of {title, url, snippet} results.',
+  web_open: 'The page text content.',
+  git_status: 'The concise working tree and staging status.',
+  git_diff: 'The unstaged or staged diff text.',
+  git_add: 'Confirmation with the staged paths.',
+  git_unstage: 'Confirmation with the unstaged paths.',
+  git_commit: 'The commit result with the new commit id.',
+  git_log: 'Recent commits with hash, author, date, and message.',
+  git_get_current_branch: 'The branch name or a detached-HEAD report.',
+  command_run: 'JSON {ok, output} with truncated stdout/stderr sections.',
+  python_execute: 'JSON {stdout, stderr, exit_code, duration_ms} from the sandboxed snippet.',
+  python_run_script: 'The script output with execution info.',
+  python_install_package: 'Installation result summary.',
+  python_env_info: 'JSON describing the Python environment.',
+  python_list_symbols: 'JSON array of classes and functions with line numbers.',
+  node_package_command: 'JSON result of the package-manager operation.',
+  node_package_script: 'The script output with execution info.',
+  node_validate: 'JSON with per-check pass/failure, duration, and bounded logs.',
+  frontend_start_dev_server: 'JSON {server_id} for status and log queries.',
+  frontend_get_dev_server_status: 'JSON status and bounded output.',
+  frontend_get_dev_server_logs: 'JSON with bounded stdout and stderr.',
+  frontend_stop_dev_server: 'Confirmation that the server tree stopped.',
+}
+
+/** Hidden-toolset membership by tool-name prefix; prefixes are unique per
+ *  toolset (python_/node_/frontend_/git_) and stable in createAgentTools. */
+/** Toolset membership by tool-name prefix; prefixes are unique per toolset
+ *  and stable in createAgentTools. Every tool follows `<toolset>_<action>`
+ *  except the find_hidden_toolset meta tool. */
+const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean }> = [
+  { prefix: 'web_', toolset: 'web', hidden: false },
+  { prefix: 'command_', toolset: 'command', hidden: false },
+  { prefix: 'context_', toolset: 'context', hidden: false },
+  { prefix: 'directory_', toolset: 'directory', hidden: false },
+  { prefix: 'file_', toolset: 'file', hidden: false },
+  { prefix: 'project_', toolset: 'project', hidden: false },
+  { prefix: 'python_', toolset: 'python', hidden: true },
+  { prefix: 'node_', toolset: 'node', hidden: true },
+  { prefix: 'frontend_', toolset: 'frontend', hidden: true },
+  { prefix: 'git_', toolset: 'git', hidden: true },
+]
+
+/** Builds the read-only tool help snapshot from live built-in definitions and
+ *  facade tools aggregated from enabled local MCP servers. The built-in catalog uses
+ *  representative settings and includes every hidden toolset. */
+async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot> {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    agentLimitsDefault: null,
+    skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const tools = createAgentTools(
+    sampleProject,
+    true,
+    // Show run_command in the help viewer: an enabled sample config with no
+    // shell detection cached (the same convention as the prompts viewer).
+    { ...defaultCommandExecutionConfig, enabled: true },
+    null,
+    // Show every hidden-toolset tool as well — the help viewer documents the
+    // full catalog regardless of what the current conversation unlocked.
+    ['python', 'node', 'frontend', 'git'],
+  ) as Array<{
+    function: { name?: string; description?: string; parameters?: unknown }
+  }>
+  const builtinEntries = tools
+    .filter((tool) => typeof tool.function.name === 'string')
+    .map((tool) => ({
+      name: tool.function.name ?? '',
+      description: tool.function.description ?? '',
+      parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
+      returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+      source: 'builtin' as const,
+      toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
+      toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
+    }))
+  const appConfig = await readConfig()
+  const mcpTools = await listMcpToolDefinitions(
+    appConfig.mcpServers,
+    projectRoot,
+    undefined,
+    (server, error) => log.warn('mcp.help.connect.failed', {
+      serverId: server.id,
+      serverName: server.name,
+      error,
+    }),
+  )
+  return {
+    entries: [
+      ...builtinEntries,
+      ...mcpTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: JSON.stringify(tool.parameters, null, 2),
+        returns: tool.category === 'catalog'
+          ? 'A compact capability overview, a paged operation search/list, or one downstream operation schema.'
+          : 'A JSON string returned by the selected configured MCP server operation.',
+        source: 'mcp' as const,
+        toolset: 'MCP',
+        toolsetHidden: false,
+      })),
+    ],
+  }
+}
+
+function buildPromptSnapshot(): PromptSnapshot {
+  const sampleProject: Project = {
+    id: 'sample',
+    name: 'Sample',
+    archived: false,
+    defaultModelConfigId: null,
+    contextConfigOverride: null,
+    commandExecutionDefault: { ...defaultCommandExecutionConfig },
+    agentLimitsDefault: null,
+    skillSelection: { enabledIds: [], disabledIds: [] },
+    knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
+    folders: [{ id: 'folder-id', path: 'C:/path/to/project' }],
+    pythonEnvironmentFolderId: 'folder-id',
+    conversations: [],
+  }
+  const agentSystem = createAgentSystemMessage(sampleProject, true).content ?? ''
+  const agentSystemOffline = createAgentSystemMessage(sampleProject, false).content ?? ''
+  const networkLine = agentSystem.split('\n').find((line) => line.startsWith('Network access')) ?? ''
+  const agentSystemTemplate = agentSystem
+    .replace(/- folder-id: C:\/path\/to\/project/, '- <folder-id>: <folder path>')
+    .replace(networkLine, networkLine.startsWith('Network access is enabled')
+      ? 'Network access is enabled only for the read-only web_search and web_open tools. … (or: Network access is disabled. Do not call web_search or web_open.)'
+      : networkLine)
+  void agentSystemOffline
+  const commandTool = buildRunCommandTool(
+    sampleProject,
+    { ...defaultCommandExecutionConfig, enabled: true },
+    null,
+  ) as { function: { description?: string } }
+  return {
+    entries: [
+      {
+        id: 'agent-system',
+        title: 'Agent system prompt',
+        scene: 'Sent as the system message on every model request. Defines the coding-agent identity, sandbox rules, tool selection guidance, network policy, and Hot/Warm/Cold context semantics.',
+        content: agentSystemTemplate,
+      },
+      {
+        id: 'audit-prompt',
+        title: 'Command audit prompt',
+        scene: 'Sent to the separately configured audit model before each run_command executes (when model audit is enabled). The placeholders are filled with the workspace path, interpreter/environment, and the command.',
+        content: buildAuditPromptTemplate(),
+      },
+      {
+        id: 'run-command-tool',
+        title: 'run_command tool description',
+        scene: 'Included in the tool list when command execution is enabled. Reflects the configured interpreter/environment and lists the combos available on this machine (the sample below uses the bare environment with no detection cached).',
+        content: commandTool.function.description ?? '',
+      },
+      {
+        id: 'default-strategy-prompt',
+        title: 'Default context strategy prompt',
+        scene: 'Injected into the system message when the default (filter/rewrite/truncate) context strategy is active, telling the model that older history may be compressed.',
+        content: defaultStrategyPrompt,
+      },
+      {
+        id: 'layered-strategy-prompt',
+        title: 'Layered context strategy prompt',
+        scene: 'Injected into the system message when the layered (Hot/Warm/Cold) strategy is active, describing summary labeling and the context_search/context_read tools.',
+        content: layeredStrategyPrompt,
+      },
+    ],
+  }
+}
+
+/** In-app approval card for run_command review. The renderer replies over the
+ *  command-review:respond IPC; dismissal (window closed) resolves denied. */
+type ApprovalContext = {
+  projectId: string
+  conversationId: string
+}
+
+const pendingCommandApprovals = new Map<string, (response: CommandApprovalResponse) => void>()
+/** Runtime approval memory: per-turn rules (cleared when a new turn starts)
+ *  and per-session rules (cleared on app quit). Keyed by conversation. */
+const turnCommandRules = new Map<string, CommandReviewRule[]>()
+const sessionCommandRules = new Map<string, CommandReviewRule[]>()
+
+function upsertRuntimeRule(map: Map<string, CommandReviewRule[]>, key: string, rule: CommandReviewRule): void {
+  const rules = (map.get(key) ?? []).filter((existing) =>
+    existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+  rules.push(rule)
+  map.set(key, rules)
+}
+
+function requestCommandApproval(
+  request: {
+    command: string
+    timeoutSeconds: number
+    checks: string[]
+    workspacePath: string
+    environment: string
+    auditModelName?: string
+    auditNote?: string
+  },
+  context: ApprovalContext,
+): Promise<{ approved: boolean; timeoutSeconds: number }> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve({ approved: false, timeoutSeconds: request.timeoutSeconds })
+  }
+  const targetWindow = mainWindow
+  const requestId = randomUUID()
+  return new Promise((resolve) => {
+    pendingCommandApprovals.set(requestId, (response) => {
+      if (response.memory) {
+        void applyApprovalMemory(request.command, response.memory, context)
+          .catch((error) => log.warn('command.review.memory.failed', { requestId, error }))
+      }
+      resolve({ approved: response.approved, timeoutSeconds: request.timeoutSeconds })
+    })
+    notificationManager.showNotification({
+      type: 'needs-confirmation',
+      title: 'Confirmation required',
+      body: request.command,
+      projectId: context.projectId,
+      conversationId: context.conversationId,
+    })
+    targetWindow.webContents.send('command-review:request', {
+      requestId,
+      command: request.command,
+      timeoutSeconds: request.timeoutSeconds,
+      checks: request.checks,
+      workspacePath: request.workspacePath,
+      environment: request.environment,
+      auditModelName: request.auditModelName,
+      auditNote: request.auditNote,
+    } satisfies CommandApprovalRequest)
+  })
+}
+
+/** Persists an approval decision as a rule at the requested scope. Project
+ *  and global writes materialize the inherited review config first so the
+ *  effective settings never change. */
+async function applyApprovalMemory(
+  command: string,
+  memory: CommandApprovalMemory,
+  context: ApprovalContext,
+): Promise<void> {
+  const pattern = buildMemoryPattern(command, memory.patternType)
+  if (!pattern) return
+  const rule: CommandReviewRule = {
+    id: `approval-${randomUUID().slice(0, 8)}`,
+    pattern,
+    patternType: 'glob',
+    list: memory.list,
+    source: 'approval',
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  }
+  const key = `${context.projectId}:${context.conversationId}`
+  if (memory.scope === 'turn' || memory.scope === 'session') {
+    upsertRuntimeRule(memory.scope === 'turn' ? turnCommandRules : sessionCommandRules, key, rule)
+    return
+  }
+  if (memory.scope === 'project') {
+    const projects = await getProjects()
+    const project = projects.find((item) => item.id === context.projectId)
+    if (!project) return
+    const appConfig = await readConfig()
+    const review = project.commandExecutionDefault?.review
+      ? structuredClone(project.commandExecutionDefault.review)
+      : structuredClone(appConfig.commandReviewGlobal)
+    const nextRules = review.contentRules.filter((existing) =>
+      existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+    nextRules.push(rule)
+    const nextConfig = project.commandExecutionDefault
+      ? { ...structuredClone(project.commandExecutionDefault), review: { ...review, contentRules: nextRules } }
+      : { ...defaultCommandExecutionConfig, review: { ...review, contentRules: nextRules } }
+    await setProjectCommandExecutionDefault(context.projectId, nextConfig)
+    return
+  }
+  const appConfig = await readConfig()
+  const review = structuredClone(appConfig.commandReviewGlobal)
+  const nextRules = review.contentRules.filter((existing) =>
+    existing.pattern.trim().toLowerCase() !== rule.pattern.trim().toLowerCase())
+  nextRules.push(rule)
+  await saveConfig({ ...appConfig, commandReviewGlobal: { ...review, contentRules: nextRules } })
+}
+
+/** Appends a review decision to command-review-history.jsonl (fire and forget). */
+function appendCommandReviewHistory(
+  entry: CommandReviewDecision & { projectId: string; conversationId: string },
+): void {
+  void (async () => {
+    try {
+      const file = join(app.getPath('userData'), 'command-review-history.jsonl')
+      await appendFile(file, `${JSON.stringify(entry)}\n`, 'utf8')
+    } catch (error) {
+      log.warn('command.review.history.write-failed', error)
+    }
+  })()
 }
 
 function normalizeContextMessage(
@@ -271,6 +671,7 @@ async function developProject(
   conversationId: string,
   content: string,
   images: ImageAttachment[] = [],
+  attachments: MediaAttachment[] = [],
   onProgress?: (update: DevelopmentProgressUpdate) => void,
   signal?: AbortSignal,
   startedAt = Date.now(),
@@ -281,7 +682,9 @@ async function developProject(
   const normalizedContent = content.trim()
   const imageError = validateImageAttachments(images)
   if (imageError) return { writtenFiles: [], error: 'Invalid image attachment' }
-  if (!normalizedContent && images.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
+  const attachmentError = validateMediaAttachments(attachments)
+  if (attachmentError) return { writtenFiles: [], error: 'Invalid media attachment' }
+  if (!normalizedContent && images.length === 0 && attachments.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
   let project = await getProjectLive(projectId)
   if (project.folders.length === 0) {
@@ -291,7 +694,18 @@ async function developProject(
   if (!conversation) return { project, writtenFiles: [], error: 'Conversation not found' }
 
   const appConfig = await readConfig()
-  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  const effectiveSkillIds = resolveSkillSelection(
+    appConfig.defaultSkillIds,
+    project.skillSelection,
+    conversation.skillSelection,
+  )
+  const enabledSkills = await getInstalledSkillsByIds(effectiveSkillIds)
+  const enabledKnowledgeBases = await getKnowledgeBasesByIds(resolveKnowledgeBaseSelection(
+    appConfig.defaultKnowledgeBaseIds,
+    project.knowledgeBaseSelection,
+    conversation.knowledgeBaseSelection,
+  ))
+  const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) {
     return { project, writtenFiles: [], error: 'Configure a model before sending a message' }
   }
@@ -299,9 +713,48 @@ async function developProject(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
   const allowCustomStrategy = appConfig.developerMode && conversation.contextConfigOverride !== null
-  const agentLimits = structuredClone(conversation.agentLimits)
-  if (contextConfig.safeOutputMargin >= modelConfig.modelMaxContext) {
-    return { project, writtenFiles: [], error: 'Output token margin must be smaller than the model context window' }
+  // Three-level inheritance: conversation ?? project default ?? global default.
+  const agentLimits = structuredClone(
+    conversation.agentLimits ?? project.agentLimitsDefault ?? appConfig.agentLimitsGlobal,
+  )
+  const commandExecution = appConfig.developerMode
+    ? structuredClone(resolveCommandExecutionConfig(project, conversation, appConfig))
+    : { ...defaultCommandExecutionConfig }
+  // A new turn invalidates the previous turn's approval memory.
+  const conversationRuleKey = `${projectId}:${conversationId}`
+  turnCommandRules.delete(conversationRuleKey)
+  const ruleLayers: CommandRuleLayer[] = []
+  const turnRules = turnCommandRules.get(conversationRuleKey)
+  const sessionRules = sessionCommandRules.get(conversationRuleKey)
+  if ((turnRules?.length ?? 0) + (sessionRules?.length ?? 0) > 0) {
+    ruleLayers.push({ level: 'runtime', rules: [...(turnRules ?? []), ...(sessionRules ?? [])] })
+  }
+  if (conversation.commandExecution?.review) {
+    ruleLayers.push({ level: 'conversation', rules: conversation.commandExecution.review.contentRules })
+  }
+  if (project.commandExecutionDefault?.review) {
+    ruleLayers.push({ level: 'project', rules: project.commandExecutionDefault.review.contentRules })
+  }
+  ruleLayers.push({ level: 'global', rules: appConfig.commandReviewGlobal.contentRules })
+  const commandRuntime: CommandExecutorRuntime | undefined = appConfig.developerMode
+    ? {
+        conversationId,
+        signal,
+        sessionModelName: modelConfig.modelName,
+        ruleLayers,
+        resolveAuditModel: async (configId) => resolveModelById(appConfig, configId),
+        requestConfirmation: (request) => requestCommandApproval(request, { projectId, conversationId }),
+        recordDecision: (entry) => appendCommandReviewHistory({ ...entry, projectId, conversationId }),
+      }
+    : undefined
+  if (conversation.modelConfigId && !isContextConfigValidForModel(contextConfig, modelConfig.modelMaxContext)) {
+    return {
+      project,
+      writtenFiles: [],
+      error: conversation.contextConfigOverride
+        ? 'The conversation context settings are not valid for the selected model. Adjust them before sending.'
+        : 'Max input tokens must not exceed the model context window',
+    }
   }
 
   const userMessageId = randomUUID()
@@ -311,6 +764,7 @@ async function developProject(
     role: 'user' as const,
     content: normalizedContent,
     images,
+    attachments,
   }
   const memoryWriteStartedAt = performance.now()
   project = await addMessageImmediately(
@@ -324,12 +778,13 @@ async function developProject(
     contextConfig,
     { startedAt, result: 'processing' },
     images,
+    attachments,
     userMessageId,
   )
   recordPerformanceTrace({
     traceId, scope: 'main', phase: 'user-message-memory-write', projectId, conversationId,
     durationMs: performance.now() - memoryWriteStartedAt,
-    data: { contentChars: normalizedContent.length, imageCount: images.length },
+    data: { contentChars: normalizedContent.length, imageCount: images.length, attachmentCount: attachments.length },
   })
   // 用户消息已进入内存会话；先发布这个快照，再异步持久化并执行远端请求。
   onProjectUpdated?.(project)
@@ -367,29 +822,58 @@ async function developProject(
     .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
     .catch((error) => log.warn('context.latest-user.persist.failed', error))
   recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
-  const result = await develop(
-    project,
-    modelConfig,
-    contextConfig,
-    agentLimits,
-    requestHistory,
-    onProgress,
-    (managed) => {
-      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
-      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
-    },
-    {
-      conversationId,
-      projectId,
-      traceId,
-      signal,
-      latestUserMessageId: userMessageId,
-      allowCustomStrategy,
-      roundId,
-      roundCount,
-    },
-    appConfig.networkAccessEnabled,
+  const mcpProvider = await createMcpToolProvider(
+    appConfig.mcpServers,
+    project.folders[0]?.path,
+    signal,
+    (server, error) => log.warn('mcp.connect.failed', {
+      serverId: server.id,
+      serverName: server.name,
+      error,
+    }),
   )
+  let result: Awaited<ReturnType<typeof develop>>
+  try {
+    result = await develop(
+      project,
+      modelConfig,
+      contextConfig,
+      agentLimits,
+      requestHistory,
+      onProgress,
+      (managed) => {
+        const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
+        rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
+      },
+      {
+        conversationId,
+        projectId,
+        traceId,
+        signal,
+        latestUserMessageId: userMessageId,
+        allowCustomStrategy,
+        roundId,
+        roundCount,
+        commandExecution,
+        commandRuntime,
+        shellDetection: getCachedShellDetection(),
+        enabledSkills,
+        enabledKnowledgeBases,
+        mcpProvider,
+        unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
+        onToolsetUnlocked: (keyword: string) => {
+          // Persist the unlock so it survives app restarts and conversation
+          // reopenings, like the conversation context itself.
+          void unlockConversationToolset(projectId, conversationId, keyword)
+            .then((updated) => { project = updated })
+            .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
+        },
+      },
+      appConfig.networkAccessEnabled,
+    )
+  } finally {
+    await mcpProvider.close?.()
+  }
   project = await saveConversationContext(
     projectId,
     conversationId,
@@ -434,6 +918,23 @@ async function developProject(
     durationMs: performance.now() - totalStartedAt,
     data: { result: turn.result, timelineItems: result.timeline.length },
   })
+  if (turn.result === 'normal') {
+    notificationManager.showNotification({
+      type: 'task-complete',
+      title: 'Task completed',
+      body: conversation.title || 'Development finished',
+      projectId,
+      conversationId,
+    })
+  } else if (result.error && turn.result !== 'stopped') {
+    notificationManager.showNotification({
+      type: 'task-failed',
+      title: 'Task failed',
+      body: result.error,
+      projectId,
+      conversationId,
+    })
+  }
   return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
@@ -456,6 +957,7 @@ async function processBridgeMessage(message: import('../shared/bridge').Handover
       message.projectId,
       message.conversationId,
       message.content,
+      [],
       [],
       undefined,
       controller.signal,
@@ -509,6 +1011,7 @@ function createMainWindow(): void {
     },
   })
   mainWindow = window
+  notificationManager.setMainWindow(window)
   const webContentsId = window.webContents.id
   window.on('closed', () => {
     developmentProgressSubscriptions.delete(webContentsId)
@@ -517,6 +1020,9 @@ function createMainWindow(): void {
     contextDebugWindows.clear()
     closeAllPendingScreenshots()
     closeAllPreviewWindows()
+    // A closed window can never answer pending approvals; deny them.
+    for (const resolve of pendingCommandApprovals.values()) resolve({ approved: false })
+    pendingCommandApprovals.clear()
   })
   loadRenderer(window)
 }
@@ -592,11 +1098,19 @@ async function initializeContextDebugContext(
   if (getConversationState(projectId, conversationId) !== 'idle') return
   if (hasContextDebugSnapshot(projectId, conversationId)) return
 
-  const modelConfig = resolveModelConfig(appConfig, project, conversation)
+  const modelConfig = resolveConversationModel(appConfig, project, conversation)
   if (!modelConfig) return
   const contextConfig = structuredClone(
     resolveContextManagementConfig(appConfig, project, conversation),
   )
+  // Apply formula budgets when autoBudgetEnabled is true
+  if (contextConfig.autoBudgetEnabled) {
+    const budgets = deriveContextBudgets(modelConfig.modelMaxContext, modelConfig.modelMaxOutputTokens)
+    contextConfig.hotTokenBudget = budgets.hotTokenBudget
+    contextConfig.warmTokenBudget = budgets.warmTokenBudget
+    contextConfig.coldRecallTokenBudget = budgets.coldRecallTokenBudget
+    contextConfig.maxInputTokens = budgets.maxInputTokens
+  }
   const history = contextConfig.layeredEnabled
     ? await readConversationWorkingSet(
         projectId,
@@ -610,11 +1124,21 @@ async function initializeContextDebugContext(
     : await readConversationMessages(projectId, conversationId)
   const initializationRoundId = randomUUID()
   const initializationRoundCount = conversation.agentMessages.filter((message) => message.role === 'user').length
+  const enabledSkills = await getInstalledSkillsByIds(resolveSkillSelection(
+    appConfig.defaultSkillIds,
+    project.skillSelection,
+    conversation.skillSelection,
+  ))
+  const enabledKnowledgeBases = await getKnowledgeBasesByIds(resolveKnowledgeBaseSelection(
+    appConfig.defaultKnowledgeBaseIds,
+    project.knowledgeBaseSelection,
+    conversation.knowledgeBaseSelection,
+  ))
   const managed = buildAgentContext(project, modelConfig, contextConfig, history, appConfig.networkAccessEnabled, {
     allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
     roundId: initializationRoundId,
     roundCount: initializationRoundCount,
-  })
+  }, enabledSkills, enabledKnowledgeBases)
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
   rememberInitializedSnapshot(
     projectId,
@@ -731,6 +1255,13 @@ app.whenReady().then(() => {
     (event, projectId: string | null, conversationId: string | null) =>
       subscribeDevelopmentProgress(event.sender, projectId, conversationId),
   )
+  ipcMain.handle('command-review:respond', (_event, requestId: string, response: CommandApprovalResponse) => {
+    const resolve = pendingCommandApprovals.get(requestId)
+    if (!resolve) return false
+    pendingCommandApprovals.delete(requestId)
+    resolve(response)
+    return true
+  })
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
@@ -738,7 +1269,107 @@ app.whenReady().then(() => {
     setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
+  ipcMain.handle(
+    'mcp:test-stdio-server',
+    (_event, config: McpStdioServerConfig, projectRoot?: string) =>
+      testMcpStdioServer(config, projectRoot),
+  )
+  ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
+  ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
+  ipcMain.handle('models:test-provider', (_event, provider: { baseUrl: string; apiKey: string }) => testProviderConnectivity(provider))
+  ipcMain.handle('models:list-provider-models', (_event, provider: { baseUrl: string; apiKey: string }) => listProviderModels(provider))
+  ipcMain.handle('notifications:show', (_event, payload: NotificationOptions) => {
+    notificationManager.showNotification(payload)
+  })
+  ipcMain.handle('notifications:get-settings', () => notificationManager.getSettings())
+  ipcMain.handle('notifications:set-settings', (_event, settings: Partial<NotificationSettings>) => {
+    notificationManager.updateSettings(settings)
+  })
   ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('skills:list', () => listInstalledSkills())
+  ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))
+  ipcMain.handle('skills:install-preview', async (_event, previewId: string, selectedCandidateIds: string[]) => {
+    ensureAllIdle()
+    return installSkillPreview(previewId, selectedCandidateIds)
+  })
+  ipcMain.handle('skills:remove', async (_event, skillId: string) => {
+    ensureAllIdle()
+    await removeInstalledSkill(skillId)
+    const config = await readConfig()
+    if (config.defaultSkillIds.includes(skillId)) {
+      await saveConfig({ ...config, defaultSkillIds: config.defaultSkillIds.filter((id) => id !== skillId) })
+    }
+    const projects = await getProjects()
+    for (const project of projects) {
+      const projectSelection = sanitizeResourceSelection({
+        enabledIds: project.skillSelection.enabledIds.filter((id) => id !== skillId),
+        disabledIds: project.skillSelection.disabledIds.filter((id) => id !== skillId),
+      })
+      if (projectSelection.enabledIds.length !== project.skillSelection.enabledIds.length
+        || projectSelection.disabledIds.length !== project.skillSelection.disabledIds.length) {
+        await setProjectSkillSelection(project.id, projectSelection)
+      }
+      for (const conversation of project.conversations) {
+        const conversationSelection = sanitizeResourceSelection({
+          enabledIds: conversation.skillSelection.enabledIds.filter((id) => id !== skillId),
+          disabledIds: conversation.skillSelection.disabledIds.filter((id) => id !== skillId),
+        })
+        if (conversationSelection.enabledIds.length !== conversation.skillSelection.enabledIds.length
+          || conversationSelection.disabledIds.length !== conversation.skillSelection.disabledIds.length) {
+          await setConversationSkillSelection(project.id, conversation.id, conversationSelection)
+        }
+      }
+    }
+  })
+  ipcMain.handle('knowledge-bases:list', () => listKnowledgeBases())
+  ipcMain.handle('knowledge-bases:choose-directory', async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+  ipcMain.handle('knowledge-bases:create', async (_event, input: Parameters<typeof createKnowledgeBase>[0]) => {
+    ensureAllIdle()
+    return createKnowledgeBase(input)
+  })
+  ipcMain.handle('knowledge-bases:update', async (_event, id: string, patch: Parameters<typeof updateKnowledgeBase>[1]) => {
+    ensureAllIdle()
+    return updateKnowledgeBase(id, patch)
+  })
+  ipcMain.handle('knowledge-bases:refresh', async (_event, id: string) => {
+    ensureAllIdle()
+    return refreshKnowledgeBase(id)
+  })
+  ipcMain.handle('knowledge-bases:remove', async (_event, knowledgeBaseId: string) => {
+    ensureAllIdle()
+    await removeKnowledgeBase(knowledgeBaseId)
+    const config = await readConfig()
+    if (config.defaultKnowledgeBaseIds.includes(knowledgeBaseId)) {
+      await saveConfig({
+        ...config,
+        defaultKnowledgeBaseIds: config.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBaseId),
+      })
+    }
+    const projects = await getProjects()
+    for (const project of projects) {
+      const projectSelection = sanitizeResourceSelection({
+        enabledIds: project.knowledgeBaseSelection.enabledIds.filter((id) => id !== knowledgeBaseId),
+        disabledIds: project.knowledgeBaseSelection.disabledIds.filter((id) => id !== knowledgeBaseId),
+      })
+      if (projectSelection.enabledIds.length !== project.knowledgeBaseSelection.enabledIds.length
+        || projectSelection.disabledIds.length !== project.knowledgeBaseSelection.disabledIds.length) {
+        await setProjectKnowledgeBaseSelection(project.id, projectSelection)
+      }
+      for (const conversation of project.conversations) {
+        const conversationSelection = sanitizeResourceSelection({
+          enabledIds: conversation.knowledgeBaseSelection.enabledIds.filter((id) => id !== knowledgeBaseId),
+          disabledIds: conversation.knowledgeBaseSelection.disabledIds.filter((id) => id !== knowledgeBaseId),
+        })
+        if (conversationSelection.enabledIds.length !== conversation.knowledgeBaseSelection.enabledIds.length
+          || conversationSelection.disabledIds.length !== conversation.knowledgeBaseSelection.disabledIds.length) {
+          await setConversationKnowledgeBaseSelection(project.id, conversation.id, conversationSelection)
+        }
+      }
+    }
+  })
   ipcMain.handle('bridge:status', () => bridgeHandover.status())
   ipcMain.handle('bridge:create', async (_event, bridgeUrl: string) => bridgeHandover.createChannel(bridgeUrl))
   ipcMain.handle('bridge:approve', async (_event, channelId: string, requestId: string, devicePublicKey: JsonWebKey) => {
@@ -776,11 +1407,22 @@ app.whenReady().then(() => {
     ensureAllIdle()
     return setProjectContextConfig(projectId, contextConfig)
   })
+  ipcMain.handle('projects:set-skill-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
+    ensureProjectIdle(projectId)
+    return setProjectSkillSelection(projectId, validateResourceSelection(selection))
+  })
+  ipcMain.handle('projects:set-knowledge-base-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
+    ensureProjectIdle(projectId)
+    return setProjectKnowledgeBaseSelection(projectId, validateResourceSelection(selection))
+  })
   ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
     ensureProjectIdle(projectId)
     return setProjectArchived(projectId, archived)
   })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId))
+  ipcMain.handle('conversations:set-read-state', (_event, projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) => {
+    return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt)
+  })
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
     await validateModelConfigId(modelConfigId)
@@ -790,10 +1432,55 @@ app.whenReady().then(() => {
     ensureIdle(projectId, conversationId)
     return setConversationContextConfig(projectId, conversationId, contextConfig)
   })
-  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig) => {
+  ipcMain.handle('conversations:set-skill-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationSkillSelection(projectId, conversationId, validateResourceSelection(selection))
+  })
+  ipcMain.handle('conversations:set-knowledge-base-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
+    ensureIdle(projectId, conversationId)
+    return setConversationKnowledgeBaseSelection(projectId, conversationId, validateResourceSelection(selection))
+  })
+  ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureIdle(projectId, conversationId)
     return setConversationAgentLimits(projectId, conversationId, agentLimits)
   })
+  ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig | null) => {
+    ensureIdle(projectId, conversationId)
+    if (commandExecution?.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setConversationCommandExecution(projectId, conversationId, commandExecution)
+  })
+  ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig | null) => {
+    ensureProjectIdle(projectId)
+    if (commandExecution?.enabled) {
+      await validateCommandExecution(commandExecution)
+    }
+    return setProjectCommandExecutionDefault(projectId, commandExecution)
+  })
+  ipcMain.handle('projects:set-agent-limits-default', (_event, projectId: string, agentLimits: AgentLimitsConfig | null) => {
+    ensureProjectIdle(projectId)
+    return setProjectAgentLimitsDefault(projectId, agentLimits)
+  })
+  ipcMain.handle('shells:detect', () => detectShells())
+  ipcMain.handle('shells:cached', () => getCachedShellDetection())
+  ipcMain.handle('shells:pick-bash', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'bash executable', extensions: ['exe'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    // git-bash.exe is a mintty launcher; translate it to the real bash.exe.
+    const translated = translateGitBashLauncher(result.filePaths[0])
+    const effective = await fileExists(translated) ? translated : result.filePaths[0]
+    setManualBashPath(effective)
+    return effective
+  })
+  ipcMain.handle('shells:list-wsl-distros', () => listUserWslDistros())
+  ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
+  ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
+  ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
+  ipcMain.handle('tools:help-snapshot', (_event, projectRoot?: string) => buildToolHelpSnapshot(projectRoot))
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)
@@ -831,7 +1518,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], traceId?: string) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -842,7 +1529,7 @@ app.whenReady().then(() => {
     publishDevelopmentProgress(event.sender, projectId, conversationId, { type: 'reset' })
     setConversationState(projectId, conversationId, 'running')
     try {
-      const result = await developProject(projectId, conversationId, content, images, (update) => {
+      const result = await developProject(projectId, conversationId, content, images, attachments, (update) => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt, (project) => {
         if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)

@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "CodeyFilesystemOnly",
+      "env_class": "tests.performance.loca.fixtures.filesystem_only.FilesystemOnlyEnv",
+      "env_params": {
+        "expected_answer": "CODEY-FILESYSTEM-ONLY-OK"
+      },
+      "mcp_servers": {
+        "filesystem": {
+          "enabled": true,
+          "type": "filesystem",
+          "params": {
+            "workspace_path": "{agent_workspace}"
+          }
+        },
+        "claim_done": {
+          "enabled": true,
+          "type": "claim_done",
+          "params": {}
+        }
+      }
+    }
+  ]
+}

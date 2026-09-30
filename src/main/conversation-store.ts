@@ -12,13 +12,17 @@ import type {
 } from '../shared/types'
 import { countContextMessageTokens, SUMMARY_LABEL } from './context'
 import { hydrateImageAttachments, persistImageAttachments, type StoredImageReference } from './image-store'
+import { hydrateMediaAttachments, persistMediaAttachments, type StoredMediaReference } from './media-store'
 
 type MessageOverride = Pick<AgentContextMessage, 'manualContextLayer' | 'pinnedToHot' | 'contextRegion'> & {
   manualProtected?: boolean
   protection?: 'none' | 'partial' | 'full'
 }
 type StoredOverrides = Record<string, MessageOverride>
-type PersistedContextMessage = Omit<AgentContextMessage, 'images'> & { images?: AgentContextMessage['images'] | StoredImageReference[] }
+type PersistedContextMessage = Omit<AgentContextMessage, 'images' | 'attachments'> & {
+  images?: AgentContextMessage['images'] | StoredImageReference[]
+  attachments?: AgentContextMessage['attachments'] | StoredMediaReference[]
+}
 type LegacyPin = { pinnedToHot?: boolean; protection?: 'none' | 'partial' | 'full'; manualProtected?: boolean }
 type IndexCacheEntry = { signature: string; items: ColdIndexItem[] }
 
@@ -163,6 +167,7 @@ async function storedContextMessage(
   return {
     ...message,
     images: await persistImageAttachments(projectId, conversationId, message.images),
+    attachments: await persistMediaAttachments(projectId, conversationId, message.attachments),
   }
 }
 
@@ -389,7 +394,11 @@ export async function readConversationMessage(projectId: string, conversationId:
   if (!item) throw new Error('Cold truth message not found')
   const override = (await readOverrides(projectId, conversationId))[messageId]
   const message = await readAt<PersistedContextMessage>(paths(projectId, conversationId).messages, item)
-  return applyOverride({ ...message, images: await hydrateImageAttachments(message.images) }, override)
+  return applyOverride({
+    ...message,
+    images: await hydrateImageAttachments(message.images),
+    attachments: await hydrateMediaAttachments(message.attachments),
+  }, override)
 }
 
 export async function readConversationSummary(projectId: string, conversationId: string, summaryId: string): Promise<ContextSummaryArtifact> {

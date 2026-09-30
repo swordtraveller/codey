@@ -103,6 +103,30 @@ describe('development progress updates', () => {
     expect(compactDevelopmentProgressUpdate(initial, rewritten)).toBe(rewritten)
   })
 
+  it('does not crash on sparse streamed tool-call blocks', () => {
+    const initial = applyDevelopmentProgressUpdate(createDevelopmentProgressState(), {
+      type: 'replace-stream',
+      blocks: [{ type: 'content', content: 'draft' }],
+    })
+    const sparse = {
+      type: 'replace-stream' as const,
+      blocks: [
+        { type: 'content' as const, content: 'draft' },
+        undefined,
+        { type: 'function_call' as const, id: 'call', name: 'read', parameters: '{}' },
+      ],
+    }
+
+    const malformed = sparse as unknown as Parameters<typeof compactDevelopmentProgressUpdate>[1]
+    expect(() => compactDevelopmentProgressUpdate(initial, malformed)).not.toThrow()
+    expect(compactDevelopmentProgressUpdate(initial, malformed)).toEqual({
+      type: 'append-stream',
+      delta: {
+        toolCalls: [{ index: 0, id: 'call', name: 'read', parameters: '{}' }],
+      },
+    })
+  })
+
   it('resets all transient and committed progress', () => {
     const state = {
       timeline: [{ type: 'block' as const, block: { type: 'content' as const, content: 'done' } }],

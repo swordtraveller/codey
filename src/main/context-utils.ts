@@ -1,5 +1,6 @@
 import { getEncoding } from 'js-tiktoken'
 import { estimatedImageTokens } from '../shared/image-attachments'
+import { estimatedMediaAttachmentTokens } from '../shared/media-attachments'
 import type { ContextMessage } from './context'
 
 const encoder = getEncoding('o200k_base')
@@ -8,6 +9,7 @@ type MessageTokenCacheEntry = {
   role: ContextMessage['role']
   content: ContextMessage['content']
   images: ContextMessage['images']
+  attachments: ContextMessage['attachments']
   toolCalls: ContextMessage['tool_calls']
   toolCallId: ContextMessage['tool_call_id']
   metadataSignature: string
@@ -36,7 +38,7 @@ function messageMetadataSignature(message: ContextMessage): string {
   ].join('\u0001')
 }
 
-function isContextMessage(value: unknown): value is { role: string; content: unknown; images?: unknown; tool_calls?: unknown; tool_call_id?: unknown } {
+function isContextMessage(value: unknown): value is { role: string; content: unknown; images?: unknown; attachments?: unknown; tool_calls?: unknown; tool_call_id?: unknown } {
   return Boolean(value && typeof value === 'object' && 'role' in value && 'content' in value)
 }
 
@@ -46,6 +48,7 @@ function modelFacingValue(value: unknown): unknown {
       role: value.role,
       content: value.content,
       images: value.images,
+      attachments: value.attachments,
       tool_calls: value.tool_calls,
       tool_call_id: value.tool_call_id,
     }
@@ -55,6 +58,7 @@ function modelFacingValue(value: unknown): unknown {
 }
 export function countContextTokens(value: unknown): number {
   let imageCount = 0
+  let mediaCount = 0
   const serialized = JSON.stringify(modelFacingValue(value), (_key, item: unknown) => {
     if (
       item && typeof item === 'object' &&
@@ -62,12 +66,16 @@ export function countContextTokens(value: unknown): number {
       typeof item.dataUrl === 'string' && typeof item.mediaType === 'string' &&
       item.dataUrl.startsWith(`data:${item.mediaType};base64,`)
     ) {
+      if ('kind' in item) {
+        mediaCount += 1
+        return { ...item, dataUrl: '[media data omitted]' }
+      }
       imageCount += 1
       return { ...item, dataUrl: '[image data omitted]' }
     }
     return item
   })
-  return encoder.encode(serialized).length + imageCount * estimatedImageTokens
+  return encoder.encode(serialized).length + imageCount * estimatedImageTokens + mediaCount * estimatedMediaAttachmentTokens
 }
 
 /** Count one message and reuse the result while its model-facing fields stay unchanged. */
@@ -79,6 +87,7 @@ export function countContextMessageTokens(message: ContextMessage): number {
       && cached.role === message.role
       && cached.content === message.content
       && cached.images === message.images
+      && cached.attachments === message.attachments
       && cached.toolCalls === message.tool_calls
       && cached.toolCallId === message.tool_call_id
       && cached.metadataSignature === messageMetadataSignature(message)) {
@@ -90,6 +99,7 @@ export function countContextMessageTokens(message: ContextMessage): number {
       role: message.role,
       content: message.content,
       images: message.images,
+      attachments: message.attachments,
       toolCalls: message.tool_calls,
       toolCallId: message.tool_call_id,
       metadataSignature: messageMetadataSignature(message),

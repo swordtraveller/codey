@@ -86,7 +86,7 @@ describe('sharded workspace storage', () => {
     const first = await createProject('First')
     const second = await createProject('Second')
     const secondConversation = second.conversations[0]
-    await addMessage(first.id, first.conversations[0].id, 'user', 'keep me', undefined, undefined, undefined, undefined, undefined, undefined, 'keep-message')
+    await addMessage(first.id, first.conversations[0].id, 'user', 'keep me', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'keep-message')
 
     const secondConversationPath = join(
       electronState.userData,
@@ -140,7 +140,7 @@ describe('sharded workspace storage', () => {
   it('writes image bytes separately and never persists a data URL', async () => {
     const project = await createProject('Images')
     const conversation = project.conversations[0]
-    await addMessage(project.id, conversation.id, 'user', 'Look', undefined, undefined, undefined, undefined, undefined, [image()], 'message-1')
+    await addMessage(project.id, conversation.id, 'user', 'Look', undefined, undefined, undefined, undefined, undefined, [image()], undefined, 'message-1')
 
     const root = join(electronState.userData, 'workspace-data')
     const files = await filesUnder(root)
@@ -159,6 +159,7 @@ describe('sharded workspace storage', () => {
       conversation.id,
       'user',
       `Message ${index}`,
+      undefined,
       undefined,
       undefined,
       undefined,
