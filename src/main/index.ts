@@ -31,6 +31,7 @@ import type {
   Conversation,
   NotificationOptions,
   NotificationSettings,
+  McpStdioServerConfig,
   Project,
   ResourceSelectionOverride,
 } from '../shared/types'
@@ -81,6 +82,7 @@ import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationMod
 import { fetchModelCapabilities } from './model-capabilities'
 import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
+import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
 import { buildRunCommandTool, createAgentTools } from './tools'
 import {
   exportPerformanceTraces,
@@ -375,10 +377,10 @@ const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean 
   { prefix: 'git_', toolset: 'git', hidden: true },
 ]
 
-/** Builds the read-only tool help snapshot for the help viewer, from the live
- *  tool definitions. The complete set is shown: network access on, an enabled
- *  command-execution sample, and every hidden toolset unlocked. */
-function buildToolHelpSnapshot(): ToolHelpSnapshot {
+/** Builds the read-only tool help snapshot from live built-in definitions and
+ *  facade tools aggregated from enabled local MCP servers. The built-in catalog uses
+ *  representative settings and includes every hidden toolset. */
+async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnapshot> {
   const sampleProject: Project = {
     id: 'sample',
     name: 'Sample',
@@ -406,17 +408,43 @@ function buildToolHelpSnapshot(): ToolHelpSnapshot {
   ) as Array<{
     function: { name?: string; description?: string; parameters?: unknown }
   }>
+  const builtinEntries = tools
+    .filter((tool) => typeof tool.function.name === 'string')
+    .map((tool) => ({
+      name: tool.function.name ?? '',
+      description: tool.function.description ?? '',
+      parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
+      returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
+      source: 'builtin' as const,
+      toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
+      toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
+    }))
+  const appConfig = await readConfig()
+  const mcpTools = await listMcpToolDefinitions(
+    appConfig.mcpServers,
+    projectRoot,
+    undefined,
+    (server, error) => log.warn('mcp.help.connect.failed', {
+      serverId: server.id,
+      serverName: server.name,
+      error,
+    }),
+  )
   return {
-    entries: tools
-      .filter((tool) => typeof tool.function.name === 'string')
-      .map((tool) => ({
-        name: tool.function.name ?? '',
-        description: tool.function.description ?? '',
-        parameters: JSON.stringify(tool.function.parameters ?? {}, null, 2),
-        returns: toolReturnsNotes[tool.function.name ?? ''] ?? 'A JSON string; the structure depends on the tool.',
-        toolset: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.toolset,
-        toolsetHidden: toolsetByPrefix.find((entry) => (tool.function.name ?? '').startsWith(entry.prefix))?.hidden,
+    entries: [
+      ...builtinEntries,
+      ...mcpTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: JSON.stringify(tool.parameters, null, 2),
+        returns: tool.category === 'catalog'
+          ? 'A compact capability overview, a paged operation search/list, or one downstream operation schema.'
+          : 'A JSON string returned by the selected configured MCP server operation.',
+        source: 'mcp' as const,
+        toolset: 'MCP',
+        toolsetHidden: false,
       })),
+    ],
   }
 }
 
@@ -794,42 +822,58 @@ async function developProject(
     .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
     .catch((error) => log.warn('context.latest-user.persist.failed', error))
   recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
-  const result = await develop(
-    project,
-    modelConfig,
-    contextConfig,
-    agentLimits,
-    requestHistory,
-    onProgress,
-    (managed) => {
-      const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
-      rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
-    },
-    {
-      conversationId,
-      projectId,
-      traceId,
-      signal,
-      latestUserMessageId: userMessageId,
-      allowCustomStrategy,
-      roundId,
-      roundCount,
-      commandExecution,
-      commandRuntime,
-      shellDetection: getCachedShellDetection(),
-      enabledSkills,
-      enabledKnowledgeBases,
-      unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
-      onToolsetUnlocked: (keyword: string) => {
-        // Persist the unlock so it survives app restarts and conversation
-        // reopenings, like the conversation context itself.
-        void unlockConversationToolset(projectId, conversationId, keyword)
-          .then((updated) => { project = updated })
-          .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
-      },
-    },
-    appConfig.networkAccessEnabled,
+  const mcpProvider = await createMcpToolProvider(
+    appConfig.mcpServers,
+    project.folders[0]?.path,
+    signal,
+    (server, error) => log.warn('mcp.connect.failed', {
+      serverId: server.id,
+      serverName: server.name,
+      error,
+    }),
   )
+  let result: Awaited<ReturnType<typeof develop>>
+  try {
+    result = await develop(
+      project,
+      modelConfig,
+      contextConfig,
+      agentLimits,
+      requestHistory,
+      onProgress,
+      (managed) => {
+        const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
+        rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
+      },
+      {
+        conversationId,
+        projectId,
+        traceId,
+        signal,
+        latestUserMessageId: userMessageId,
+        allowCustomStrategy,
+        roundId,
+        roundCount,
+        commandExecution,
+        commandRuntime,
+        shellDetection: getCachedShellDetection(),
+        enabledSkills,
+        enabledKnowledgeBases,
+        mcpProvider,
+        unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
+        onToolsetUnlocked: (keyword: string) => {
+          // Persist the unlock so it survives app restarts and conversation
+          // reopenings, like the conversation context itself.
+          void unlockConversationToolset(projectId, conversationId, keyword)
+            .then((updated) => { project = updated })
+            .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
+        },
+      },
+      appConfig.networkAccessEnabled,
+    )
+  } finally {
+    await mcpProvider.close?.()
+  }
   project = await saveConversationContext(
     projectId,
     conversationId,
@@ -1225,6 +1269,11 @@ app.whenReady().then(() => {
     setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
   })
+  ipcMain.handle(
+    'mcp:test-stdio-server',
+    (_event, config: McpStdioServerConfig, projectRoot?: string) =>
+      testMcpStdioServer(config, projectRoot),
+  )
   ipcMain.handle('models:fetch-capabilities', (_event, modelName: string) => fetchModelCapabilities(modelName))
   ipcMain.handle('models:test-connectivity', (_event, model: ModelConfig) => testModelConnectivity(model))
   ipcMain.handle('models:test-provider', (_event, provider: { baseUrl: string; apiKey: string }) => testProviderConnectivity(provider))
@@ -1431,7 +1480,7 @@ app.whenReady().then(() => {
   ipcMain.handle('shells:get-wsl2-config', () => getWsl2ManualConfig())
   ipcMain.handle('shells:set-wsl2-config', (_event, config: Wsl2ManualConfig | null) => setWsl2ManualConfig(config))
   ipcMain.handle('prompts:snapshot', () => buildPromptSnapshot())
-  ipcMain.handle('tools:help-snapshot', () => buildToolHelpSnapshot())
+  ipcMain.handle('tools:help-snapshot', (_event, projectRoot?: string) => buildToolHelpSnapshot(projectRoot))
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
     return setConversationArchived(projectId, conversationId, archived)
