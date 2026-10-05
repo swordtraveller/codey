@@ -96,6 +96,7 @@ import {
 } from './performance-trace'
 import {
   addMessage,
+  addModelRequestEvent,
   addMessageImmediately,
   addProjectFolder,
   createConversation,
@@ -903,7 +904,9 @@ async function developProject(
       continue
     }
     await savePendingBlocks()
-    project = await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
+    project = item.type === 'compression'
+      ? await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
+      : await addModelRequestEvent(projectId, conversationId, item.event)
   }
   await savePendingBlocks()
   const turn: ConversationTurnRecord = {

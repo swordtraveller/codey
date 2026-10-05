@@ -806,6 +806,7 @@ export async function addMessageImmediately(
   attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
+  modelRequest?: ChatMessage['modelRequest'],
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
@@ -818,6 +819,7 @@ export async function addMessageImmediately(
     attachments,
     blocks,
     compression,
+    modelRequest,
     modelConfig,
     contextConfig,
     turn,
@@ -860,6 +862,7 @@ export function addMessage(
   attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
+  modelRequest?: ChatMessage['modelRequest'],
 ): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
@@ -875,6 +878,7 @@ export function addMessage(
       attachments,
       blocks,
       compression,
+      modelRequest,
       modelConfig,
       contextConfig,
       turn,
@@ -886,6 +890,14 @@ export function addMessage(
     await persistConversation(projectId, conversation)
     return project
   })
+}
+
+export function addModelRequestEvent(
+  projectId: string,
+  conversationId: string,
+  event: NonNullable<ChatMessage['modelRequest']>,
+): Promise<Project> {
+  return addMessage(projectId, conversationId, 'assistant', '', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, event)
 }
 
 export function updateConversationTurn(projectId: string, conversationId: string, messageId: string, turn: ConversationTurnRecord): Promise<Project> {

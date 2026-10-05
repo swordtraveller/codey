@@ -6,6 +6,16 @@ import {
 } from '../src/shared/development-progress'
 
 describe('development progress updates', () => {
+  it('clears a failed stream while keeping the request event', () => {
+    const streaming = applyDevelopmentProgressUpdate(createDevelopmentProgressState(), {
+      type: 'replace-stream', blocks: [{ type: 'content', content: 'draft' }],
+    })
+    const cleared = applyDevelopmentProgressUpdate(streaming, { type: 'clear-stream' })
+    const event = { type: 'model-request' as const, event: { kind: 'failure' as const, model: 'primary', reason: 'disconnected' } }
+    const recorded = applyDevelopmentProgressUpdate(cleared, { type: 'append', items: [event] })
+    expect(recorded.streamingBlocks).toEqual([])
+    expect(recorded.timeline).toEqual([event])
+  })
   it('keeps committed items stable while replacing streamed blocks', () => {
     const compression = {
       type: 'compression' as const,

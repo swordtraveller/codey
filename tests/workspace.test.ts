@@ -12,7 +12,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { addMessage, createProject, getProjects, getProjectsLive } from '../src/main/workspace'
+import { addMessage, addModelRequestEvent, createProject, getProjects, getProjectsLive } from '../src/main/workspace'
 
 async function filesUnder(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -81,6 +81,17 @@ describe('sharded workspace storage', () => {
     await removeTemporaryDirectory(resetDirectory)
     electronState.userData = directory
   }
+
+  it('preserves model request events across a reload without adding them to model history', async () => {
+    const project = await createProject('Recovery')
+    const conversationId = project.conversations[0]!.id
+    const event = { kind: 'failure' as const, model: 'primary', reason: 'SSE stream ended before [DONE]', attempt: 1 }
+    await addModelRequestEvent(project.id, conversationId, event)
+    await reloadFromDisk(electronState.userData)
+    const stored = (await getProjects())[0]!.conversations[0]!
+    expect(stored.messages.at(-1)?.modelRequest).toEqual(event)
+    expect(stored.agentMessages).toEqual([])
+  })
 
   it('salvages valid projects and quarantines a damaged conversation after restart', async () => {
     const first = await createProject('First')

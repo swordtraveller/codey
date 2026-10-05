@@ -800,6 +800,15 @@ h1 {
   font-size: 12px;
 }
 
+.model-request-notice {
+  padding: 7px 12px;
+  border-left: 2px solid #ba7517;
+  color: #59452d;
+  background: #fff9ed;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .function-call summary {
   cursor: pointer;
   color: #666;

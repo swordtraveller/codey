@@ -128,6 +128,8 @@ export function applyDevelopmentProgressUpdate(
       return update.items.length === 0
         ? state
         : { ...state, timeline: [...state.timeline, ...update.items] }
+    case 'clear-stream':
+      return { ...state, streamingBlocks: [] }
     case 'replace-stream':
       return { ...state, streamingBlocks: update.blocks }
     case 'append-stream': {

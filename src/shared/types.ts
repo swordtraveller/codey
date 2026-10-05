@@ -629,9 +629,18 @@ export type ContextCompressionNotice = {
   method: string
 }
 
+export type ModelRequestEvent = {
+  kind: 'failure' | 'retry' | 'failover'
+  model: string
+  reason?: string
+  attempt?: number
+  nextModel?: string
+}
+
 export type DevelopmentTimelineItem =
   | { type: 'block'; block: AssistantMessageBlock }
   | { type: 'compression'; compression: ContextCompressionNotice }
+  | { type: 'model-request'; event: ModelRequestEvent }
 
 export type ConversationTurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
 
@@ -650,6 +659,7 @@ export type ChatMessage = {
   attachments?: MediaAttachment[]
   blocks?: AssistantMessageBlock[]
   compression?: ContextCompressionNotice
+  modelRequest?: ModelRequestEvent
   modelConfig?: ModelConfigSnapshot
   contextConfig?: ContextManagementConfig
   turn?: ConversationTurnRecord
@@ -874,6 +884,7 @@ export type DevelopmentProgressUpdate =
   | { type: 'reset' }
   | { type: 'model-changed'; providerName: string; modelName: string }
   | { type: 'append'; items: DevelopmentTimelineItem[] }
+  | { type: 'clear-stream' }
   | { type: 'replace-stream'; blocks: AssistantMessageBlock[] }
   | { type: 'append-stream'; delta: DevelopmentStreamDelta }
   | { type: 'commit-stream'; items: DevelopmentTimelineItem[] }
