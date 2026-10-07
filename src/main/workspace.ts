@@ -257,6 +257,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     ...value,
     archived: value.archived === true,
     modelConfigId: value.modelConfigId ?? null,
+    hotLongTermContent: typeof value.hotLongTermContent === 'string' ? value.hotLongTermContent : '',
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
     commandExecution: normalizeStoredCommandExecution(value.commandExecution),
@@ -496,6 +497,7 @@ function createConversationRecord(index: number): Conversation {
     knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     messages: [],
     agentMessages: [],
+    hotLongTermContent: '',
   }
 }
 
@@ -908,6 +910,20 @@ export function updateConversationTurn(projectId: string, conversationId: string
     if (!message) throw new Error('Conversation message not found')
     message.turn = turn
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function updateConversationHotLongTermContent(
+  projectId: string,
+  conversationId: string,
+  content: string,
+): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    await persistConversation(projectId, { ...conversation, hotLongTermContent: content })
+    conversation.hotLongTermContent = content
     return project
   })
 }

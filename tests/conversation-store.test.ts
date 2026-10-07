@@ -335,6 +335,21 @@ describe('conversation context store', () => {
     }))
     expect(workingSet.find((message) => message.id === 'latest-user')).toEqual(expect.objectContaining({ contextLayer: 'hot' }))
   })
+  it('does not force legacy Long-term history into Hot, while keeping pins and Cold originals', async () => {
+    const messages: AgentContextMessage[] = [
+      { id: 'legacy', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Original preference and question', contextRegion: 'long-term' },
+      { id: 'pinned', createdAt: '2026-01-01T00:00:01.000Z', role: 'assistant', content: 'Manual pin', pinnedToHot: true },
+      { id: 'latest', createdAt: '2026-01-01T00:00:02.000Z', role: 'user', content: 'Current request' },
+    ]
+    await writeConversationMessages('project', 'conversation', messages)
+    const workingSet = await readConversationWorkingSet(
+      'project', 'conversation', { ...defaultContextManagementConfig, coldRecallTokenBudget: 0 }, '',
+      [], [], [{ ...messages[2], contextLayer: 'hot' }], 'latest',
+    )
+    expect(workingSet.map((message) => message.id)).toEqual(['pinned', 'latest'])
+    expect(await readConversationMessage('project', 'conversation', 'legacy'))
+      .toEqual(expect.objectContaining({ content: messages[0].content }))
+  })
   it('initializes a budgeted Hot working set while leaving unrelated Cold data unread', async () => {
     const messages: AgentContextMessage[] = [
       { id: 'old-user', createdAt: '2026-01-01T00:00:00.000Z', role: 'user', content: 'Unrelated old request '.repeat(2_000) },

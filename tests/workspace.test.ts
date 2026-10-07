@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ImageAttachment } from '../src/shared/image-attachments'
@@ -12,7 +12,12 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { addMessage, addModelRequestEvent, createProject, getProjects, getProjectsLive } from '../src/main/workspace'
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...actual, rename: vi.fn(actual.rename) }
+})
+
+import { addMessage, addModelRequestEvent, createConversation, createProject, getProjects, getProjectsLive, updateConversationHotLongTermContent } from '../src/main/workspace'
 
 async function filesUnder(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -55,6 +60,7 @@ describe('sharded workspace storage', () => {
     const projects = await getProjects()
     expect(projects.map((project) => project.id)).toEqual(['legacy-project', created.id])
     expect(projects[0].conversations[0].messages[0].images?.[0]).toEqual(attachment)
+    expect(projects[0].conversations[0].hotLongTermContent).toBe('')
 
     const manifestText = await readFile(join(electronState.userData, 'workspace.json'), 'utf8')
     expect(JSON.parse(manifestText)).toEqual({ version: 2, projectIds: ['legacy-project', created.id] })
@@ -81,6 +87,51 @@ describe('sharded workspace storage', () => {
     await removeTemporaryDirectory(resetDirectory)
     electronState.userData = directory
   }
+
+  it('persists and clears Long-term content without sharing it across conversations', async () => {
+    const project = await createProject('Long-term')
+    const firstId = project.conversations[0]!.id
+    await createConversation(project.id)
+    const secondId = project.conversations[1]!.id
+    await updateConversationHotLongTermContent(project.id, firstId, 'Confirmed preference')
+    await reloadFromDisk(electronState.userData)
+    let conversations = (await getProjects())[0]!.conversations
+    expect(conversations.find((item) => item.id === firstId)?.hotLongTermContent).toBe('Confirmed preference')
+    expect(conversations.find((item) => item.id === secondId)?.hotLongTermContent).toBe('')
+
+    await updateConversationHotLongTermContent(project.id, firstId, '')
+    await reloadFromDisk(electronState.userData)
+    conversations = (await getProjects())[0]!.conversations
+    expect(conversations.find((item) => item.id === firstId)?.hotLongTermContent).toBe('')
+  })
+
+  it('retains old Long-term content on disk and in memory when saving fails', async () => {
+    const project = await createProject('Atomic Long-term')
+    const conversation = project.conversations[0]!
+    await updateConversationHotLongTermContent(project.id, conversation.id, 'Original')
+    vi.mocked(rename).mockRejectedValueOnce(new Error('disk unavailable'))
+    await expect(updateConversationHotLongTermContent(project.id, conversation.id, 'Replacement'))
+      .rejects.toThrow('disk unavailable')
+    expect(conversation.hotLongTermContent).toBe('Original')
+    await reloadFromDisk(electronState.userData)
+    expect((await getProjects())[0]!.conversations[0]!.hotLongTermContent).toBe('Original')
+    await updateConversationHotLongTermContent(project.id, conversation.id, 'Retry')
+    expect((await getProjects())[0]!.conversations[0]!.hotLongTermContent).toBe('Retry')
+  })
+
+  it('serializes Long-term replacements alongside history writes without losing either', async () => {
+    const project = await createProject('Concurrent Long-term')
+    const conversationId = project.conversations[0]!.id
+    await Promise.all([
+      updateConversationHotLongTermContent(project.id, conversationId, 'First'),
+      addMessage(project.id, conversationId, 'user', 'Keep history'),
+      updateConversationHotLongTermContent(project.id, conversationId, 'Last'),
+    ])
+    await reloadFromDisk(electronState.userData)
+    const stored = (await getProjects())[0]!.conversations[0]!
+    expect(stored.hotLongTermContent).toBe('Last')
+    expect(stored.messages).toEqual([expect.objectContaining({ content: 'Keep history' })])
+  })
 
   it('preserves model request events across a reload without adding them to model history', async () => {
     const project = await createProject('Recovery')

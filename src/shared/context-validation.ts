@@ -21,6 +21,7 @@ export function normalizeContextManagementConfig(
     maxInputTokens,
     recentKeepRounds: Math.floor(merged.recentKeepRounds),
     hotTokenBudget: Math.floor(merged.hotTokenBudget),
+    hotLongTermTokenBudget: Math.floor(merged.hotLongTermTokenBudget ?? 1_000),
     warmTokenBudget: Math.floor(merged.warmTokenBudget),
     coldRecallTokenBudget: Math.floor(merged.coldRecallTokenBudget),
     customStrategyEnabled: Boolean(merged.customStrategyEnabled),
@@ -33,6 +34,7 @@ export function isValidContextManagementConfig(config: ContextManagementConfig):
   return Number.isInteger(config.maxInputTokens) && config.maxInputTokens >= 0 &&
     Number.isInteger(config.recentKeepRounds) && config.recentKeepRounds >= 1 && config.recentKeepRounds <= 20 &&
     Number.isInteger(config.hotTokenBudget) && config.hotTokenBudget >= 1_000 &&
+    Number.isInteger(config.hotLongTermTokenBudget ?? 1_000) && (config.hotLongTermTokenBudget ?? 1_000) >= 1 &&
     Number.isInteger(config.warmTokenBudget) && config.warmTokenBudget >= 0 &&
     Number.isInteger(config.coldRecallTokenBudget) && config.coldRecallTokenBudget >= 0
 }

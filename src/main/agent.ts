@@ -29,6 +29,7 @@ import type { CommandExecutorRuntime } from './command-executor'
 import { createSkillTools, runSkillTool, skillInstructions } from './skills'
 import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
 import { executeAgentToolProviders, type AgentToolProvider } from './agent-tool-provider'
+import { createHotLongTermProvider, createHotLongTermTools, withHotLongTerm } from './hot-long-term'
 
 type ResponseMessage = {
   content?: string | null
@@ -700,10 +701,12 @@ export function buildAgentContext(
   customStrategy?: { allow: boolean; latestUserMessageId?: string; roundId?: string; roundCount?: number },
   enabledSkills: InstalledSkill[] = [],
   enabledKnowledgeBases: KnowledgeBase[] = [],
+  hotLongTermContent = '',
 ): ContextResult {
+  const hotLongTermConfig = { ...contextConfig, customStrategyEnabled: Boolean(customStrategy?.allow && contextConfig.customStrategyEnabled) }
   return manageContext(
-    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases), ...toApiMessages(agentMessages)],
-    [...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
+    [...withHotLongTerm(createAgentSystemMessage(project, networkAccessEnabled, hotLongTermConfig, enabledSkills, enabledKnowledgeBases), hotLongTermContent, hotLongTermConfig), ...toApiMessages(agentMessages)],
+    [...createHotLongTermTools(hotLongTermConfig), ...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
     config,
     contextConfig,
     {
@@ -744,6 +747,8 @@ export async function develop(
     enabledKnowledgeBases?: KnowledgeBase[]
     /** MCP tools connected for this request. */
     mcpProvider?: AgentToolProvider
+    hotLongTermContent?: string
+    onHotLongTermUpdated?: (content: string) => Promise<void>
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -764,7 +769,10 @@ export async function develop(
   const unlockedToolsets = new Set(runtime?.unlockedToolsets ?? [])
   const enabledSkills = runtime?.enabledSkills ?? []
   const enabledKnowledgeBases = runtime?.enabledKnowledgeBases ?? []
+  const hotLongTermConfig = { ...contextConfig, customStrategyEnabled: Boolean(runtime?.allowCustomStrategy && contextConfig.customStrategyEnabled) }
+  const hotLongTerm = createHotLongTermProvider(hotLongTermConfig, runtime?.hotLongTermContent, runtime?.onHotLongTermUpdated)
   const externalToolProviders: AgentToolProvider[] = [
+    hotLongTerm,
     {
       tools: createKnowledgeBaseTools(enabledKnowledgeBases),
       execute: (toolCall, signal) => runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, signal),
@@ -781,7 +789,7 @@ export async function develop(
   ]
   let tools = buildTools()
   const projectDetections = await detectProjectFolders(project.folders)
-  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases)
+  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, hotLongTermConfig, enabledSkills, enabledKnowledgeBases)
   if (runtime?.mcpProvider?.instructions) {
     systemMessage.content = `${systemMessage.content ?? ''}\n\n${runtime.mcpProvider.instructions}`
   }
@@ -834,11 +842,12 @@ export async function develop(
           }
         : null
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const systemMessages = withHotLongTerm(systemMessage, hotLongTerm.getContent(), hotLongTermConfig)
       const contextManageStartedAt = performance.now()
       const managed = manageContext(
         budgetWarningMessage
-      ? [systemMessage, ...activeHistory, budgetWarningMessage]
-      : [systemMessage, ...activeHistory],
+      ? [...systemMessages, ...activeHistory, budgetWarningMessage]
+      : [...systemMessages, ...activeHistory],
     tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,

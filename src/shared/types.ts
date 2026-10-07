@@ -150,6 +150,7 @@ export type ContextManagementConfig = {
   maxInputTokens: number
   recentKeepRounds: number
   hotTokenBudget: number
+  hotLongTermTokenBudget?: number
   warmTokenBudget: number
   coldRecallTokenBudget: number
   /** Developer-only conversation override for a custom Rhai strategy. */
@@ -167,7 +168,7 @@ export const defaultStrategyPrompt = [
 
 export const layeredStrategyPrompt = [
   'Hot context is the only context sent to you. Messages are never compressed while resident in Hot; recalled summaries remain explicitly labeled and non-authoritative. Warm context is never sent directly.',
-  'Hot is organized into Permanent system rules, Long-term durable preferences, and Newborn current or recalled content. Long-term preferences are retained only when the user clearly states one.',
+  'Hot is organized into Permanent system rules, a tool-maintained Long-term prompt, and Newborn current or recalled content. Use layered_context_hot_long_term_update to maintain confirmed durable preferences and decisions; ordinary history is not automatically permanent.',
   'Any recalled summary is explicitly labeled SUMMARY — LOSSY, NOT AUTHORITATIVE and includes Cold truth references. Treat it only as a locator; use context_read for exact facts, code, logs, dates, numbers, tool arguments, or prior decisions.',
   'Use context_search to find older context and context_read to read selected exact truth or labeled summary records into the current Hot request.',
   'Tool calls and tool results are retained unchanged in Cold truth. Read the truth record whenever exact tool data matters.',
@@ -182,6 +183,7 @@ export const defaultContextManagementConfig: ContextManagementConfig = {
   maxInputTokens: 0,
   recentKeepRounds: 5,
   hotTokenBudget: 64_000,
+  hotLongTermTokenBudget: 1_000,
   warmTokenBudget: 32_000,
   coldRecallTokenBudget: 8_000,
   customStrategyEnabled: false,
@@ -828,6 +830,7 @@ export type Conversation = {
   /** Hidden toolsets unlocked in this conversation (e.g. ["python"]); the
    *  matching tools are included in every model request once unlocked. */
   unlockedToolsets?: string[]
+  hotLongTermContent?: string
   /** Explicit per-conversation skill deltas over the project selection. */
   skillSelection: ResourceSelectionOverride
   /** Explicit per-conversation knowledge-base deltas over the project selection. */
