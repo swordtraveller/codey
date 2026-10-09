@@ -405,8 +405,8 @@ describe('executeCommand', () => {
   const bashIt = bashAvailable ? it : it.skip
   const dockerAvailable = (() => {
     try {
-      const probe = spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { windowsHide: true, timeout: 15_000, encoding: 'utf8' })
-      return probe.status === 0 && /^\d/.test((probe.stdout ?? '').trim())
+      const probe = spawnSync('docker', ['info', '--format', '{{.OSType}}'], { windowsHide: true, timeout: 15_000, encoding: 'utf8' })
+      return probe.status === 0 && (probe.stdout ?? '').trim() === 'linux'
     } catch {
       return false
     }

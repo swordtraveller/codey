@@ -12,8 +12,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
     "build": "pnpm typecheck && electron-vite build",
-    "dist": "pnpm build && electron-builder",
-    "dist:dir": "pnpm build && electron-builder --dir",
+    "native:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-rhai-runner.ps1",
+    "dist": "pnpm native:build && pnpm build && electron-builder --win --x64 --publish never",
+    "dist:dir": "pnpm native:build && pnpm build && electron-builder --win --x64 --dir --publish never",
     "bridge:start": "node bridge/cli.mjs start",
     "handover:dev": "vite --config handover/vite.config.ts",
     "handover:build": "vite build --config handover/vite.config.ts",
@@ -84,7 +85,8 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "artifactName": "Codey-${version}-windows-${arch}-setup.${ext}"
     },
     "extraResources": [
       {

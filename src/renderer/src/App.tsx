@@ -1762,6 +1762,16 @@ function ContextSettingsFields({
                   onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
                 />
               </Field>
+              <Field label={t('hotLongTermTokenBudget')} required>
+                <Input
+                  disabled={disabled}
+                  min={1}
+                  step={100}
+                  type="number"
+                  value={String(value.hotLongTermTokenBudget ?? 1000)}
+                  onChange={(_, data) => onChange({ hotLongTermTokenBudget: Number(data.value) })}
+                />
+              </Field>
               <Field label={t('warmTokenBudget')} required>
                 <Input
                   disabled={fieldsDisabled}

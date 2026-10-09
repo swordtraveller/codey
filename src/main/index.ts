@@ -35,7 +35,7 @@ import type {
   Project,
   ResourceSelectionOverride,
 } from '../shared/types'
-import { defaultCommandExecutionConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
+import { defaultCommandExecutionConfig, defaultContextManagementConfig, defaultStrategyPrompt, deriveContextBudgets, layeredStrategyPrompt } from '../shared/types'
 import { validateImageAttachments } from '../shared/image-attachments'
 import { validateMediaAttachments } from '../shared/media-attachments'
 import {
@@ -44,6 +44,7 @@ import {
   createDevelopmentProgressState,
 } from '../shared/development-progress'
 import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
+import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
 import { readConfig, saveConfig } from './config'
 import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
@@ -106,6 +107,7 @@ import {
   getProjects,
   getProjectsLive,
   saveConversationContext,
+  updateConversationHotLongTermContent,
   setConversationAgentLimits,
   setConversationArchived,
   setConversationCommandExecution,
@@ -336,6 +338,7 @@ const toolReturnsNotes: Record<string, string> = {
   project_search_text: 'JSON array of matches with file, line, and preview.',
   context_search: 'JSON array of matching context record metadata.',
   context_read: 'JSON array of {id, role, content, representation, truthRefs, createdAt} records.',
+  layered_context_hot_long_term_update: 'JSON {ok, changed, tokens, tokenBudget}; tokens include the Long-term message wrapper and count toward Hot. Errors leave the previous content unchanged and oversize errors include attemptedTokens.',
   web_search: 'JSON array of {title, url, snippet} results.',
   web_open: 'The page text content.',
   git_status: 'The concise working tree and staging status.',
@@ -369,6 +372,7 @@ const toolsetByPrefix: Array<{ prefix: string; toolset: string; hidden: boolean 
   { prefix: 'web_', toolset: 'web', hidden: false },
   { prefix: 'command_', toolset: 'command', hidden: false },
   { prefix: 'context_', toolset: 'context', hidden: false },
+  { prefix: 'layered_context_', toolset: 'context', hidden: false },
   { prefix: 'directory_', toolset: 'directory', hidden: false },
   { prefix: 'file_', toolset: 'file', hidden: false },
   { prefix: 'project_', toolset: 'project', hidden: false },
@@ -396,7 +400,7 @@ async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnap
     pythonEnvironmentFolderId: 'folder-id',
     conversations: [],
   }
-  const tools = createAgentTools(
+  const tools = [...createHotLongTermTools({ ...defaultContextManagementConfig, layeredEnabled: true }), ...createAgentTools(
     sampleProject,
     true,
     // Show run_command in the help viewer: an enabled sample config with no
@@ -406,7 +410,7 @@ async function buildToolHelpSnapshot(projectRoot?: string): Promise<ToolHelpSnap
     // Show every hidden-toolset tool as well — the help viewer documents the
     // full catalog regardless of what the current conversation unlocked.
     ['python', 'node', 'frontend', 'git'],
-  ) as Array<{
+  )] as Array<{
     function: { name?: string; description?: string; parameters?: unknown }
   }>
   const builtinEntries = tools
@@ -861,6 +865,10 @@ async function developProject(
         enabledSkills,
         enabledKnowledgeBases,
         mcpProvider,
+        hotLongTermContent: conversation.hotLongTermContent ?? '',
+        onHotLongTermUpdated: async (content: string) => {
+          project = await updateConversationHotLongTermContent(projectId, conversationId, content)
+        },
         unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
         onToolsetUnlocked: (keyword: string) => {
           // Persist the unlock so it survives app restarts and conversation
@@ -1141,7 +1149,7 @@ async function initializeContextDebugContext(
     allow: appConfig.developerMode && conversation.contextConfigOverride !== null,
     roundId: initializationRoundId,
     roundCount: initializationRoundCount,
-  }, enabledSkills, enabledKnowledgeBases)
+  }, enabledSkills, enabledKnowledgeBases, conversation.hotLongTermContent ?? '')
   const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), initializationRoundId, initializationRoundCount)
   rememberInitializedSnapshot(
     projectId,
