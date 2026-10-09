@@ -56,7 +56,7 @@ export class McpStdioClient {
       this.stderrBuffer = bounded(this.stderrBuffer + chunk.toString(), STDERR_LIMIT)
     })
     const client = new Client(
-      { name: 'codey', version: '0.6.1' },
+      { name: 'codey', version: '0.6.2' },
       { versionNegotiation: { mode: 'legacy' } },
     )
     this.transport = transport
