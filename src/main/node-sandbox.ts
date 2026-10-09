@@ -234,6 +234,10 @@ function packagePathCandidates(manager: PackageManager): string[] {
   ])
 }
 
+function packageManagerCliFromShim(shim: string): string | undefined {
+  return shim.match(/"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:c?js|mjs))"/i)?.[1]
+}
+
 async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string }> {
   if (process.platform !== 'win32') {
     return { command: manager, prefixArgs: [], readRoot: dirname(process.execPath) }
@@ -242,11 +246,19 @@ async function managerInvocation(manager: PackageManager): Promise<{ command: st
   for (const candidate of packagePathCandidates(manager)) {
     try {
       await access(candidate)
-      if (!candidate.toLowerCase().endsWith('.cmd')) {
+      const lowerCandidate = candidate.toLowerCase()
+      if (lowerCandidate.endsWith('.exe')) {
         return { command: candidate, prefixArgs: [], readRoot: dirname(candidate) }
       }
+      if (!lowerCandidate.endsWith('.cmd')) {
+        const script = await readFile(candidate, 'utf8')
+        if (/^#!.*\bnode\b/i.test(script)) {
+          return { command: process.execPath, prefixArgs: [candidate], readRoot: dirname(process.execPath) }
+        }
+        continue
+      }
       const shim = await readFile(candidate, 'utf8')
-      const cli = shim.match(/"%dp0%\\([^"\r\n]*node_modules\\(?:npm|pnpm)\\[^"\r\n]+)"/i)?.[1]
+      const cli = packageManagerCliFromShim(shim)
       if (cli) {
         const root = dirname(candidate)
         const cliPath = join(root, cli)
@@ -257,7 +269,7 @@ async function managerInvocation(manager: PackageManager): Promise<{ command: st
           // Keep the shim directory when the package path cannot be resolved.
         }
         return {
-          command: join(root, 'node.exe'),
+          command: process.execPath,
           prefixArgs: [cliPath],
           readRoot,
         }
@@ -308,6 +320,7 @@ async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ gua
 }
 
 function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string): NodeJS.ProcessEnv {
+  const corepackHome = process.env.COREPACK_HOME ?? join(temporaryDirectory, 'corepack')
   const hostHome = process.env.USERPROFILE ?? process.env.HOME
   const hostCargoHome = process.env.CARGO_HOME ?? (hostHome ? join(hostHome, '.cargo') : undefined)
   const hostRustupHome = process.env.RUSTUP_HOME ?? (hostHome ? join(hostHome, '.rustup') : undefined)
@@ -344,10 +357,13 @@ function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoo
     ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
     ...(process.env.USERPROFILE ? { USERPROFILE: process.env.USERPROFILE } : {}),
     XDG_CACHE_HOME: temporaryDirectory,
+    COREPACK_HOME: corepackHome,
+    COREPACK_DEFAULT_TO_LATEST: '0',
+    COREPACK_ENABLE_AUTO_PIN: '0',
     ...(hostCargoHome ? { CARGO_HOME: hostCargoHome } : {}),
     ...(hostRustupHome ? { RUSTUP_HOME: hostRustupHome } : {}),
     CODEY_NODE_SANDBOX_ROOT: root,
-    CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory].join(process.platform === 'win32' ? ';' : ':'),
+    CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory, corepackHome].join(process.platform === 'win32' ? ';' : ':'),
     CODEY_NODE_ALLOWED_WRITE_ROOTS: temporaryDirectory,
   }
   if (guardPath) {

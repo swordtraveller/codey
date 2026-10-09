@@ -294,8 +294,9 @@ export async function safeResolveWritablePath(
   projectRoot: string,
   inputPath: string,
 ): Promise<string> {
-  const root = await realpath(safeResolvePath(projectRoot, '.'))
-  const target = safeResolvePath(root, inputPath)
+  const requestedRoot = safeResolvePath(projectRoot, '.')
+  const root = await realpath(requestedRoot)
+  const target = safeResolvePath(requestedRoot, inputPath)
   const existingPath = await nearestExistingPath(target)
   if (!isWithin(root, existingPath)) {
     throw new Error('Path is outside the project root')
