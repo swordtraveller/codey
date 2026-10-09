@@ -92,7 +92,7 @@ describe('model chain failover', () => {
     }
   })
 
-  it('does not fail over once output has streamed', async () => {
+  it('does not retry a non-retryable in-stream error after partial output', async () => {
     const calls: string[] = []
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async (url: unknown) => {
@@ -111,8 +111,96 @@ describe('model chain failover', () => {
         messages,
         [],
       )).rejects.toThrow()
-      // Only the primary member was contacted; the backup never saw a request.
+      // An unclassified stream error does not retry or fail over.
       expect(calls.filter((url) => url.includes('backup'))).toHaveLength(0)
+      expect(calls.filter((url) => url.includes('primary'))).toHaveLength(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('retries an interrupted partial stream once and discards the failed attempt', async () => {
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1
+      return calls === 1
+        ? sseResponse(['data: {"choices":[{"delta":{"content":"draft"}}]}\n\n'])
+        : sseResponse([DONE_CHUNK])
+    }) as typeof fetch
+    const events: string[] = []
+    const updates: string[] = []
+    try {
+      const response = await requestCompletion(
+        target([member('https://primary.example.com/v1', 'primary')], 1), messages, [],
+        (message) => updates.push(message.content ?? ''), undefined, undefined, undefined,
+        (event) => events.push(event.kind),
+      )
+      expect(response.choices?.[0]?.message?.content).toBe('ok')
+      expect(calls).toBe(2)
+      expect(updates).toContain('draft')
+      expect(updates).toContain('ok')
+      expect(events).toEqual(['failure', 'retry'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('fails over after a partial retry fails and reports every transition', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url))
+      return String(url).includes('primary')
+        ? sseResponse(['data: {"choices":[{"delta":{"content":"draft"}}]}\n\n'])
+        : sseResponse([DONE_CHUNK])
+    }) as typeof fetch
+    const events: string[] = []
+    try {
+      const response = await requestCompletion(
+        target([member('https://primary.example.com/v1', 'primary'), member('https://backup.example.com/v1', 'backup')], 1),
+        messages, [], undefined, undefined, undefined, undefined,
+        (event) => events.push(event.kind),
+      )
+      expect(response.choices?.[0]?.message?.content).toBe('ok')
+      expect(calls.filter((url) => url.includes('primary'))).toHaveLength(2)
+      expect(calls.filter((url) => url.includes('backup'))).toHaveLength(1)
+      expect(events).toEqual(['failure', 'retry', 'failure', 'failover'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('does not accept a truncated tool call without [DONE]', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async () => sseResponse([
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"write_file","arguments":"{"}}]}}]}\n\n',
+    ])) as typeof fetch
+    try {
+      await expect(requestCompletion(target([member('https://primary.example.com/v1', 'primary')], 1), messages, []))
+        .rejects.toThrow('SSE stream ended before [DONE]')
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it.each([429, 503])('retries a partial stream reporting status %i', async (status) => {
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1
+      return calls === 1
+        ? sseResponse([
+          'data: {"choices":[{"delta":{"content":"draft"}}]}\n\n',
+          `data: {"error":{"message":"upstream busy","code":"${status}"}}\n\n`,
+        ])
+        : sseResponse([DONE_CHUNK])
+    }) as typeof fetch
+    try {
+      const result = await requestCompletion(target([member('https://primary.example.com/v1', 'primary')], 1), messages, [])
+      expect(result.choices?.[0]?.message?.content).toBe('ok')
+      expect(calls).toBe(2)
     } finally {
       globalThis.fetch = originalFetch
     }

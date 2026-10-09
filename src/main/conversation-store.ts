@@ -532,7 +532,7 @@ export async function readConversationWorkingSet(
     const message = await load(item.id)
     if (message) warmById.set(item.id, asWarm(message))
   }
-  for (const item of index.filter((candidate) => migratePin(candidate) || candidate.contextRegion === 'long-term')) {
+  for (const item of index.filter((candidate) => migratePin(candidate))) {
     if (hotById.has(item.id)) continue
     const message = await load(item.id)
     if (message) hotById.set(item.id, asHot(message))

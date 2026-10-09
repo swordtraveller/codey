@@ -257,6 +257,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     ...value,
     archived: value.archived === true,
     modelConfigId: value.modelConfigId ?? null,
+    hotLongTermContent: typeof value.hotLongTermContent === 'string' ? value.hotLongTermContent : '',
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
     commandExecution: normalizeStoredCommandExecution(value.commandExecution),
@@ -496,6 +497,7 @@ function createConversationRecord(index: number): Conversation {
     knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
     messages: [],
     agentMessages: [],
+    hotLongTermContent: '',
   }
 }
 
@@ -806,6 +808,7 @@ export async function addMessageImmediately(
   attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
+  modelRequest?: ChatMessage['modelRequest'],
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
@@ -818,6 +821,7 @@ export async function addMessageImmediately(
     attachments,
     blocks,
     compression,
+    modelRequest,
     modelConfig,
     contextConfig,
     turn,
@@ -860,6 +864,7 @@ export function addMessage(
   attachments?: MediaAttachment[],
   messageId?: string,
   createdAt?: string,
+  modelRequest?: ChatMessage['modelRequest'],
 ): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
@@ -875,6 +880,7 @@ export function addMessage(
       attachments,
       blocks,
       compression,
+      modelRequest,
       modelConfig,
       contextConfig,
       turn,
@@ -888,6 +894,14 @@ export function addMessage(
   })
 }
 
+export function addModelRequestEvent(
+  projectId: string,
+  conversationId: string,
+  event: NonNullable<ChatMessage['modelRequest']>,
+): Promise<Project> {
+  return addMessage(projectId, conversationId, 'assistant', '', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, event)
+}
+
 export function updateConversationTurn(projectId: string, conversationId: string, messageId: string, turn: ConversationTurnRecord): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
@@ -896,6 +910,20 @@ export function updateConversationTurn(projectId: string, conversationId: string
     if (!message) throw new Error('Conversation message not found')
     message.turn = turn
     await persistConversation(projectId, conversation)
+    return project
+  })
+}
+
+export function updateConversationHotLongTermContent(
+  projectId: string,
+  conversationId: string,
+  content: string,
+): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    await persistConversation(projectId, { ...conversation, hotLongTermContent: content })
+    conversation.hotLongTermContent = content
     return project
   })
 }

@@ -60,12 +60,14 @@ function isPinned(message: ContextMessage): boolean {
   return message.role === 'system' || message.pinnedToHot === true
 }
 
-function isLongTermCandidate(message: ContextMessage): boolean {
-  return message.role === 'user' && /(?:\b(?:i|we)\s+(?:prefer|like|always use|usually use|do not want)|我(?:喜欢|偏好|习惯|希望)|请(?:始终|以后|默认)|不要再用|不要使用)/i.test(message.content ?? '')
+function isResident(message: ContextMessage): boolean {
+  return isPinned(message)
 }
 
-function isResident(message: ContextMessage): boolean {
-  return isPinned(message) || message.contextRegion === 'long-term' || isLongTermCandidate(message)
+function messageRegion(message: ContextMessage): NonNullable<ContextMessage['contextRegion']> {
+  // Legacy preference tags must not make whole user messages permanently resident.
+  return message.contextRegion === 'long-term' && message.role !== 'system'
+    ? 'newborn' : message.contextRegion ?? 'newborn'
 }
 
 function isRecalled(message: ContextMessage): boolean {
@@ -452,7 +454,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const toHot = (message: ContextMessage, fresh = false): ContextMessage => ({
     ...message,
     contextLayer: 'hot',
-    contextRegion: message.contextRegion ?? (isLongTermCandidate(message) ? 'long-term' : 'newborn'),
+    contextRegion: messageRegion(message),
     contextSource: message.contextSource ?? 'live',
     representation: message.representation ?? 'original',
     truthRefs: refsFor(message),
@@ -462,7 +464,7 @@ function manageLayered(messages: ContextMessage[], tools: object[], modelConfig:
   const toWarm = (message: ContextMessage): ContextMessage => ({
     ...message,
     contextLayer: 'warm',
-    contextRegion: message.contextRegion ?? 'newborn',
+    contextRegion: messageRegion(message),
     contextSource: isRecalled(message) ? message.contextSource : 'hot-demotion',
     representation: message.representation ?? 'original',
     truthRefs: refsFor(message),

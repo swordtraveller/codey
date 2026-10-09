@@ -39,6 +39,7 @@ import type {
   ImageMediaType,
   MediaAttachment,
   MediaKind,
+  ModelRequestEvent,
   KnowledgeBase,
   KnowledgeBaseMode,
   PerformanceTraceFile,
@@ -329,6 +330,10 @@ function formatTurnForCopy(
   }
   for (const message of turnMessages) {
     if (message.compression) continue
+    if (message.modelRequest) {
+      lines.push('', `# ${formatMessageTime(message.createdAt)} [model] ${message.modelRequest.kind}: ${message.modelRequest.model} ${message.modelRequest.reason ?? message.modelRequest.nextModel ?? ''}`)
+      continue
+    }
     const toolCalls = (message.blocks ?? []).filter((block): block is Extract<AssistantMessageBlock, { type: 'function_call' }> => block.type === 'function_call')
     // Text first regardless of raw block order: content is finalized output
     // for the reader, while tool calls are pending requests awaiting results.
@@ -587,6 +592,16 @@ const MemoCompressionMessage = memo(CompressionMessage)
 const MemoAssistantContent = memo(AssistantContent)
 const MemoFunctionCallMessage = memo(FunctionCallMessage)
 
+function ModelRequestNotice({ event }: { event: ModelRequestEvent }): React.JSX.Element {
+  const { t } = useTranslation()
+  const label = event.kind === 'failure'
+    ? t('modelRequestFailure', { model: event.model, reason: event.reason ?? '' })
+    : event.kind === 'retry'
+      ? t('modelRequestRetry', { model: event.model, attempt: event.attempt ?? 2 })
+      : t('modelRequestFailover', { model: event.model, nextModel: event.nextModel ?? '' })
+  return <div className="model-request-notice" role="status">{label}</div>
+}
+
 const ConversationMessage = memo(function ConversationMessage({
   message,
   messages,
@@ -617,6 +632,8 @@ const ConversationMessage = memo(function ConversationMessage({
       <div className={`message ${message.role}`}>
         {message.compression ? (
           <MemoCompressionMessage compression={message.compression} />
+        ) : message.modelRequest ? (
+          <ModelRequestNotice event={message.modelRequest} />
         ) : message.role === 'assistant' && message.blocks?.length ? (
           message.blocks.map((block, index) =>
             block.type === 'content' ? (
@@ -1512,6 +1529,8 @@ function LiveDevelopmentResponse({
       {progress.timeline.map((item, index) =>
         item.type === 'compression' ? (
           <MemoCompressionMessage compression={item.compression} key={`live-compression-${index}`} />
+        ) : item.type === 'model-request' ? (
+          <ModelRequestNotice event={item.event} key={`live-model-request-${index}`} />
         ) : item.block.type === 'content' ? (
           <MemoAssistantContent content={item.block.content} createdAt={createdAt} key={`live-block-${index}`} />
         ) : (
@@ -1741,6 +1760,16 @@ function ContextSettingsFields({
                   type="number"
                   value={String(value.hotTokenBudget)}
                   onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
+                />
+              </Field>
+              <Field label={t('hotLongTermTokenBudget')} required>
+                <Input
+                  disabled={disabled}
+                  min={1}
+                  step={100}
+                  type="number"
+                  value={String(value.hotLongTermTokenBudget ?? 1000)}
+                  onChange={(_, data) => onChange({ hotLongTermTokenBudget: Number(data.value) })}
                 />
               </Field>
               <Field label={t('warmTokenBudget')} required>

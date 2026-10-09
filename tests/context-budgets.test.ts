@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { deriveContextBudgets, resolveMaxInputTokens } from '../src/shared/types'
+import { defaultContextManagementConfig, deriveContextBudgets, resolveMaxInputTokens } from '../src/shared/types'
+import { isValidContextManagementConfig, normalizeContextManagementConfig } from '../src/shared/context-validation'
+
+describe('Long-term token budget', () => {
+  it('defaults old configs to 1000 and keeps its independent limit during automatic budgeting', () => {
+    expect(normalizeContextManagementConfig({}).hotLongTermTokenBudget).toBe(1_000)
+    const configured = normalizeContextManagementConfig({ hotLongTermTokenBudget: 500, autoBudgetEnabled: true })
+    expect({ ...configured, ...deriveContextBudgets(128_000) }.hotLongTermTokenBudget).toBe(500)
+    expect(isValidContextManagementConfig({ ...defaultContextManagementConfig, hotLongTermTokenBudget: undefined })).toBe(true)
+  })
+
+  it.each([0, -1, 1.5, Infinity, NaN])('rejects an invalid Long-term limit %s', (hotLongTermTokenBudget) => {
+    expect(isValidContextManagementConfig({ ...defaultContextManagementConfig, hotLongTermTokenBudget })).toBe(false)
+  })
+})
 
 describe('deriveContextBudgets', () => {
   it('matches the glm-5.2 example from the spec', () => {

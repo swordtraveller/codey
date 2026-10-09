@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { countContextTokens, manageContext, normalizeToolCallSequence, SUMMARY_LABEL, type ContextMessage } from '../src/main/context'
+import { createHotLongTermMessage } from '../src/main/hot-long-term'
 import {
   defaultContextManagementConfig,
   defaultModelConfig,
@@ -282,20 +283,36 @@ describe('manageContext', () => {
     expect(result.metrics.recalled).toBe(true)
   })
 
-  it('keeps pinned and clear long-term preferences in Hot during demotion', () => {
+  it('keeps the tool-maintained prompt and manual pins in Hot without making raw preferences resident', () => {
     const messages: ContextMessage[] = [
       { id: 'system', role: 'system', content: 'System instruction' },
-      { id: 'preference', role: 'user', content: 'I prefer pnpm for package management.' },
+      createHotLongTermMessage('The user prefers apples.')!,
+      { id: 'preference', role: 'user', content: '我偏好吃苹果，你呢？', contextRegion: 'long-term' },
+      { id: 'old', role: 'assistant', content: 'Ordinary old reply '.repeat(100) },
       { id: 'pinned', role: 'assistant', content: 'Pinned decision', pinnedToHot: true },
-      { id: 'old', role: 'assistant', content: 'Ordinary old reply' },
       { id: 'latest-user', role: 'user', content: 'Latest request' },
     ]
 
-    const result = manageContext(messages, [], model({ modelMaxContext: 10_000 }), context({ layeredEnabled: true, recentKeepRounds: 1, hotTokenBudget: hotBudget([messages[0], messages[1], messages[2], messages.at(-1)!]), warmTokenBudget: 10_000 }))
+    const result = manageContext(messages, [], model({ modelMaxContext: 10_000 }), context({ layeredEnabled: true, recentKeepRounds: 1, hotTokenBudget: hotBudget([messages[0], messages[1], messages[4], messages.at(-1)!]), warmTokenBudget: 10_000 }))
 
-    expect(result.messages.find((message) => message.id === 'preference')).toEqual(expect.objectContaining({ contextRegion: 'long-term', contextLayer: 'hot' }))
+    expect(result.messages.find((message) => message.id === 'layered-context-hot-long-term')).toEqual(expect.objectContaining({ contextRegion: 'long-term', contextLayer: 'hot', content: '[Long-term context]\nThe user prefers apples.' }))
     expect(result.messages.find((message) => message.id === 'pinned')).toEqual(expect.objectContaining({ pinnedToHot: true, contextLayer: 'hot' }))
+    expect(result.messages.find((message) => message.id === 'preference')).toBeUndefined()
+    expect(result.warmMessages.find((message) => message.id === 'preference')).toMatchObject({ content: '我偏好吃苹果，你呢？', contextRegion: 'newborn' })
     expect(result.warmMessages.find((message) => message.id === 'old')).toBeDefined()
+  })
+
+  it('counts Long-term content toward Hot and reports overflow instead of dropping it', () => {
+    const longTerm = createHotLongTermMessage('Durable fact. '.repeat(100))!
+    const messages: ContextMessage[] = [
+      { id: 'system', role: 'system', content: 'System instruction' }, longTerm,
+      { id: 'latest-user', role: 'user', content: 'Latest request' },
+    ]
+    const result = manageContext(messages, [], model({ modelMaxContext: 10_000 }), context({ layeredEnabled: true, hotTokenBudget: 200 }), { latestUserMessageId: 'latest-user' })
+    expect(result.overflow?.reason).toBe('pinned_hot_overflow')
+    expect(result.messages.find((message) => message.id === longTerm.id)?.content).toBe(longTerm.content)
+    expect(result.warmMessages).toEqual([])
+    expect(result.metrics.compressedTokens).toBeGreaterThan(200)
   })
 
   it('keeps tool calls and results exact when they move to Warm', () => {

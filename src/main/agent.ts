@@ -11,6 +11,7 @@ import type {
   DevelopmentTimelineItem,
   InstalledSkill,
   KnowledgeBase,
+  ModelRequestEvent,
   ModelConfig,
   Project,
   RuntimeModelConfig,
@@ -28,6 +29,7 @@ import type { CommandExecutorRuntime } from './command-executor'
 import { createSkillTools, runSkillTool, skillInstructions } from './skills'
 import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
 import { executeAgentToolProviders, type AgentToolProvider } from './agent-tool-provider'
+import { createHotLongTermProvider, createHotLongTermTools, withHotLongTerm } from './hot-long-term'
 
 type ResponseMessage = {
   content?: string | null
@@ -50,7 +52,7 @@ type ChatChunk = {
       }>
     }
   }>
-  error?: { message?: string }
+  error?: { message?: string; code?: string; type?: string }
 }
 
 type AgentResult = {
@@ -278,6 +280,7 @@ function isRetryableRequestError(error: unknown): boolean {
     message.includes('socket') ||
     message.includes('econnreset') ||
     message.includes('etimedout')
+    || message.includes('stream ended before [done]')
 }
 
 async function requestCompletionAttempt(
@@ -325,6 +328,7 @@ async function requestCompletionAttempt(
   let lastPublished = 0
   let chunkCount = 0
   let updateCount = 0
+  let receivedDone = false
   const requestStartedAt = performance.now()
   const currentMessage = (): ResponseMessage => ({
     content: content || null,
@@ -407,17 +411,22 @@ async function requestCompletionAttempt(
     }
 
     const consumeEvent = (event: string): void => {
+      if (receivedDone) return
       const data = event
         .split(/\r?\n/)
         .filter((line) => line.startsWith('data:'))
         .map((line) => line.slice(5).trimStart())
         .join('\n')
       if (!data || data === '[DONE]') {
+        if (data === '[DONE]') receivedDone = true
         return
       }
       const chunk = JSON.parse(data) as ChatChunk
       if (chunk.error?.message) {
-        throw new Error(chunk.error.message)
+        const failure = new Error(chunk.error.message) as CompletionError
+        const status = Number(chunk.error.code)
+        if (Number.isInteger(status) && status >= 400 && status <= 599) failure.status = status
+        throw failure
       }
       const delta = chunk.choices?.[0]?.delta
       if (!delta) {
@@ -455,10 +464,17 @@ async function requestCompletionAttempt(
       for (const event of events) {
         consumeEvent(event)
       }
+      if (receivedDone) {
+        void reader.cancel().catch(() => undefined)
+        break
+      }
     }
     buffer += decoder.decode()
-    if (buffer.trim()) {
+    if (!receivedDone && buffer.trim()) {
       consumeEvent(buffer)
+    }
+    if (!receivedDone) {
+      throw new Error('SSE stream ended before [DONE]')
     }
     if (publishTimer) {
       clearTimeout(publishTimer)
@@ -508,6 +524,7 @@ export async function requestCompletion(
   signal?: AbortSignal,
   runtime?: { traceId?: string; projectId?: string; conversationId?: string },
   onModelChange?: (providerName: string, modelName: string) => void,
+  onRequestEvent?: (event: ModelRequestEvent) => void,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
@@ -516,6 +533,7 @@ export async function requestCompletion(
 
   for (let memberIndex = 0; memberIndex < target.chain.length; memberIndex += 1) {
     const member = target.chain[memberIndex]!
+    let partialRecoveryUsed = false
     onModelChange?.(member.providerName ?? '', member.modelName)
     const memberConfig: ModelConfig = {
       ...target,
@@ -525,7 +543,7 @@ export async function requestCompletion(
     }
     const maxAttempts = target.retriesPerModel
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts + 1; attempt += 1) {
       throwIfAborted(signal)
       const controller = new AbortController()
       const abort = (): void => controller.abort()
@@ -564,6 +582,15 @@ export async function requestCompletion(
         failure.status = (error as CompletionError).status
         lastFailure = failure
         if (signal?.aborted) throw failure
+        const hasPartial = hasResponseData(failure.partial)
+        const retryable = timedOut || isRetryableRequestError(error) || isRetryableStatus(failure.status)
+        const partialRetry = hasPartial && retryable && !partialRecoveryUsed && attempt <= maxAttempts
+        onRequestEvent?.({
+          kind: 'failure',
+          model: member.label,
+          reason: failure.message,
+          attempt,
+        })
         log.error('model.request.failed', {
           member: member.label,
           memberAttempt: attempt,
@@ -575,14 +602,19 @@ export async function requestCompletion(
           hasImageInput,
         })
 
-        // Output already streamed: retrying or failing over would duplicate
-        // visible content — surface the failure for this turn as-is.
-        if (hasResponseData(failure.partial)) throw failure
-
-        const retryable = timedOut || isRetryableRequestError(error) || isRetryableStatus(failure.status)
+        // A partial stream is transient UI state. It is discarded before the
+        // next attempt, so retrying cannot duplicate visible output or tools.
+        if (partialRetry) {
+          partialRecoveryUsed = true
+          onRequestEvent?.({ kind: 'retry', model: member.label, reason: failure.message, attempt: attempt + 1 })
+          latestPartial = undefined
+          continue
+        }
+        if (hasPartial && !retryable) throw failure
         const definitive = isDefinitiveStatus(failure.status)
         const nextMember = target.chain[memberIndex + 1]
-        if (retryable && !hasImageInput && attempt < maxAttempts) {
+        if (!partialRecoveryUsed && !hasPartial && retryable && !hasImageInput && attempt < maxAttempts) {
+          onRequestEvent?.({ kind: 'retry', model: member.label, reason: failure.message, attempt: attempt + 1 })
           log.warn('model.request.retrying', {
             member: member.label,
             attempt: attempt + 1,
@@ -593,6 +625,8 @@ export async function requestCompletion(
         }
         exhaustedMembers.push(member.label)
         if (nextMember) {
+          onRequestEvent?.({ kind: 'failover', model: member.label, reason: failure.message, nextModel: nextMember.label })
+          latestPartial = undefined
           log.warn('model.request.failing-over', {
             from: member.label,
             to: nextMember.label,
@@ -667,10 +701,12 @@ export function buildAgentContext(
   customStrategy?: { allow: boolean; latestUserMessageId?: string; roundId?: string; roundCount?: number },
   enabledSkills: InstalledSkill[] = [],
   enabledKnowledgeBases: KnowledgeBase[] = [],
+  hotLongTermContent = '',
 ): ContextResult {
+  const hotLongTermConfig = { ...contextConfig, customStrategyEnabled: Boolean(customStrategy?.allow && contextConfig.customStrategyEnabled) }
   return manageContext(
-    [createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases), ...toApiMessages(agentMessages)],
-    [...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
+    [...withHotLongTerm(createAgentSystemMessage(project, networkAccessEnabled, hotLongTermConfig, enabledSkills, enabledKnowledgeBases), hotLongTermContent, hotLongTermConfig), ...toApiMessages(agentMessages)],
+    [...createHotLongTermTools(hotLongTermConfig), ...createKnowledgeBaseTools(enabledKnowledgeBases), ...createSkillTools(enabledSkills, project), ...createAgentTools(project, networkAccessEnabled)],
     config,
     contextConfig,
     {
@@ -711,6 +747,8 @@ export async function develop(
     enabledKnowledgeBases?: KnowledgeBase[]
     /** MCP tools connected for this request. */
     mcpProvider?: AgentToolProvider
+    hotLongTermContent?: string
+    onHotLongTermUpdated?: (content: string) => Promise<void>
   },
   networkAccessEnabled = false,
 ): Promise<AgentResult> {
@@ -731,7 +769,10 @@ export async function develop(
   const unlockedToolsets = new Set(runtime?.unlockedToolsets ?? [])
   const enabledSkills = runtime?.enabledSkills ?? []
   const enabledKnowledgeBases = runtime?.enabledKnowledgeBases ?? []
+  const hotLongTermConfig = { ...contextConfig, customStrategyEnabled: Boolean(runtime?.allowCustomStrategy && contextConfig.customStrategyEnabled) }
+  const hotLongTerm = createHotLongTermProvider(hotLongTermConfig, runtime?.hotLongTermContent, runtime?.onHotLongTermUpdated)
   const externalToolProviders: AgentToolProvider[] = [
+    hotLongTerm,
     {
       tools: createKnowledgeBaseTools(enabledKnowledgeBases),
       execute: (toolCall, signal) => runKnowledgeBaseTool(enabledKnowledgeBases, toolCall, signal),
@@ -748,7 +789,7 @@ export async function develop(
   ]
   let tools = buildTools()
   const projectDetections = await detectProjectFolders(project.folders)
-  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, contextConfig, enabledSkills, enabledKnowledgeBases)
+  const systemMessage = createAgentSystemMessage(project, networkAccessEnabled, hotLongTermConfig, enabledSkills, enabledKnowledgeBases)
   if (runtime?.mcpProvider?.instructions) {
     systemMessage.content = `${systemMessage.content ?? ''}\n\n${runtime.mcpProvider.instructions}`
   }
@@ -769,7 +810,6 @@ export async function develop(
   const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
   const coldMessageIds = new Set<string>()
 
-  let completedToolCalls = 0
   // Set when a response is rejected for exceeding the per-request tool-call
   // limit; cleared once a later request succeeds, so only a terminal
   // overflow (no requests left) is reported as such.
@@ -802,11 +842,12 @@ export async function develop(
           }
         : null
       const activeHistory = history.filter((message) => !message.id || !coldMessageIds.has(message.id))
+      const systemMessages = withHotLongTerm(systemMessage, hotLongTerm.getContent(), hotLongTermConfig)
       const contextManageStartedAt = performance.now()
       const managed = manageContext(
         budgetWarningMessage
-      ? [systemMessage, ...activeHistory, budgetWarningMessage]
-      : [systemMessage, ...activeHistory],
+      ? [...systemMessages, ...activeHistory, budgetWarningMessage]
+      : [...systemMessages, ...activeHistory],
     tools, config, contextConfig, {
         allowCustomStrategy: runtime?.allowCustomStrategy,
         latestUserMessageId: runtime?.latestUserMessageId,
@@ -890,19 +931,16 @@ export async function develop(
             onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
           }, runtime?.signal, runtime, (providerName, modelName) => {
             onProgress?.({ type: 'model-changed', providerName, modelName })
+          }, (event) => {
+            onProgress?.({ type: 'clear-stream' })
+            const item: DevelopmentTimelineItem = { type: 'model-request', event }
+            timeline.push(item)
+            onProgress?.({ type: 'append', items: [item] })
           })
       } catch (error) {
-        const partial = (error as CompletionError).partial
-        const partialBlocks = toMessageBlocks(partial ?? {})
-        if (partialBlocks.length > 0) {
-          const items = partialBlocks.map((block) => ({ type: 'block' as const, block }))
-          timeline.push(...items)
-          onProgress?.({ type: 'commit-stream', items })
-        }
+        onProgress?.({ type: 'clear-stream' })
         if (runtime?.signal?.aborted) throw error
-        const message = partialBlocks.length > 0
-          ? `Model connection interrupted after ${completedToolCalls} tool operation(s). Files already written were kept.`
-          : error instanceof Error ? error.message : 'Request failed'
+        const message = error instanceof Error ? error.message : 'Request failed'
         throw new Error(message)
       }
       throwIfAborted(runtime?.signal)
@@ -1051,7 +1089,6 @@ export async function develop(
             runtime?.commandExecution,
             commandRuntimeWithSteps,
           )
-          completedToolCalls += 1
           isError = toolResultHasFailure(content)
         } catch (error) {
           if (runtime?.signal?.aborted) {
