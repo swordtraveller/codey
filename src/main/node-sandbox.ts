@@ -234,8 +234,13 @@ function packagePathCandidates(manager: PackageManager): string[] {
   ])
 }
 
-function packageManagerCliFromShim(shim: string): string | undefined {
-  return shim.match(/"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:c?js|mjs))"/i)?.[1]
+function packageManagerCliFromShim(shim: string, manager: PackageManager): string | undefined {
+  const scripts = [...shim.matchAll(/(?:%dp0%|%~dp0)\\([^"\r\n%]+\.(?:c?js|mjs))/gi)]
+    .map((match) => match[1])
+  const expectedNames = manager === 'npm'
+    ? new Set(['npm-cli.js', 'npm.js'])
+    : new Set(['pnpm.cjs', 'pnpm.js', 'pnpm.mjs'])
+  return scripts.find((script) => expectedNames.has(script.split(/[\\/]/).at(-1)?.toLowerCase() ?? ''))
 }
 
 async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string }> {
@@ -258,7 +263,7 @@ async function managerInvocation(manager: PackageManager): Promise<{ command: st
         continue
       }
       const shim = await readFile(candidate, 'utf8')
-      const cli = packageManagerCliFromShim(shim)
+      const cli = packageManagerCliFromShim(shim, manager)
       if (cli) {
         const root = dirname(candidate)
         const cliPath = join(root, cli)
