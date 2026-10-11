@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   runSandboxProcess,
@@ -225,8 +225,14 @@ function assertPackageCommand(value: string): asserts value is PackageCommand {
   }
 }
 
+function windowsPathDirectories(): string[] {
+  return (process.env.PATH ?? process.env.Path ?? '').split(';')
+    .map((directory) => directory.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean)
+}
+
 function packagePathCandidates(manager: PackageManager): string[] {
-  const directories = (process.env.PATH ?? '').split(';').filter(Boolean)
+  const directories = windowsPathDirectories()
   return directories.flatMap((directory) => [
     join(directory, `${manager}.cmd`),
     join(directory, `${manager}.exe`),
@@ -243,12 +249,28 @@ function packageManagerCliFromShim(shim: string, manager: PackageManager): strin
   return scripts.find((script) => expectedNames.has(script.split(/[\\/]/).at(-1)?.toLowerCase() ?? ''))
 }
 
-async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string }> {
+async function windowsNodeExecutable(managerDirectory: string): Promise<string> {
+  // Electron's process.execPath points to the GUI executable. Package managers
+  // also reuse their runtime to spawn children, so they must run with real Node.
+  for (const directory of new Set([managerDirectory, ...windowsPathDirectories()])) {
+    const candidate = join(directory, 'node.exe')
+    try {
+      if ((await stat(candidate)).isFile()) return candidate
+    } catch {
+      // Try the next Node installation.
+    }
+  }
+  throw new Error('Unable to locate node.exe; install Node.js or add it to PATH')
+}
+
+async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string; nodeRoot?: string }> {
   if (process.platform !== 'win32') {
     return { command: manager, prefixArgs: [], readRoot: dirname(process.execPath) }
   }
 
   for (const candidate of packagePathCandidates(manager)) {
+    let cliPath: string
+    let readRoot: string
     try {
       await access(candidate)
       const lowerCandidate = candidate.toLowerCase()
@@ -257,31 +279,28 @@ async function managerInvocation(manager: PackageManager): Promise<{ command: st
       }
       if (!lowerCandidate.endsWith('.cmd')) {
         const script = await readFile(candidate, 'utf8')
-        if (/^#!.*\bnode\b/i.test(script)) {
-          return { command: process.execPath, prefixArgs: [candidate], readRoot: dirname(process.execPath) }
-        }
-        continue
-      }
-      const shim = await readFile(candidate, 'utf8')
-      const cli = packageManagerCliFromShim(shim, manager)
-      if (cli) {
+        if (!/^#!.*\bnode\b/i.test(script)) continue
+        cliPath = candidate
+        readRoot = dirname(candidate)
+      } else {
+        const shim = await readFile(candidate, 'utf8')
+        const cli = packageManagerCliFromShim(shim, manager)
+        if (!cli) continue
         const root = dirname(candidate)
-        const cliPath = join(root, cli)
-        let readRoot = root
+        cliPath = join(root, cli)
+        readRoot = root
         try {
           readRoot = await realpath(dirname(dirname(dirname(dirname(cliPath)))))
         } catch {
           // Keep the shim directory when the package path cannot be resolved.
         }
-        return {
-          command: process.execPath,
-          prefixArgs: [cliPath],
-          readRoot,
-        }
       }
     } catch {
       // Try the next PATH entry.
+      continue
     }
+    const command = await windowsNodeExecutable(dirname(candidate))
+    return { command, prefixArgs: [cliPath], readRoot, nodeRoot: dirname(command) }
   }
   throw new Error(`Unable to locate ${manager}; install it or add it to PATH`)
 }
@@ -324,7 +343,7 @@ async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ gua
   return { guardPath, temporaryDirectory }
 }
 
-function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string): NodeJS.ProcessEnv {
+function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string, nodeRoot?: string): NodeJS.ProcessEnv {
   const corepackHome = process.env.COREPACK_HOME ?? join(temporaryDirectory, 'corepack')
   const hostHome = process.env.USERPROFILE ?? process.env.HOME
   const hostCargoHome = process.env.CARGO_HOME ?? (hostHome ? join(hostHome, '.cargo') : undefined)
@@ -371,6 +390,11 @@ function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoo
     CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory, corepackHome].join(process.platform === 'win32' ? ';' : ':'),
     CODEY_NODE_ALLOWED_WRITE_ROOTS: temporaryDirectory,
   }
+  if (nodeRoot) {
+    // Windows environment keys are case-insensitive; keep only one PATH entry.
+    delete environment.Path
+    environment.PATH = [nodeRoot, ...windowsPathDirectories()].join(';')
+  }
   if (guardPath) {
     environment.NODE_OPTIONS = '--require=' + guardPath.replaceAll('\\', '/')
   } else {
@@ -411,7 +435,7 @@ export async function runPackageManagerCommand(
   if (command === 'ci' && packages.length > 0) throw new Error('packages are not supported with the ci command')
   if ((command === 'list' || command === 'outdated') && packages.length > 0) throw new Error(`packages are not supported with the ${command} command`)
   const root = await safeResolveExistingPath(projectRoot, '.')
-  const { command: executable, prefixArgs, readRoot } = await managerInvocation(packageManager)
+  const { command: executable, prefixArgs, readRoot, nodeRoot } = await managerInvocation(packageManager)
   const { temporaryDirectory } = await prepareNodeSandbox(root, false)
   const args: string[] = [...prefixArgs, command]
   if (packageManager === 'pnpm' && command === 'ci') {
@@ -421,7 +445,7 @@ export async function runPackageManagerCommand(
     args.push('--ignore-scripts')
   }
   if (command === 'install' || command === 'update') args.push(...packages)
-  const result = await runSandboxProcess(executable, args, root, normalizeTimeout(timeoutSeconds), sandboxEnvironment(root, temporaryDirectory, readRoot), undefined, signal)
+  const result = await runSandboxProcess(executable, args, root, normalizeTimeout(timeoutSeconds), sandboxEnvironment(root, temporaryDirectory, readRoot, undefined, nodeRoot), undefined, signal)
   return resultFromProcess(result)
 }
 
@@ -449,7 +473,7 @@ async function preparePackageScript(
   const root = await safeResolveExistingPath(projectRoot, '.')
   const scripts = await readPackageScripts(root)
   if (!Object.hasOwn(scripts, script)) throw new Error(`Script '${script}' is not defined in package.json`)
-  const { command: executable, prefixArgs, readRoot } = await managerInvocation(packageManager)
+  const { command: executable, prefixArgs, readRoot, nodeRoot } = await managerInvocation(packageManager)
   const { temporaryDirectory, guardPath } = await prepareNodeSandbox(root)
   const args: string[] = [...prefixArgs, 'run', script]
   if (argv.length > 0) args.push('--', ...argv)
@@ -457,7 +481,7 @@ async function preparePackageScript(
     root,
     executable,
     args,
-    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath),
+    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath, nodeRoot),
   }
 }
 
