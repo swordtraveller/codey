@@ -36,9 +36,11 @@ type ResponseMessage = {
   tool_calls?: ToolCall[]
 }
 
+type ProviderError = { message?: string; code?: string | number; type?: string }
+
 type ChatResponse = {
   choices?: Array<{ message?: ResponseMessage }>
-  error?: { message?: string }
+  error?: ProviderError
 }
 
 type ChatChunk = {
@@ -52,7 +54,7 @@ type ChatChunk = {
       }>
     }
   }>
-  error?: { message?: string; code?: string; type?: string }
+  error?: ProviderError
 }
 
 type AgentResult = {
@@ -268,19 +270,11 @@ function modelResponseSummary(status: number, message: ResponseMessage, stream: 
   }
 }
 
-function isRetryableRequestError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false
-  }
-
-  const message = error.message.toLowerCase()
-  return error.name === 'AbortError' ||
-    message === 'fetch failed' ||
-    message.includes('network') ||
-    message.includes('socket') ||
-    message.includes('econnreset') ||
-    message.includes('etimedout')
-    || message.includes('stream ended before [done]')
+function providerCompletionError(error: ProviderError): CompletionError {
+  const failure = new Error(error.message || 'Provider request failed', { cause: error }) as CompletionError
+  const status = Number(error.code)
+  if (Number.isInteger(status) && status >= 400 && status <= 599) failure.status = status
+  return failure
 }
 
 async function requestCompletionAttempt(
@@ -391,13 +385,13 @@ async function requestCompletionAttempt(
     if (!response.headers.get('content-type')?.includes('text/event-stream')) {
       const body = await response.text()
       const data = JSON.parse(body) as ChatResponse
+      if (data.error) throw providerCompletionError(data.error)
       const message = data.choices?.[0]?.message
-      log.debug('model.response', message
-        ? modelResponseSummary(response.status, message, false)
-        : { status: response.status, stream: false, contentChars: 0, toolCallCount: 0 })
-      if (message) {
-        onUpdate?.(message)
+      if (!message || typeof message !== 'object' || !hasResponseData(message)) {
+        throw new Error('The model returned an empty response')
       }
+      log.debug('model.response', modelResponseSummary(response.status, message, false))
+      onUpdate?.(message)
       recordPerformanceTrace({
         traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
         projectId: runtime?.projectId, conversationId: runtime?.conversationId,
@@ -422,12 +416,7 @@ async function requestCompletionAttempt(
         return
       }
       const chunk = JSON.parse(data) as ChatChunk
-      if (chunk.error?.message) {
-        const failure = new Error(chunk.error.message) as CompletionError
-        const status = Number(chunk.error.code)
-        if (Number.isInteger(status) && status >= 400 && status <= 599) failure.status = status
-        throw failure
-      }
+      if (chunk.error) throw providerCompletionError(chunk.error)
       const delta = chunk.choices?.[0]?.delta
       if (!delta) {
         return
@@ -451,30 +440,38 @@ async function requestCompletionAttempt(
     }
 
     const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const result = await reader.read()
-      if (result.done) {
-        break
+    try {
+      const decoder = new TextDecoder()
+      while (true) {
+        const result = await reader.read()
+        if (result.done) {
+          break
+        }
+        chunkCount += 1
+        buffer += decoder.decode(result.value, { stream: true })
+        const events = buffer.split(/\r?\n\r?\n/)
+        buffer = events.pop() ?? ''
+        for (const event of events) {
+          consumeEvent(event)
+        }
+        if (receivedDone) {
+          break
+        }
       }
-      chunkCount += 1
-      buffer += decoder.decode(result.value, { stream: true })
-      const events = buffer.split(/\r?\n\r?\n/)
-      buffer = events.pop() ?? ''
-      for (const event of events) {
-        consumeEvent(event)
+      buffer += decoder.decode()
+      if (!receivedDone && buffer.trim()) {
+        consumeEvent(buffer)
       }
-      if (receivedDone) {
-        void reader.cancel().catch(() => undefined)
-        break
+      if (!receivedDone) {
+        throw new Error('SSE stream ended before [DONE]')
       }
+    } finally {
+      // Release abandoned streams before retrying, including provider errors.
+      void reader.cancel().catch(() => undefined)
+      reader.releaseLock()
     }
-    buffer += decoder.decode()
-    if (!receivedDone && buffer.trim()) {
-      consumeEvent(buffer)
-    }
-    if (!receivedDone) {
-      throw new Error('SSE stream ended before [DONE]')
+    if (!hasResponseData(currentMessage())) {
+      throw new Error('The model returned an empty response')
     }
     if (publishTimer) {
       clearTimeout(publishTimer)
@@ -500,20 +497,9 @@ async function requestCompletionAttempt(
       clearTimeout(publishTimer)
     }
     const failure = createCompletionError(error, currentMessage())
-    failure.status = (error as CompletionError).status
+    failure.status = (error as CompletionError | null | undefined)?.status
     throw failure
   }
-}
-
-/** 4xx failures other than 429 are definitive for a member: retrying the
- *  same credentials/model is pointless, so the chain fails over at once. */
-function isDefinitiveStatus(status: number | undefined): boolean {
-  if (status === undefined || status === 429) return false
-  return status >= 400 && status < 500
-}
-
-function isRetryableStatus(status: number | undefined): boolean {
-  return status !== undefined && (status === 429 || status >= 500)
 }
 
 export async function requestCompletion(
@@ -533,7 +519,6 @@ export async function requestCompletion(
 
   for (let memberIndex = 0; memberIndex < target.chain.length; memberIndex += 1) {
     const member = target.chain[memberIndex]!
-    let partialRecoveryUsed = false
     onModelChange?.(member.providerName ?? '', member.modelName)
     const memberConfig: ModelConfig = {
       ...target,
@@ -541,9 +526,10 @@ export async function requestCompletion(
       apiKey: member.apiKey,
       modelName: member.modelName,
     }
-    const maxAttempts = target.retriesPerModel
+    // The configured count is retries after the initial request.
+    const maxAttempts = target.retriesPerModel + 1
 
-    for (let attempt = 1; attempt <= maxAttempts + 1; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal)
       const controller = new AbortController()
       const abort = (): void => controller.abort()
@@ -564,7 +550,9 @@ export async function requestCompletion(
       }
 
       try {
-        return await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
+        const response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
+        throwIfAborted(signal)
+        return response
       } catch (error) {
         const details = errorDetails(error)
         const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -579,12 +567,9 @@ export async function requestCompletion(
               ? 'Model request timed out after ' + modelRequestTimeoutMs / 1000 + ' seconds'
               : details.message,
         )
-        failure.status = (error as CompletionError).status
+        failure.status = (error as CompletionError | null | undefined)?.status
         lastFailure = failure
         if (signal?.aborted) throw failure
-        const hasPartial = hasResponseData(failure.partial)
-        const retryable = timedOut || isRetryableRequestError(error) || isRetryableStatus(failure.status)
-        const partialRetry = hasPartial && retryable && !partialRecoveryUsed && attempt <= maxAttempts
         onRequestEvent?.({
           kind: 'failure',
           model: member.label,
@@ -604,16 +589,8 @@ export async function requestCompletion(
 
         // A partial stream is transient UI state. It is discarded before the
         // next attempt, so retrying cannot duplicate visible output or tools.
-        if (partialRetry) {
-          partialRecoveryUsed = true
-          onRequestEvent?.({ kind: 'retry', model: member.label, reason: failure.message, attempt: attempt + 1 })
+        if (attempt < maxAttempts) {
           latestPartial = undefined
-          continue
-        }
-        if (hasPartial && !retryable) throw failure
-        const definitive = isDefinitiveStatus(failure.status)
-        const nextMember = target.chain[memberIndex + 1]
-        if (!partialRecoveryUsed && !hasPartial && retryable && !hasImageInput && attempt < maxAttempts) {
           onRequestEvent?.({ kind: 'retry', model: member.label, reason: failure.message, attempt: attempt + 1 })
           log.warn('model.request.retrying', {
             member: member.label,
@@ -624,13 +601,14 @@ export async function requestCompletion(
           continue
         }
         exhaustedMembers.push(member.label)
+        const nextMember = target.chain[memberIndex + 1]
         if (nextMember) {
           onRequestEvent?.({ kind: 'failover', model: member.label, reason: failure.message, nextModel: nextMember.label })
           latestPartial = undefined
           log.warn('model.request.failing-over', {
             from: member.label,
             to: nextMember.label,
-            reason: definitive ? `status ${failure.status}` : failure.message,
+            reason: failure.message,
           })
           break
         }
