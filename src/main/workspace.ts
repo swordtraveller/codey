@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -21,6 +21,9 @@ import {
   type ProjectFolder,
   type ResourceSelectionOverride,
 } from '../shared/types'
+import { appendMessageRecords, contextRecordPath, isMessageStoreIndex, readMessageRecords, type MessageStoreIndex } from './workspace-message-store'
+import { initialConversationWindowStart } from '../shared/conversation-window'
+import type { ConversationHistorySummary, ConversationMessagePage } from '../shared/types'
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
 import { isValidCommandExecutionConfig, normalizeCommandExecutionConfig } from './command-execution-config'
 import { log } from './logger'
@@ -83,6 +86,14 @@ type StoredProjectMetadata = Omit<Project, 'conversations' | 'defaultModelConfig
 }
 type WorkspaceManifest = { version: 2; projectIds: string[] }
 
+type PagedConversation = Omit<StoredConversation, 'messages' | 'agentMessages'> & {
+  storageVersion: 3
+  messageIndex: MessageStoreIndex
+  history: ConversationHistorySummary
+}
+type HistoryState = { index: MessageStoreIndex; loaded: boolean; loading?: Promise<void> }
+let historyStates = new Map<string, HistoryState>()
+
 let projects: Project[] | undefined
 let projectsLoad: Promise<Project[]> | undefined
 let loadedUserDataPath: string | undefined
@@ -92,6 +103,7 @@ function userDataPath(): string {
   const current = app.getPath('userData')
   if (loadedUserDataPath !== current) {
     loadedUserDataPath = current
+    historyStates = new Map()
     projects = undefined
     projectsLoad = undefined
     writeQueues = new Map<string, Promise<void>>()
@@ -325,8 +337,94 @@ function storedProjectMetadata(project: Project): StoredProjectMetadata {
   return { ...metadata, conversationIds: conversations.map((conversation) => conversation.id) }
 }
 
+function summarizeConversation(conversation: { messages: Array<Pick<ChatMessage, 'id' | 'role' | 'turn'>>; lastReadMessageId?: string }): ConversationHistorySummary {
+  const messages = conversation.messages
+  const last = messages.at(-1)
+  const readIndex = messages.findIndex((message) => message.id === conversation.lastReadMessageId)
+  return {
+    revision: createHash('sha256').update(JSON.stringify(messages.map(({ id, turn }) => [id, turn]))).digest('hex'),
+    messageCount: messages.length,
+    turnCount: messages.filter((message) => message.role === 'user').length,
+    unreadCount: messages.filter((message, index) => message.role === 'assistant' && index > readIndex).length,
+    lastMessageId: last?.id,
+    lastAssistantMessageId: [...messages].reverse().find((message) => message.role === 'assistant')?.id,
+    lastUserMessage: (() => { const user = [...messages].reverse().find((message) => message.role === 'user'); return user ? { id: user.id, turn: user.turn } : undefined })(),
+    hasError: Boolean(last?.turn && (last.turn.result === 'timeout' || last.turn.result === 'other' || last.turn.error)),
+  }
+}
+
+async function hydrateConversationHistory(projectId: string, conversation: Conversation): Promise<void> {
+  const path = conversationPath(projectId, conversation.id)
+  const state = historyStates.get(path)
+  if (!state || state.loaded) return
+  if (state.loading) return state.loading
+  state.loading = (async () => {
+    const messages = await readMessageRecords<PersistedChatMessage>(path + '.records', state.index.messages)
+    const [agentMessages] = await readMessageRecords<PersistedAgentMessage[]>(contextRecordPath(path + '.records', state.index.context), [state.index.context])
+    const hydrated = await normalizeConversation({ ...conversation, messages, agentMessages })
+    conversation.messages = hydrated.messages
+    conversation.agentMessages = hydrated.agentMessages
+    state.loaded = true
+  })()
+  try { await state.loading } finally { state.loading = undefined }
+}
+
 async function persistConversation(projectId: string, conversation: Conversation): Promise<void> {
-  await writeJson(conversationPath(projectId, conversation.id), storedConversation(projectId, conversation))
+  const path = conversationPath(projectId, conversation.id)
+  const state = historyStates.get(path)
+  const { messages, agentMessages, ...metadata } = storedConversation(projectId, conversation)
+  const unloaded = state && !state.loaded
+  const history = unloaded ? { ...conversation.history! } : summarizeConversation({ messages, lastReadMessageId: metadata.lastReadMessageId })
+  const index = unloaded ? state.index
+    : await appendMessageRecords(path + '.records', messages, agentMessages ?? [], state?.index)
+  // Read state changes must not hydrate message bodies.
+  if (unloaded) {
+    const readIndex = index.messages.findIndex((message) => message.id === conversation.lastReadMessageId)
+    history.unreadCount = index.messages.filter((message, i) => message.role === 'assistant' && i > readIndex).length
+  }
+  const stored: PagedConversation = { ...metadata, storageVersion: 3, messageIndex: index, history }
+  await writeJson(path, stored)
+  conversation.history = history
+  historyStates.set(path, { index, loaded: state?.loaded ?? true })
+  if (state && state.index.context.hash !== index.context.hash) {
+    // Full-context writers hydrate first, so no reader still needs the old snapshot.
+    await unlink(contextRecordPath(path + '.records', state.index.context)).catch(() => undefined)
+  }
+}
+
+/** Lightweight IPC projection. Neither chat bodies nor model context cross this boundary. */
+export function projectForRenderer(project: Project): Project {
+  return {
+    ...project,
+    conversations: project.conversations.map((conversation) => {
+      const state = historyStates.get(conversationPath(project.id, conversation.id))
+      const history = state && !state.loaded ? conversation.history! : summarizeConversation(conversation)
+      return { ...conversation, messages: [], agentMessages: [], history }
+    }),
+  }
+}
+
+export async function getProjectsForRenderer(): Promise<Project[]> {
+  return (await loadProjects()).map(projectForRenderer)
+}
+
+export async function getConversationMessagePage(projectId: string, conversationId: string, before: string | null = null): Promise<ConversationMessagePage> {
+  if (before !== null && typeof before !== 'string') throw new Error('Invalid conversation cursor')
+  const project = await findProject(projectId)
+  const conversation = findConversation(project, conversationId)
+  const path = conversationPath(projectId, conversationId)
+  const state = historyStates.get(path)
+  const history = state && !state.loaded ? conversation.history! : summarizeConversation(conversation)
+  const entries = state && !state.loaded ? state.index.messages : conversation.messages
+  const end = before === null ? entries.length : entries.findIndex((message) => message.id === before)
+  if (end < 0) throw new Error('Conversation cursor no longer exists')
+  const start = initialConversationWindowStart(entries.slice(0, end))
+  const messages = state && !state.loaded
+    ? await Promise.all((await readMessageRecords<PersistedChatMessage>(path + '.records', state.index.messages.slice(start, end))).map(async (message) => ({
+      ...message, images: await hydrateImageAttachments(message.images), attachments: await hydrateMediaAttachments(message.attachments),
+    })))
+    : conversation.messages.slice(start, end)
+  return { messages, before: start > 0 ? entries[start].id : null, revision: history.revision }
 }
 
 async function persistProjectMetadata(project: Project): Promise<void> {
@@ -356,6 +454,8 @@ async function migrateLegacyProjects(stored: LegacyStoredProject[]): Promise<Pro
   await persistManifest(migrated)
   return migrated
 }
+
+class WorkspaceMigrationError extends Error {}
 
 type ShardedLoadResult = {
   projects: Project[]
@@ -397,9 +497,26 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
       const storedPath = conversationPath(projectId, conversationId)
       try {
         const parsed = JSON.parse(await readFile(storedPath, 'utf8')) as unknown
-        if (!isRecord(parsed) || !Array.isArray(parsed.messages)) throw new Error('Invalid conversation data')
-        conversations.push(await normalizeConversation(parsed as StoredConversation))
+        if (!isRecord(parsed)) throw new Error('Invalid conversation data')
+        if (parsed.storageVersion === 3) {
+          const stored = parsed as PagedConversation
+          if (!isMessageStoreIndex(stored.messageIndex) || !stored.history) throw new Error('Invalid conversation index')
+          const { storageVersion: _version, messageIndex: _index, ...metadata } = stored
+          const conversation = await normalizeConversation({ ...metadata, messages: [], agentMessages: [] })
+          historyStates.set(storedPath, { index: stored.messageIndex, loaded: false })
+          conversations.push(conversation)
+        } else {
+          if (!Array.isArray(parsed.messages)) throw new Error('Invalid conversation data')
+          const conversation = await normalizeConversation(parsed as StoredConversation)
+          // Keep the source recoverable; publish the new index only after records are durable.
+          try {
+            await writeJson(storedPath + '.legacy', parsed)
+            await persistConversation(projectId, conversation)
+          } catch (error) { throw new WorkspaceMigrationError('Conversation migration failed', { cause: error }) }
+          conversations.push(conversation)
+        }
       } catch (error) {
+        if (error instanceof WorkspaceMigrationError) throw error
         if (!isMissingFile(error)) await quarantineBrokenFile(storedPath, error)
         log.warn('workspace.conversation.skipped', {
           projectId,
@@ -456,7 +573,10 @@ async function loadProjects(): Promise<Project[]> {
     try {
       const stored = JSON.parse(await readFile(workspacePath, 'utf8')) as unknown
       if (Array.isArray(stored)) {
-        projects = await migrateLegacyProjects(stored as LegacyStoredProject[])
+        try {
+          await writeJson(workspacePath + '.legacy', stored)
+          projects = await migrateLegacyProjects(stored as LegacyStoredProject[])
+        } catch (error) { throw new WorkspaceMigrationError('Workspace migration failed', { cause: error }) }
       } else if (isWorkspaceManifest(stored)) {
         const loaded = await loadShardedProjects(stored)
         projects = loaded.projects
@@ -465,6 +585,7 @@ async function loadProjects(): Promise<Project[]> {
         throw new Error('Invalid workspace manifest')
       }
     } catch (error) {
+      if (error instanceof WorkspaceMigrationError) throw error
       if (isMissingFile(error)) {
         const projectIds = await discoverProjectIds()
         projects = projectIds.length === 0 ? [] : await recoverShardedProjects(new Error('Workspace manifest was missing'))
@@ -515,7 +636,9 @@ function findConversation(project: Project, conversationId: string): Conversatio
 
 export async function getProjects(): Promise<Project[]> {
   await awaitPendingWrites()
-  return loadProjects()
+  const loaded = await loadProjects()
+  for (const project of loaded) for (const conversation of project.conversations) await hydrateConversationHistory(project.id, conversation)
+  return loaded
 }
 
 /**
@@ -523,12 +646,14 @@ export async function getProjects(): Promise<Project[]> {
  * Callers must use this only when they explicitly accept a live snapshot.
  */
 export async function getProjectsLive(): Promise<Project[]> {
-  return loadProjects()
+  const loaded = await loadProjects()
+  for (const project of loaded) for (const conversation of project.conversations) await hydrateConversationHistory(project.id, conversation)
+  return loaded
 }
 
-export async function getProject(projectId: string): Promise<Project> {
+export async function getProject(projectId: string, conversationId?: string): Promise<Project> {
   await awaitPendingWrites()
-  return findProject(projectId)
+  return getProjectLive(projectId, conversationId)
 }
 
 /**
@@ -536,8 +661,12 @@ export async function getProject(projectId: string): Promise<Project> {
  * This is intentionally separate from getProject(), whose contract includes
  * waiting for durable writes to settle.
  */
-export async function getProjectLive(projectId: string): Promise<Project> {
-  return findProject(projectId)
+export async function getProjectLive(projectId: string, conversationId?: string): Promise<Project> {
+  const project = await findProject(projectId)
+  for (const conversation of project.conversations) {
+    if (!conversationId || conversation.id === conversationId) await hydrateConversationHistory(projectId, conversation)
+  }
+  return project
 }
 
 export function createProject(name: string, defaultModelConfigId: string | null = null): Promise<Project> {
@@ -812,6 +941,7 @@ export async function addMessageImmediately(
 ): Promise<Project> {
   const project = await findProject(projectId)
   const conversation = findConversation(project, conversationId)
+  await hydrateConversationHistory(projectId, conversation)
   const message = {
     id: messageId ?? randomUUID(),
     createdAt: createdAt ?? new Date().toISOString(),
@@ -869,6 +999,7 @@ export function addMessage(
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    await hydrateConversationHistory(projectId, conversation)
     await persistImageAttachments(projectId, conversationId, images)
     await persistMediaAttachments(projectId, conversationId, attachments)
     conversation.messages.push({
@@ -906,6 +1037,7 @@ export function updateConversationTurn(projectId: string, conversationId: string
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    await hydrateConversationHistory(projectId, conversation)
     const message = conversation.messages.find((item) => item.id === messageId)
     if (!message) throw new Error('Conversation message not found')
     message.turn = turn
@@ -937,6 +1069,7 @@ export function saveConversationContext(
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    await hydrateConversationHistory(projectId, conversation)
     for (const message of agentMessages) {
       await persistImageAttachments(projectId, conversationId, message.images)
       await persistMediaAttachments(projectId, conversationId, message.attachments)
@@ -956,6 +1089,7 @@ export function updateConversationAgentMessages(
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
+    await hydrateConversationHistory(projectId, conversation)
     conversation.agentMessages = update(conversation.agentMessages)
     await persistConversation(projectId, conversation)
     return project

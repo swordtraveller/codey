@@ -1,8 +1,9 @@
-import React, { StrictMode, useMemo, useRef } from 'react'
+import React, { StrictMode, useMemo, useRef, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ChatMessage, DevelopmentProgressState } from '../../src/shared/types'
 import { ConversationHistory } from '../../src/renderer/src/ConversationHistory'
 import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from '../../src/renderer/src/conversation-render-rows'
+import { ConversationPageLoader } from '../../src/renderer/src/conversation-page-loader'
 import { LazyDetails } from '../../src/renderer/src/components/LazyDetails'
 import '../../src/renderer/src/styles.css'
 
@@ -15,7 +16,7 @@ const root = createRoot(document.getElementById('root')!)
 const pause = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 200))
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message) }
 
-type Snapshot = { messages: ChatMessage[]; progress?: DevelopmentProgressState; session?: string; follow?: boolean }
+type Snapshot = { messages: ChatMessage[]; progress?: DevelopmentProgressState; session?: string; follow?: boolean; pagination?: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> } }
 function Row({ row }: { row: ConversationRenderRow }): React.JSX.Element {
   const block = row.kind === 'message' ? row.block : row.kind === 'stream' ? row.block : row.item.type === 'block' ? row.item.block : undefined
   return <div className="message assistant">
@@ -24,16 +25,20 @@ function Row({ row }: { row: ConversationRenderRow }): React.JSX.Element {
     </LazyDetails> : <div className="message-card" style={{ minHeight: 40 + (row.messageIndex % 3) * 35 }} data-text>{block?.type === 'content' ? block.content : row.kind === 'message' ? row.message.content : 'notice'}</div>}
   </div>
 }
-function Fixture({ messages, progress = emptyProgress, follow = true }: Snapshot): React.JSX.Element {
+function Fixture({ messages, progress = emptyProgress, follow = true, pagination }: Snapshot): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
   const rows = useMemo(() => mergeConversationRows(conversationHistoryRows(messages), conversationLiveRows(progress, messages)), [messages, progress])
   return <div id="scroll" ref={ref} style={{ height: 480, width: 720, overflow: 'auto', overflowAnchor: 'none' }}>
     <div className="messages">
-      <ConversationHistory messages={messages} rows={rows} scrollContainerRef={ref} shouldStickToBottom={follow}
+      <ConversationHistory messages={messages} rows={rows} scrollContainerRef={ref} shouldStickToBottom={follow} pagination={pagination}
         renderRow={(row) => <Row row={row} />} renderLoadOlder={(load) => <button id="older" onClick={load}>older</button>} />
       <div style={{ height: 1 }} />
     </div>
   </div>
+}
+function PagedFixture({ loader }: { loader: ConversationPageLoader }): React.JSX.Element {
+  const state = useSyncExternalStore(loader.subscribe, loader.getSnapshot, loader.getSnapshot)
+  return <Fixture messages={state.messages} pagination={{ hasOlder: Boolean(state.before), loading: state.loadingOlder, loadOlder: loader.loadOlder }} />
 }
 const rows = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('[data-message-id]')]
 const scroller = (): HTMLElement => document.getElementById('scroll')!
@@ -49,6 +54,11 @@ function anchor(): { id: string; offset: number } {
 function sameAnchor(before: ReturnType<typeof anchor>): void {
   const after = anchor()
   assert(after.id === before.id && Math.abs(after.offset - before.offset) < 2, `anchor moved: ${JSON.stringify({ before, after })}`)
+}
+function sameRowAnchor(before: ReturnType<typeof anchor>): void {
+  const row = rows().find((item) => item.dataset.messageId === before.id)
+  const offset = row ? row.getBoundingClientRect().top - scroller().getBoundingClientRect().top : null
+  assert(offset !== null && Math.abs(offset - before.offset) < 2, 'paged anchor moved: ' + JSON.stringify({ before, offset }))
 }
 function bounded(): void {
   maxMounted = Math.max(maxMounted, rows().length)
@@ -150,6 +160,47 @@ async function runTests(): Promise<unknown> {
   await pause()
   assert(!restored.querySelector('[data-tool-body]'), 'collapsed body not released')
   passed.push('500 tools: deferred details/logs, recycling and retained expansion state')
+  const pagedMessages: ChatMessage[] = Array.from({ length: 15 }, (_, index) => [user('page-u' + index), { id: 'page-a' + index, role: 'assistant' as const, content: '', blocks: blocks.slice(0, 8) }]).flat()
+  let pendingOlder: (() => void) | undefined
+  let olderCalls = 0
+  let latestMessages = pagedMessages.slice(20)
+  const loader = new ConversationPageLoader((before) => {
+    if (!before) return Promise.resolve({ messages: latestMessages, before: 'page-u10', revision: '1' })
+    olderCalls++
+    const end = pagedMessages.findIndex((message) => message.id === before)
+    const start = Math.max(0, end - 10)
+    return new Promise((resolve) => { pendingOlder = () => resolve({ messages: pagedMessages.slice(start, end), before: start ? pagedMessages[start].id : null, revision: '1' }) })
+  })
+  await loader.refresh()
+  root.render(<StrictMode><PagedFixture key="paged" loader={loader} /></StrictMode>)
+  await pause()
+  bounded()
+  assert(atBottom(), 'paged initial mount should follow bottom')
+  await scroll(0)
+  const pagedAnchor = anchor()
+  scroller().dispatchEvent(new WheelEvent('wheel', { deltaY: -50 }))
+  assert(olderCalls === 1, 'an in-flight page must not be requested twice')
+  latestMessages = [...latestMessages, user('page-new')]
+  await loader.refresh()
+  await pause()
+  sameRowAnchor(pagedAnchor)
+  pendingOlder!()
+  await pause()
+  sameRowAnchor(pagedAnchor)
+  bounded()
+  assert(loader.getSnapshot().messages.at(-1)?.id === 'page-new', 'older response lost the latest message')
+  await scroll(0)
+  const oldestAnchor = anchor()
+  pendingOlder!()
+  await pause()
+  sameRowAnchor(oldestAnchor)
+  assert(!document.getElementById('older'), 'oldest page should remove the loading control')
+  await scroll(0)
+  assert(visible().length > 0, 'oldest page is blank')
+  await scroll(scroller().scrollHeight)
+  assert(atBottom(), 'paged return to bottom failed')
+  passed.push('async data pages: duplicate request guard, concurrent tail update, prepend anchor and oldest boundary')
+
   root.unmount()
   return { passed, maxMounted }
 }

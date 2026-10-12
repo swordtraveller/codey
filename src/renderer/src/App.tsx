@@ -63,6 +63,7 @@ import {
   updateDevelopmentProgress,
 } from './development-progress-store'
 import { ConversationHistory } from './ConversationHistory'
+import { useConversationMessages } from './useConversationMessages'
 import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
 import { LazyDetails } from './components/LazyDetails'
 import {
@@ -1142,6 +1143,7 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
 
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
+  pagination,
   projectId,
   conversationId,
   conversationTurn,
@@ -1151,6 +1153,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue,
 }: {
   messages: ChatMessage[]
+  pagination: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
@@ -1173,12 +1176,13 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   return (
     <ConversationHistory
       messages={messages}
+      pagination={pagination}
       rows={rows}
       scrollContainerRef={scrollContainerRef}
       shouldStickToBottom={shouldStickToBottom}
       renderLoadOlder={(loadOlder, count) => (
-        <Button appearance="subtle" size="small" onClick={loadOlder}>
-          {t('loadOlderConversationRounds', { count })}
+        <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
+          {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
         </Button>
       )}
       renderRow={(row) => row.kind === 'message' ? (
@@ -2071,9 +2075,11 @@ export function App(): React.JSX.Element {
     .flatMap((project) => project.conversations
       .filter((conversation) => conversation.archived)
       .map((conversation) => ({ project, conversation })))
-  const activeConversation = visibleConversations.find(
+  const selectedConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
+  const messageHistory = useConversationMessages(activeProject?.id, selectedConversation?.id, selectedConversation?.history?.revision)
+  const activeConversation = selectedConversation ? { ...selectedConversation, messages: messageHistory.messages } : undefined
   const installedSkillIds = new Set(installedSkills.map((skill) => skill.id))
   const effectiveSkillIds = resolveEffectiveResourceIds(
     config.defaultSkillIds,
@@ -2097,6 +2103,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
+        if (conv.history) { counts[conv.id] = conv.history.unreadCount; continue }
         const assistantMessages = conv.messages.filter((m) => m.role === 'assistant')
         if (!conv.lastReadMessageId) {
           counts[conv.id] = assistantMessages.length
@@ -2113,6 +2120,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
+        if (conv.history) { errors[conv.id] = conv.history.hasError && conv.lastReadMessageId !== conv.history.lastMessageId; continue }
         const lastMsg = conv.messages[conv.messages.length - 1]
         let hasError = Boolean(
           lastMsg?.turn && (
@@ -2176,7 +2184,7 @@ export function App(): React.JSX.Element {
       ? t('contextStrategyLayeredShort')
       : t('contextStrategyDefault')
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
-  const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
+  const conversationRoundCount = activeConversation?.history?.turnCount ?? activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
@@ -2193,7 +2201,7 @@ export function App(): React.JSX.Element {
       activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
       effectiveModelConfig.modelMaxContext,
     ))
-  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const canSend = Boolean(messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
@@ -2671,7 +2679,7 @@ export function App(): React.JSX.Element {
   async function markProjectAllRead(project: Project): Promise<void> {
     for (const conv of project.conversations) {
       if (conv.archived) continue
-      const lastAssistant = [...conv.messages].reverse().find(m => m.role === 'assistant')
+      const lastAssistant = conv.history?.lastAssistantMessageId ? { id: conv.history.lastAssistantMessageId } : [...conv.messages].reverse().find(m => m.role === 'assistant')
       if (lastAssistant) {
         try {
           const result = await window.codey.setConversationReadState(project.id, conv.id, lastAssistant.id, Date.now())
@@ -3726,21 +3734,7 @@ export function App(): React.JSX.Element {
     const sendStartedAt = performance.now()
     setError('')
     const userMessageId = crypto.randomUUID()
-    const optimisticProject: Project = {
-      ...activeProject,
-      conversations: activeProject.conversations.map((conversation) =>
-        conversation.id === conversationId
-          ? {
-              ...conversation,
-              messages: [
-                ...conversation.messages,
-                { id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() },
-              ],
-            }
-          : conversation,
-      ),
-    }
-    replaceProject(optimisticProject)
+    messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
     window.codey.recordPerformanceTrace({
       traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
       durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
@@ -3766,11 +3760,8 @@ export function App(): React.JSX.Element {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
         )
-        const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
-          .reverse()
-          .find((message) => message.role === 'user' && message.content === content &&
-            (images.length === 0 || message.images?.[0]?.id === images[0].id) &&
-            (attachments.length === 0 || message.attachments?.[0]?.id === attachments[0].id))
+        const updatedUserMessage = updatedConversation?.history?.lastUserMessage
+        await messageHistory.refresh()
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -3966,7 +3957,7 @@ export function App(): React.JSX.Element {
                         setOpenConversationMenuId(null);
                         setError('');
                         scrollToBottom();
-                        const lastMsg = conversation.messages[conversation.messages.length - 1];
+                        const lastMsg = conversation.history?.lastMessageId ? { id: conversation.history.lastMessageId } : conversation.messages[conversation.messages.length - 1];
                         if (lastMsg && conversation.lastReadMessageId !== lastMsg.id) {
                           void window.codey.setConversationReadState(activeProject.id, conversation.id, lastMsg.id, Date.now()).then(replaceProject);
                         }
@@ -4153,7 +4144,7 @@ export function App(): React.JSX.Element {
               className="conversation"
               aria-label={t('conversation')}
             >
-            {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
+            {!activeConversation || (messageHistory.loaded && activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
                 <h1>{emptyTitle}</h1>
                 <p>{emptyDescription}</p>
@@ -4170,9 +4161,12 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
+                {messageHistory.loading && <div role="status">{t('loadingConversationMessages')}</div>}
+                {messageHistory.error && <div role="alert">{t('unableLoadConversationMessages')} {messageHistory.error} <Button size="small" onClick={() => void messageHistory.retry()}>{t('retryConversationMessages')}</Button></div>}
                 <VirtualizedConversationHistory
                   key={activeConversationKey}
                   messages={activeConversation.messages}
+                  pagination={{ hasOlder: Boolean(messageHistory.before), loading: messageHistory.loadingOlder, loadOlder: messageHistory.loadOlder }}
                   projectId={activeProjectId}
                   conversationId={activeConversation.id}
                   conversationTurn={conversationTurn}

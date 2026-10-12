@@ -7,10 +7,11 @@ import { conversationRowStart, type ConversationRenderRow } from './conversation
 
 type ReadingAnchor = { id: string; offset: number } | { id: null; offset: number }
 
-/** UI paging only: messages remain in chronological order, independent of model context. */
+/** Virtual rows stay independent of model context and data-page ownership. */
 export function ConversationHistory({
-  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder,
+  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder, pagination,
 }: {
+  pagination?: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   messages: ChatMessage[]
   rows: ConversationRenderRow[]
   scrollContainerRef: RefObject<HTMLDivElement | null>
@@ -18,7 +19,7 @@ export function ConversationHistory({
   renderRow: (row: ConversationRenderRow) => ReactNode
   renderLoadOlder: (loadOlder: () => void, count: number) => ReactNode
 }): React.JSX.Element {
-  const latestMessageStart = useMemo(() => initialConversationWindowStart(messages), [messages])
+  const latestMessageStart = useMemo(() => pagination ? 0 : initialConversationWindowStart(messages), [messages, pagination])
   const latestStart = conversationRowStart(rows, latestMessageStart)
   const [startIndex, setStartIndex] = useState(latestStart)
   const expandedRef = useRef(false)
@@ -126,6 +127,14 @@ export function ConversationHistory({
     handlersRef.current = {
       capture,
       loadOlder: () => {
+        if (pagination) {
+          if (pagination.loading || loadingRef.current || !pagination.hasOlder) return
+          anchorRef.current = capture()
+          followingRef.current = false
+          loadingRef.current = true
+          void pagination.loadOlder().finally(() => { loadingRef.current = false; scheduleUpdate() })
+          return
+        }
         if (loadingRef.current || visibleStart <= 0) return
         const messageStart = rows[visibleStart]?.messageIndex ?? messages.length
         const next = conversationRowStart(rows, expandConversationWindowStart(messages, messageStart))
@@ -241,10 +250,10 @@ export function ConversationHistory({
     }
   }, [scheduleUpdate, scrollContainerRef])
 
-  const olderCount = Math.min(conversationHistoryBatchSize, messages.slice(0, rows[visibleStart]?.messageIndex ?? messages.length).filter((message) => message.role === 'user').length)
+  const olderCount = pagination ? conversationHistoryBatchSize : Math.min(conversationHistoryBatchSize, messages.slice(0, rows[visibleStart]?.messageIndex ?? messages.length).filter((message) => message.role === 'user').length)
   return (
     <div className="conversation-history" ref={historyRef} data-history-start={visibleStart}>
-      {visibleStart > 0 && (
+      {(pagination ? pagination.hasOlder : visibleStart > 0) && (
         <div className="conversation-history-fold">
           {renderLoadOlder(() => handlersRef.current.loadOlder(), olderCount)}
         </div>

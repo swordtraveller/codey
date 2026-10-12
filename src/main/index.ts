@@ -105,6 +105,9 @@ import {
   getProject,
   getProjectLive,
   getProjects,
+  getProjectsForRenderer,
+  projectForRenderer,
+  getConversationMessagePage,
   getProjectsLive,
   saveConversationContext,
   updateConversationHotLongTermContent,
@@ -663,7 +666,7 @@ function normalizeContextMessage(
 }
 
 async function prepareContextDebugStorage(projectId: string, conversationId: string): Promise<void> {
-  const project = await getProject(projectId)
+  const project = await getProject(projectId, conversationId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) throw new Error('Conversation not found')
   const now = new Date().toISOString()
@@ -691,7 +694,7 @@ async function developProject(
   if (attachmentError) return { writtenFiles: [], error: 'Invalid media attachment' }
   if (!normalizedContent && images.length === 0 && attachments.length === 0) return { writtenFiles: [], error: 'Enter a development request' }
 
-  let project = await getProjectLive(projectId)
+  let project = await getProjectLive(projectId, conversationId)
   if (project.folders.length === 0) {
     return { project, writtenFiles: [], error: 'Add a project folder first' }
   }
@@ -954,10 +957,9 @@ async function processBridgeMessage(message: import('../shared/bridge').Handover
   const key = conversationKey(message.projectId, message.conversationId)
   const controller = new AbortController()
   const publishProject = (project: Project): void => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', project)
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('project:updated', projectForRenderer(project))
     // 使用内存快照同步 Bridge，不等待本轮消息的磁盘持久化；同步失败也不能阻塞模型请求。
-    void getProjectsLive()
-      .then((projects) => bridgeHandover.sync(projects))
+    void bridgeHandover.sync(getProjectsLive)
       .catch((error) => log.warn('bridge.sync.failed', error))
   }
   conversationControllers.set(key, controller)
@@ -1162,7 +1164,7 @@ async function initializeContextDebugContext(
 async function openContextDebugWindow(projectId: string, conversationId: string): Promise<void> {
   const config = await readConfig()
   if (!config.developerMode) throw new Error('Developer mode is disabled')
-  const project = await getProject(projectId)
+  const project = await getProject(projectId, conversationId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) {
     throw new Error('Conversation not found')
@@ -1296,7 +1298,8 @@ app.whenReady().then(() => {
   ipcMain.handle('notifications:set-settings', (_event, settings: Partial<NotificationSettings>) => {
     notificationManager.updateSettings(settings)
   })
-  ipcMain.handle('projects:get', () => getProjects())
+  ipcMain.handle('projects:get', () => getProjectsForRenderer())
+  ipcMain.handle('conversations:messages', (_event, projectId: string, conversationId: string, before: string | null) => getConversationMessagePage(projectId, conversationId, before))
   ipcMain.handle('skills:list', () => listInstalledSkills())
   ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))
   ipcMain.handle('skills:install-preview', async (_event, previewId: string, selectedCandidateIds: string[]) => {
@@ -1392,7 +1395,7 @@ app.whenReady().then(() => {
     return bridgeHandover.status()
   })
   ipcMain.handle('bridge:sync', async (_event, channelId?: string) => {
-    await bridgeHandover.sync(await getProjects(), channelId)
+    await bridgeHandover.sync(getProjects, channelId)
     return bridgeHandover.status()
   })
   ipcMain.handle('bridge:refresh', async (_event, channelId: string) => bridgeHandover.refreshEnrollment(channelId))
@@ -1402,76 +1405,76 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('projects:create', async (_event, name: string) => {
     const config = await readConfig()
-    return createProject(name, config.activeModelConfigId)
+    return createProject(name, config.activeModelConfigId).then(projectForRenderer)
   })
   ipcMain.handle('projects:add-folder', async (_event, projectId: string) => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
-    return addProjectFolder(projectId, result.filePaths[0])
+    return addProjectFolder(projectId, result.filePaths[0]).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-model-config', async (_event, projectId: string, modelConfigId: string | null) => {
     ensureAllIdle()
     await validateModelConfigId(modelConfigId)
-    return setProjectModelConfig(projectId, modelConfigId)
+    return setProjectModelConfig(projectId, modelConfigId).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-context-config', (_event, projectId: string, contextConfig: ContextManagementConfig | null) => {
     ensureAllIdle()
-    return setProjectContextConfig(projectId, contextConfig)
+    return setProjectContextConfig(projectId, contextConfig).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-skill-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
     ensureProjectIdle(projectId)
-    return setProjectSkillSelection(projectId, validateResourceSelection(selection))
+    return setProjectSkillSelection(projectId, validateResourceSelection(selection)).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-knowledge-base-selection', (_event, projectId: string, selection: ResourceSelectionOverride) => {
     ensureProjectIdle(projectId)
-    return setProjectKnowledgeBaseSelection(projectId, validateResourceSelection(selection))
+    return setProjectKnowledgeBaseSelection(projectId, validateResourceSelection(selection)).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-archived', (_event, projectId: string, archived: boolean) => {
     ensureProjectIdle(projectId)
-    return setProjectArchived(projectId, archived)
+    return setProjectArchived(projectId, archived).then(projectForRenderer)
   })
-  ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId))
+  ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId).then(projectForRenderer))
   ipcMain.handle('conversations:set-read-state', (_event, projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) => {
-    return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt)
+    return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
     await validateModelConfigId(modelConfigId)
-    return setConversationModelConfig(projectId, conversationId, modelConfigId)
+    return setConversationModelConfig(projectId, conversationId, modelConfigId).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-context-config', (_event, projectId: string, conversationId: string, contextConfig: ContextManagementConfig | null) => {
     ensureIdle(projectId, conversationId)
-    return setConversationContextConfig(projectId, conversationId, contextConfig)
+    return setConversationContextConfig(projectId, conversationId, contextConfig).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-skill-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
     ensureIdle(projectId, conversationId)
-    return setConversationSkillSelection(projectId, conversationId, validateResourceSelection(selection))
+    return setConversationSkillSelection(projectId, conversationId, validateResourceSelection(selection)).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-knowledge-base-selection', (_event, projectId: string, conversationId: string, selection: ResourceSelectionOverride) => {
     ensureIdle(projectId, conversationId)
-    return setConversationKnowledgeBaseSelection(projectId, conversationId, validateResourceSelection(selection))
+    return setConversationKnowledgeBaseSelection(projectId, conversationId, validateResourceSelection(selection)).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-agent-limits', (_event, projectId: string, conversationId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureIdle(projectId, conversationId)
-    return setConversationAgentLimits(projectId, conversationId, agentLimits)
+    return setConversationAgentLimits(projectId, conversationId, agentLimits).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-command-execution', async (_event, projectId: string, conversationId: string, commandExecution: CommandExecutionConfig | null) => {
     ensureIdle(projectId, conversationId)
     if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
-    return setConversationCommandExecution(projectId, conversationId, commandExecution)
+    return setConversationCommandExecution(projectId, conversationId, commandExecution).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig | null) => {
     ensureProjectIdle(projectId)
     if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
-    return setProjectCommandExecutionDefault(projectId, commandExecution)
+    return setProjectCommandExecutionDefault(projectId, commandExecution).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-agent-limits-default', (_event, projectId: string, agentLimits: AgentLimitsConfig | null) => {
     ensureProjectIdle(projectId)
-    return setProjectAgentLimitsDefault(projectId, agentLimits)
+    return setProjectAgentLimitsDefault(projectId, agentLimits).then(projectForRenderer)
   })
   ipcMain.handle('shells:detect', () => detectShells())
   ipcMain.handle('shells:cached', () => getCachedShellDetection())
@@ -1494,7 +1497,7 @@ app.whenReady().then(() => {
   ipcMain.handle('tools:help-snapshot', (_event, projectRoot?: string) => buildToolHelpSnapshot(projectRoot))
   ipcMain.handle('conversations:set-archived', (_event, projectId: string, conversationId: string, archived: boolean) => {
     ensureIdle(projectId, conversationId)
-    return setConversationArchived(projectId, conversationId, archived)
+    return setConversationArchived(projectId, conversationId, archived).then(projectForRenderer)
   })
   ipcMain.handle('clipboard:screenshot', async (_event, hideWindow: boolean) => {
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main window is unavailable')
@@ -1543,12 +1546,12 @@ app.whenReady().then(() => {
       const result = await developProject(projectId, conversationId, content, images, attachments, (update) => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt, (project) => {
-        if (!event.sender.isDestroyed()) event.sender.send('project:updated', project)
+        if (!event.sender.isDestroyed()) event.sender.send('project:updated', projectForRenderer(project))
       }, traceId)
       if (!result.error && !result.stopped) {
-        void bridgeHandover.sync(await getProjects()).catch((error) => log.warn('bridge.sync.failed', error))
+        void bridgeHandover.sync(getProjects).catch((error) => log.warn('bridge.sync.failed', error))
       }
-      return result
+      return { ...result, project: result.project ? projectForRenderer(result.project) : undefined }
     } finally {
       developmentProgressStates.delete(key)
       if (conversationControllers.get(key) === controller) {

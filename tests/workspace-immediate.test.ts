@@ -27,6 +27,7 @@ vi.mock('../src/main/image-store', () => ({
   }),
 }))
 
+import { readMessageRecords } from '../src/main/workspace-message-store'
 import { addMessageImmediately, createProject, getProjects, getProjectsLive } from '../src/main/workspace'
 
 describe('immediate workspace message publication', () => {
@@ -57,6 +58,9 @@ describe('immediate workspace message publication', () => {
     expect(persistenceStarted).toBe(true)
     persistence.release?.()
     await getProjects()
-    expect(JSON.parse(await readFile(join(electronState.userData, 'workspace-data', 'projects', Buffer.from(project.id).toString('base64url'), 'conversations', `${Buffer.from(conversation.id).toString('base64url')}.json`), 'utf8')).messages.at(-1).id).toBe('message-1')
+    const path = join(electronState.userData, 'workspace-data', 'projects', Buffer.from(project.id).toString('base64url'), 'conversations', `${Buffer.from(conversation.id).toString('base64url')}.json`)
+    const header = JSON.parse(await readFile(path, 'utf8'))
+    const messages = await readMessageRecords<{ id: string }>(path + '.records', header.messageIndex.messages)
+    expect(messages.at(-1)?.id).toBe('message-1')
   })
 })
