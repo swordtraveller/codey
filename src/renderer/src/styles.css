@@ -600,12 +600,14 @@ h1 {
 }
 
 .messages {
+  --message-gap: 10px;
   width: min(100%, 760px);
   margin: auto auto 0;
 }
 
 .message {
-  margin: 24px 0;
+  /* One-sided spacing stays consistent across isolated history rows and live cards. */
+  margin: var(--message-gap) 0 0;
 }
 
 .message.user {
@@ -620,7 +622,7 @@ h1 {
 
 .message.assistant {
   display: grid;
-  gap: 10px;
+  gap: var(--message-gap);
 }
 
 .user-message-content,
@@ -784,7 +786,7 @@ h1 {
 
 .turn-stopwatch {
   min-height: 18px;
-  margin: 0;
+  margin: var(--message-gap) 0 0;
   color: #666;
   font-size: 12px;
   line-height: 18px;
