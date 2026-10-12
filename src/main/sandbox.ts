@@ -46,6 +46,10 @@ export type PythonSymbolsResult = {
 
 const defaultTimeoutMs = 120_000
 const maxOutputSize = 20_000
+// A process can exit while a descendant still owns its stdout/stderr pipe.
+// `exit` is the lifecycle boundary; `close` is only given a short chance to drain.
+export const processPipeDrainGraceMs = 250
+export const processTerminationGraceMs = 3_000
 const environmentTasks = new Map<string, Promise<void>>()
 
 const runnerSource = String.raw`import ast
@@ -304,6 +308,34 @@ export async function safeResolveWritablePath(
   return target
 }
 
+export function terminateSandboxProcessIds(processIds: number[]): Promise<void> {
+  const ids = [...new Set(processIds.filter((pid) => Number.isInteger(pid) && pid > 0))]
+  if (ids.length === 0) return Promise.resolve()
+  if (process.platform !== 'win32') {
+    for (const pid of ids) {
+      try { process.kill(pid, 'SIGKILL') } catch {}
+    }
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const killer = spawn('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Stop-Process -Id @(${ids.join(',')}) -Force -ErrorAction SilentlyContinue`,
+    ], { windowsHide: true, stdio: 'ignore' })
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    killer.once('error', finish)
+    killer.once('close', finish)
+    setTimeout(finish, 2_000)
+  })
+}
+
 export function terminateSandboxProcess(child: ChildProcess): Promise<void> {
   if (child.killed) return Promise.resolve()
   if (process.platform === 'win32' && child.pid) {
@@ -313,6 +345,16 @@ export function terminateSandboxProcess(child: ChildProcess): Promise<void> {
         stdio: 'ignore',
       })
       let finished = false
+      const forceKillDirectProcess = (): void => {
+        if (!child.pid) return
+        const fallback = spawn('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Stop-Process -Id ${Math.trunc(child.pid)} -Force -ErrorAction SilentlyContinue`,
+        ], { windowsHide: true, stdio: 'ignore' })
+        fallback.once('error', () => undefined)
+      }
       const finish = (): void => {
         if (finished) return
         finished = true
@@ -323,10 +365,19 @@ export function terminateSandboxProcess(child: ChildProcess): Promise<void> {
             // The process may already have exited after taskkill completed.
           }
         }
+        forceKillDirectProcess()
         resolve()
       }
       killer.once('error', finish)
-      killer.once('close', finish)
+      killer.once('close', (code) => {
+        // A non-zero taskkill result means the process tree was not confirmed
+        // terminated. Fall back to terminating the direct child below.
+        if (code !== 0) finish()
+        else {
+          finished = true
+          resolve()
+        }
+      })
       setTimeout(finish, 2_000)
     })
   }
@@ -376,25 +427,62 @@ export function runSandboxProcess(
     })
     let stdout = ''
     let stderr = ''
+    let exitCode: number | null = null
     let timedOut = false
     let aborted = false
     let settled = false
-    const onAbort = (): void => {
-      if (!settled) {
-        aborted = true
-        terminateSandboxProcess(child)
+    let terminationRequested = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let exitGraceTimer: ReturnType<typeof setTimeout> | undefined
+    let terminationGraceTimer: ReturnType<typeof setTimeout> | undefined
+
+    const finish = (closeCode?: number | null, destroyStreams = false): void => {
+      if (settled) return
+      if (destroyStreams) {
+        child.stdout?.destroy()
+        child.stderr?.destroy()
       }
+      settled = true
+      cleanup()
+      if (aborted) {
+        rejectProcess(abortError())
+        return
+      }
+      resolveProcess({
+        exitCode: closeCode ?? exitCode,
+        stdout: truncateOutput(stdout),
+        stderr: truncateOutput(stderr),
+        timedOut,
+        durationMs: Date.now() - startedAt,
+      })
+    }
+
+    const settleAfterTermination = (): void => {
+      if (settled) return
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      finish(undefined, true)
+    }
+
+    const requestTermination = (reason: 'timeout' | 'abort'): void => {
+      if (settled || terminationRequested) return
+      terminationRequested = true
+      if (reason === 'timeout') timedOut = true
+      if (reason === 'abort') aborted = true
+      void terminateSandboxProcess(child).catch(() => undefined)
+      terminationGraceTimer = setTimeout(settleAfterTermination, processTerminationGraceMs)
+    }
+
+    const onAbort = (): void => {
+      requestTermination('abort')
     }
     const cleanup = (): void => {
-      clearTimeout(timer)
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      if (exitGraceTimer) clearTimeout(exitGraceTimer)
+      if (terminationGraceTimer) clearTimeout(terminationGraceTimer)
       signal?.removeEventListener('abort', onAbort)
     }
-    const timer = setTimeout(() => {
-      if (!settled) {
-        timedOut = true
-        terminateSandboxProcess(child)
-      }
-    }, timeoutMs)
+    timeoutTimer = setTimeout(() => requestTermination('timeout'), timeoutMs)
     signal?.addEventListener('abort', onAbort, { once: true })
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
@@ -403,28 +491,37 @@ export function runSandboxProcess(
     child.stderr?.on('data', (chunk: Buffer | string) => {
       stderr = appendOutput(stderr, chunk)
     })
-    child.once('error', (error) => {
+    child.once('exit', (code) => {
+      exitCode = code
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = undefined
+      }
+
+      // `exit` means the process itself is gone. `close` additionally waits for
+      // every stdio stream, which can be held open by a child process. Keep a
+      // bounded drain window so a leaked pipe cannot keep the tool pending.
       if (!settled) {
-        settled = true
-        cleanup()
-        rejectProcess(aborted ? abortError() : error)
+        exitGraceTimer = setTimeout(() => {
+          finish(undefined, true)
+        }, processPipeDrainGraceMs)
       }
     })
-    child.once('close', (exitCode) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      if (aborted) {
-        rejectProcess(abortError())
-        return
+    child.once('error', (error) => {
+      if (!settled) {
+        if (aborted) {
+          finish(undefined, true)
+        } else if (timedOut) {
+          finish(undefined, true)
+        } else {
+          settled = true
+          cleanup()
+          rejectProcess(error)
+        }
       }
-      resolveProcess({
-        exitCode,
-        stdout: truncateOutput(stdout),
-        stderr: truncateOutput(stderr),
-        timedOut,
-        durationMs: Date.now() - startedAt,
-      })
+    })
+    child.once('close', (closeCode) => {
+      finish(closeCode)
     })
     if (input !== undefined) child.stdin?.end(input)
   })

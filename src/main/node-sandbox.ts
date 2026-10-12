@@ -2,9 +2,13 @@ import { spawn } from 'node:child_process'
 import { access, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
+  processPipeDrainGraceMs,
+  processTerminationGraceMs,
+  terminateSandboxProcessIds,
   runSandboxProcess,
   terminateSandboxProcess,
   safeResolveExistingPath,
+  safeResolvePath,
   safeResolveWritablePath,
   truncateOutput,
   type SandboxProcessResult,
@@ -32,6 +36,10 @@ const { fileURLToPath } = require('node:url')
 
 const sandboxRoot = path.resolve(process.env.CODEY_NODE_SANDBOX_ROOT || process.cwd())
 const enforce = Boolean(process.env.npm_lifecycle_event)
+const processRegistry = process.env.CODEY_NODE_PROCESS_REGISTRY
+if (processRegistry) {
+  try { fs.appendFileSync(processRegistry, String(process.pid) + '\n') } catch {}
+}
 const originalExistsSync = fs.existsSync.bind(fs)
 const originalRealpathNative = fs.realpath.native
 const originalRealpathSyncNative = (fs.realpathSync.native || fs.realpathSync).bind(fs.realpathSync)
@@ -334,16 +342,18 @@ function resultFromProcess(result: SandboxProcessResult): NodePackageExecutionRe
   }
 }
 
-async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ guardPath?: string; temporaryDirectory: string }> {
+async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ guardPath?: string; processRegistryPath?: string; temporaryDirectory: string }> {
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
   await mkdir(temporaryDirectory, { recursive: true })
   if (!withGuard) return { temporaryDirectory }
   const guardPath = await safeResolveWritablePath(root, '.agent_tmp/node-sandbox-guard.cjs')
+  const processRegistryPath = safeResolvePath(temporaryDirectory, 'node-processes.txt')
+  await writeFile(processRegistryPath, '', 'utf8')
   await writeFile(guardPath, nodeGuardSource, 'utf8')
-  return { guardPath, temporaryDirectory }
+  return { guardPath, processRegistryPath, temporaryDirectory }
 }
 
-function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string, nodeRoot?: string): NodeJS.ProcessEnv {
+function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string, nodeRoot?: string, processRegistryPath?: string): NodeJS.ProcessEnv {
   const corepackHome = process.env.COREPACK_HOME ?? join(temporaryDirectory, 'corepack')
   const hostHome = process.env.USERPROFILE ?? process.env.HOME
   const hostCargoHome = process.env.CARGO_HOME ?? (hostHome ? join(hostHome, '.cargo') : undefined)
@@ -389,6 +399,7 @@ function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoo
     CODEY_NODE_SANDBOX_ROOT: root,
     CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory, corepackHome].join(process.platform === 'win32' ? ';' : ':'),
     CODEY_NODE_ALLOWED_WRITE_ROOTS: temporaryDirectory,
+    ...(processRegistryPath ? { CODEY_NODE_PROCESS_REGISTRY: processRegistryPath } : {}),
   }
   if (nodeRoot) {
     // Windows environment keys are case-insensitive; keep only one PATH entry.
@@ -466,7 +477,7 @@ async function preparePackageScript(
   packageManager: PackageManager,
   script: string,
   argv: string[],
-): Promise<{ root: string; executable: string; args: string[]; environment: NodeJS.ProcessEnv }> {
+): Promise<{ root: string; executable: string; args: string[]; environment: NodeJS.ProcessEnv; processRegistryPath?: string }> {
   assertPackageManager(packageManager)
   if (!/^[A-Za-z0-9._:-]{1,100}$/.test(script)) throw new Error('script must be a package.json script name')
   validateArguments(argv)
@@ -474,14 +485,15 @@ async function preparePackageScript(
   const scripts = await readPackageScripts(root)
   if (!Object.hasOwn(scripts, script)) throw new Error(`Script '${script}' is not defined in package.json`)
   const { command: executable, prefixArgs, readRoot, nodeRoot } = await managerInvocation(packageManager)
-  const { temporaryDirectory, guardPath } = await prepareNodeSandbox(root)
+  const { temporaryDirectory, guardPath, processRegistryPath } = await prepareNodeSandbox(root)
   const args: string[] = [...prefixArgs, 'run', script]
   if (argv.length > 0) args.push('--', ...argv)
   return {
     root,
     executable,
     args,
-    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath, nodeRoot),
+    processRegistryPath,
+    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath, nodeRoot, processRegistryPath),
   }
 }
 
@@ -505,7 +517,11 @@ export async function startPackageScript(
   let stderr = ''
   let stopped = false
   let settled = false
+  let exitCode: number | null = null
+  let exitGraceTimer: ReturnType<typeof setTimeout> | undefined
+  let stopGraceTimer: ReturnType<typeof setTimeout> | undefined
   let resolveDone: ((result: NodePackageExecutionResult) => void) | null = null
+  let finish: (closeCode?: number | null, destroyStreams?: boolean) => void = () => undefined
   const listeners = new Set<(stream: 'stdout' | 'stderr', chunk: string) => void>()
   if (onOutput) listeners.add(onOutput)
   const notify = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
@@ -519,26 +535,46 @@ export async function startPackageScript(
     resolveDone = resolveResult
     child.stdout?.on('data', (chunk: Buffer | string) => notify('stdout', chunk))
     child.stderr?.on('data', (chunk: Buffer | string) => notify('stderr', chunk))
-    child.once('error', (error) => {
+    finish = (closeCode?: number | null, destroyStreams = false): void => {
       if (settled) return
-      settled = true
-      if (stopped) {
-        resolveResult({ success: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), exit_code: -1, duration_ms: Date.now() - startedAt, timed_out: false })
-      } else {
-        rejectResult(error)
+      if (destroyStreams) {
+        child.stdout?.destroy()
+        child.stderr?.destroy()
       }
-    })
-    child.once('close', (exitCode) => {
-      if (settled) return
       settled = true
+      if (exitGraceTimer) clearTimeout(exitGraceTimer)
+      if (stopGraceTimer) clearTimeout(stopGraceTimer)
       resolveResult({
-        success: !stopped && exitCode === 0,
+        success: !stopped && (closeCode ?? exitCode) === 0,
         stdout,
         stderr,
-        exit_code: stopped ? -1 : (exitCode ?? -1),
+        exit_code: stopped ? -1 : (closeCode ?? exitCode ?? -1),
         duration_ms: Date.now() - startedAt,
         timed_out: false,
       })
+    }
+    child.once('exit', (code) => {
+      exitCode = code
+      // `exit` means the process itself is gone. `close` additionally waits for
+      // every stdio stream, so bound the wait for a leaked pipe.
+      if (!settled) {
+        exitGraceTimer = setTimeout(() => finish(undefined, true), processPipeDrainGraceMs)
+      }
+    })
+    child.once('error', (error) => {
+      if (settled) return
+      if (stopped) {
+        stderr = `${stderr}\n${error.message}`.trim()
+        finish(undefined, true)
+      } else {
+        settled = true
+        if (exitGraceTimer) clearTimeout(exitGraceTimer)
+        if (stopGraceTimer) clearTimeout(stopGraceTimer)
+        rejectResult(error)
+      }
+    })
+    child.once('close', (closeCode) => {
+      finish(closeCode)
     })
   })
   let stopPromise: Promise<void> | null = null
@@ -553,28 +589,24 @@ export async function startPackageScript(
       if (settled) return Promise.resolve()
       stopped = true
       stopPromise = (async () => {
-        const startupDelay = 1_000 - (Date.now() - startedAt)
-        if (process.platform === 'win32' && startupDelay > 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, startupDelay))
+        // Do not wait for `taskkill` itself: an inaccessible or wedged process
+        // tree must not leave a frontend/tool call pending indefinitely. Exit or
+        // close will settle sooner; this is the hard upper bound.
+        void terminateSandboxProcess(child).catch(() => undefined)
+        stopGraceTimer = setTimeout(() => finish(undefined, true), processTerminationGraceMs)
+        await new Promise<void>((resolve) => setTimeout(resolve, 100))
+        if (prepared.processRegistryPath) {
+          try {
+            const pids = (await readFile(prepared.processRegistryPath, 'utf8'))
+              .split(/\r?\n/)
+              .map((value) => Number.parseInt(value, 10))
+              .filter((value) => Number.isInteger(value) && value > 0)
+            await terminateSandboxProcessIds(pids)
+          } catch {
+            // The registry may disappear with the temporary project directory.
+          }
         }
-        await terminateSandboxProcess(child)
-        await Promise.race([
-          done.then(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
-        ])
-        child.stdout?.destroy()
-        child.stderr?.destroy()
-        if (!settled) {
-          settled = true
-          resolveDone?.({
-            success: false,
-            stdout,
-            stderr,
-            exit_code: -1,
-            duration_ms: Date.now() - startedAt,
-            timed_out: false,
-          })
-        }
+        await done.then(() => undefined, () => undefined)
       })()
       return stopPromise
     },
