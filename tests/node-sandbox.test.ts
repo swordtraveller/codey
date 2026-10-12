@@ -32,6 +32,33 @@ describe('Node package sandbox', () => {
     }
   })
 
+  it.skipIf(process.platform !== 'win32')('runs package managers and their Node children when hosted by Electron', async () => {
+    const root = await temporaryDirectory()
+    await writeFile(join(root, 'package.json'), JSON.stringify({
+      scripts: { probe: 'node probe.cjs' },
+    }), 'utf8')
+    await writeFile(join(root, 'probe.cjs'), `
+      const { execFileSync } = require('node:child_process')
+      console.log(JSON.stringify({
+        runtime: process.execPath,
+        childRuntime: execFileSync(process.execPath, ['-p', 'process.execPath'], { encoding: 'utf8' }).trim(),
+      }))
+    `, 'utf8')
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'execPath')!
+    Object.defineProperty(process, 'execPath', { ...descriptor, value: join(root, 'electron.exe') })
+    try {
+      for (const manager of ['npm', 'pnpm'] as const) {
+        const result = await runPackageScript(root, manager, 'probe', [], 10)
+        expect(result.success, result.stderr).toBe(true)
+        const probe = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}')
+        expect(probe.runtime.toLowerCase()).toMatch(/node\.exe$/)
+        expect(probe.childRuntime).toBe(probe.runtime)
+      }
+    } finally {
+      Object.defineProperty(process, 'execPath', descriptor)
+    }
+  })
+
   it('preserves configured host Rust toolchain paths', async () => {
     const root = await temporaryDirectory()
     const cargoHome = join(root, 'host-cargo')

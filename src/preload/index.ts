@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld(
     listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
       ipcRenderer.invoke('models:list-provider-models', provider),
     getProjects: () => ipcRenderer.invoke('projects:get'),
+    getConversationMessages: (projectId: string, conversationId: string, before: string | null = null) => ipcRenderer.invoke('conversations:messages', projectId, conversationId, before),
     listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),
     previewGitHubSkill: (url: string): Promise<SkillImportPreview> => ipcRenderer.invoke('skills:preview-github', url),
     installSkillPreview: (previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill> =>

@@ -247,7 +247,7 @@ async function getDebugRevision(projectId: string, conversationId: string, runti
 export async function getContextDebugRevision(projectId: string, conversationId: string, runtimeState: ConversationRuntimeState): Promise<string> { return getDebugRevision(projectId, conversationId, runtimeState) }
 
 export async function getContextDebugOverview(projectId: string, conversationId: string, runtimeState: ConversationRuntimeState): Promise<ContextDebugOverview> {
-  const project = await getProject(projectId)
+  const project = await getProject(projectId, conversationId)
   const conversation = project.conversations.find((item) => item.id === conversationId)
   if (!conversation) throw new Error('Conversation not found')
   const truth = await readConversationIndex(projectId, conversationId)

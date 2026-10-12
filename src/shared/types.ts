@@ -818,7 +818,27 @@ export type ToolHelpSnapshot = {
   entries: ToolHelpEntry[]
 }
 
+export type ConversationHistorySummary = {
+  revision: string
+  messageCount: number
+  turnCount: number
+  unreadCount: number
+  lastMessageId?: string
+  lastAssistantMessageId?: string
+  lastUserMessage?: Pick<ChatMessage, 'id' | 'turn'>
+  hasError: boolean
+}
+
+export type ConversationMessagePage = {
+  messages: ChatMessage[]
+  /** Exclusive oldest message ID; null means there is no earlier page. */
+  before: string | null
+  revision: string
+}
+
 export type Conversation = {
+  /** Renderer metadata; full history remains in the main-process store. */
+  history?: ConversationHistorySummary
   id: string
   title: string
   archived: boolean

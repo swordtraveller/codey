@@ -17,7 +17,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -62,11 +62,10 @@ import {
   subscribeDevelopmentProgress,
   updateDevelopmentProgress,
 } from './development-progress-store'
-import {
-  conversationHistoryBatchSize,
-  expandConversationWindowStart,
-  initialConversationWindowStart,
-} from '../../shared/conversation-window'
+import { ConversationHistory } from './ConversationHistory'
+import { useConversationMessages } from './useConversationMessages'
+import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
+import { LazyDetails } from './components/LazyDetails'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -511,11 +510,12 @@ function ValidationResultView({ result }: { result: NodeValidationResult }): Rea
             <span>{statusLabel(check.status)} · {formatValidationDuration(check.duration_ms)} · {t('exitCode')} {check.exit_code}</span>
           </div>
           {(check.stdout || check.stderr) && (
-            <details className="validation-logs">
-              <summary>{t('validationLogs')}</summary>
-              {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
-              {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
-            </details>
+            <LazyDetails stateKey={`validation-${index}`} className="validation-logs" summary={t('validationLogs')}>
+              {() => <>
+                {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
+                {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
+              </>}
+            </LazyDetails>
           )}
         </div>
       ))}
@@ -533,8 +533,8 @@ function FunctionCallMessage({
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [previewError, setPreviewError] = useState('')
-  const server = parseFrontendServerResult(block)
-  const validation = parseNodeValidationResult(block)
+  const server = useMemo(() => parseFrontendServerResult(block), [block.name, block.result, block.resultError])
+  const validation = useMemo(() => parseNodeValidationResult(block), [block.name, block.result, block.resultError])
   const canPreview = (server?.status === 'starting' || server?.status === 'running') && Boolean(server.serverId && projectId && conversationId)
   const openPreview = async (): Promise<void> => {
     if (!projectId || !conversationId || !server?.serverId) return
@@ -548,43 +548,44 @@ function FunctionCallMessage({
   }
 
   return (
-    <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
-      <summary>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</summary>
-      <div className="tool-output-section">
-        <span>{t('toolParameters')}</span>
-        <pre>{formatToolOutput(block.parameters)}</pre>
-      </div>
-      {block.review && block.review.length > 0 && (
-        <div className="tool-output-section tool-review-section">
-          <span>{t('toolReviewChain')}</span>
-          <ul className="tool-review-steps">
-            {block.review.map((step, index) => (
-              <li key={index} className={`review-step review-${step.outcome}`}>
-                <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
-                <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
-                {step.detail && <span className="review-detail">{step.detail}</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {block.result !== undefined && (
+    <LazyDetails className={`function-call${block.resultError ? ' tool-error' : ''}`} summary={<>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</>}>
+      {() => <>
         <div className="tool-output-section">
-          <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
-          {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
+          <span>{t('toolParameters')}</span>
+          <pre>{formatToolOutput(block.parameters)}</pre>
         </div>
-      )}
-      {canPreview && (
-        <Button
-          appearance="secondary"
-          size="small"
-          onClick={() => void openPreview()}
-        >
-          {t('openPreview')}
-        </Button>
-      )}
-      {previewError && <p className="tool-preview-error">{previewError}</p>}
-    </details>
+        {block.review && block.review.length > 0 && (
+          <div className="tool-output-section tool-review-section">
+            <span>{t('toolReviewChain')}</span>
+            <ul className="tool-review-steps">
+              {block.review.map((step, index) => (
+                <li key={index} className={`review-step review-${step.outcome}`}>
+                  <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
+                  <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
+                  {step.detail && <span className="review-detail">{step.detail}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {block.result !== undefined && (
+          <div className="tool-output-section">
+            <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
+            {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
+          </div>
+        )}
+        {canPreview && (
+          <Button
+            appearance="secondary"
+            size="small"
+            onClick={() => void openPreview()}
+          >
+            {t('openPreview')}
+          </Button>
+        )}
+        {previewError && <p className="tool-preview-error">{previewError}</p>}
+      </>}
+    </LazyDetails>
   )
 }
 
@@ -604,6 +605,7 @@ function ModelRequestNotice({ event }: { event: ModelRequestEvent }): React.JSX.
 
 const ConversationMessage = memo(function ConversationMessage({
   message,
+  block,
   messages,
   projectId,
   conversationId,
@@ -612,6 +614,7 @@ const ConversationMessage = memo(function ConversationMessage({
   onContinue,
 }: {
   message: ChatMessage
+  block?: AssistantMessageBlock
   messages: ChatMessage[]
   projectId: string
   conversationId: string
@@ -634,18 +637,11 @@ const ConversationMessage = memo(function ConversationMessage({
           <MemoCompressionMessage compression={message.compression} />
         ) : message.modelRequest ? (
           <ModelRequestNotice event={message.modelRequest} />
-        ) : message.role === 'assistant' && message.blocks?.length ? (
-          message.blocks.map((block, index) =>
-            block.type === 'content' ? (
-              <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
-            ) : (
-              <MemoFunctionCallMessage
-                block={block}
-                projectId={projectId}
-                conversationId={conversationId}
-                key={block.id}
-              />
-            ),
+        ) : block ? (
+          block.type === 'content' ? (
+            <MemoAssistantContent content={block.content} createdAt={message.createdAt} />
+          ) : (
+            <MemoFunctionCallMessage block={block} projectId={projectId} conversationId={conversationId} />
           )
         ) : message.role === 'assistant' ? (
           <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
@@ -1145,36 +1141,9 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
   )
 }
 
-type VirtualWindow = { start: number; end: number }
-
-const conversationEstimatedRowHeight = 480
-const conversationVirtualOverscan = 5
-
-function updateVirtualWindow(
-  current: VirtualWindow,
-  offsets: number[],
-  scrollTop: number,
-  viewportHeight: number,
-): VirtualWindow {
-  const total = offsets.length - 1
-  if (total <= 0) return { start: 0, end: 0 }
-  const lowerBound = (value: number): number => {
-    let low = 0
-    let high = total
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2)
-      if (offsets[middle + 1] <= value) low = middle + 1
-      else high = middle
-    }
-    return Math.min(low, total - 1)
-  }
-  const start = Math.max(0, lowerBound(Math.max(0, scrollTop)) - conversationVirtualOverscan)
-  const end = Math.min(total, lowerBound(Math.max(0, scrollTop + viewportHeight)) + conversationVirtualOverscan + 1)
-  return current.start === start && current.end === end ? current : { start, end }
-}
-
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
+  pagination,
   projectId,
   conversationId,
   conversationTurn,
@@ -1184,6 +1153,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue,
 }: {
   messages: ChatMessage[]
+  pagination: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   projectId: string
   conversationId: string
   conversationTurn?: ConversationTurn
@@ -1193,273 +1163,43 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const latestInitialStart = initialConversationWindowStart(messages)
-  const [startIndex, setStartIndex] = useState(latestInitialStart)
-  const loadingOlderRef = useRef(false)
-  const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
-  const historyExpandedRef = useRef(false)
-  const heightCacheRef = useRef(new Map<string, number>())
-  const resizeObserverRef = useRef<ResizeObserver | null>(null)
-  const observedRowsRef = useRef(new Map<string, HTMLDivElement>())
-  const rowRefCallbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
-  const [heightVersion, setHeightVersion] = useState(0)
-  const initialVisibleMessageCount = messages.length - latestInitialStart
-  const [virtualWindow, setVirtualWindow] = useState<VirtualWindow>(() => ({
-    start: latestInitialStart + Math.max(0, initialVisibleMessageCount - 12),
-    end: messages.length,
-  }))
-  const scrollFrameRef = useRef<number | null>(null)
-  const visibleStartIndex = historyExpandedRef.current
-    ? Math.min(startIndex, latestInitialStart)
-    : latestInitialStart
-  const hasOlderMessages = visibleStartIndex > 0
-  const historyFoldHeight = hasOlderMessages ? 36 : 0
-  const visibleMessages = useMemo(() => messages.slice(visibleStartIndex), [messages, visibleStartIndex])
-  const layout = useMemo(() => {
-    const offsets = [0]
-    for (const message of visibleMessages) {
-      offsets.push(offsets.at(-1)! + (heightCacheRef.current.get(message.id) ?? conversationEstimatedRowHeight))
-    }
-    return { offsets, totalHeight: offsets.at(-1) ?? 0 }
-  }, [visibleMessages, heightVersion])
-
-  const updateWindow = useCallback(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-    const next = updateVirtualWindow(
-      { start: 0, end: 0 },
-      layout.offsets,
-      Math.max(0, container.scrollTop - historyFoldHeight),
-      container.clientHeight,
-    )
-    setVirtualWindow((current) => {
-      const start = visibleStartIndex + next.start
-      const end = visibleStartIndex + next.end
-      if (current.start === start && current.end === end) return current
-      // Monotonic expansion: a stale-offsets recompute (rows still at the
-      // estimated height) must never clip rows that are already rendered,
-      // otherwise fast scrolling blanks the region above until the heights
-      // settle. Shrinking back happens naturally once real heights land.
-      return {
-        start: Math.min(current.start, start),
-        end: Math.max(current.end, end),
-      }
-    })
-  }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
-
-  const scheduleWindowUpdate = useCallback(() => {
-    if (scrollFrameRef.current !== null) return
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null
-      updateWindow()
-    })
-  }, [updateWindow])
-
-  useEffect(() => () => {
-    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
-  }, [])
-
-  useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      let changed = false
-      for (const entry of entries) {
-        const id = entry.target.getAttribute('data-message-id')
-        if (!id) continue
-        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
-        if (height > 0 && heightCacheRef.current.get(id) !== height) {
-          heightCacheRef.current.set(id, height)
-          changed = true
-        }
-      }
-      if (changed) setHeightVersion((version) => version + 1)
-    })
-    resizeObserverRef.current = observer
-    return () => {
-      observer.disconnect()
-      observedRowsRef.current.clear()
-      rowRefCallbacksRef.current.clear()
-      resizeObserverRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-    const onScroll = (): void => {
-      scheduleWindowUpdate()
-    }
-    container.addEventListener('scroll', onScroll, { passive: true })
-    return () => container.removeEventListener('scroll', onScroll)
-  }, [scheduleWindowUpdate, scrollContainerRef])
-
-  // Stream progress is rendered outside this component, so this effect only runs for
-  // history changes and never performs layout work for individual stream deltas.
-  useEffect(() => {
-    if (!shouldStickToBottom) return
-    const container = scrollContainerRef.current
-    if (!container) return
-    const frame = window.requestAnimationFrame(() => {
-      container.scrollTo({ top: Number.MAX_SAFE_INTEGER })
-      scheduleWindowUpdate()
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [messages.length, scheduleWindowUpdate, scrollContainerRef, shouldStickToBottom])
-
-  useLayoutEffect(() => {
-    const anchor = pendingAnchorRef.current
-    const container = scrollContainerRef.current
-    if (!anchor || !container) return
-    container.scrollTop = anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight)
-    pendingAnchorRef.current = null
-    loadingOlderRef.current = false
-    scheduleWindowUpdate()
-  }, [scheduleWindowUpdate, scrollContainerRef, visibleStartIndex])
-
-  const previousMessageCountRef = useRef(messages.length)
-  useLayoutEffect(() => {
-    if (previousMessageCountRef.current === messages.length) return
-    // Do not consume the pending growth while the user is scrolled away:
-    // the effect re-runs when they return to the bottom (shouldStickToBottom
-    // is a dependency) and the window resyncs then.
-    if (!shouldStickToBottom) return
-    previousMessageCountRef.current = messages.length
-    const nextStart = historyExpandedRef.current
-      ? visibleStartIndex
-      : initialConversationWindowStart(messages)
-    const nextLength = messages.length - nextStart
-    setVirtualWindow({
-      start: nextStart + Math.max(0, nextLength - 12),
-      end: messages.length,
-    })
-  }, [messages.length, shouldStickToBottom, visibleStartIndex])
-
-  // Self-heal a degenerate virtual window (its end at or before the visible
-  // region start renders an empty slice — the conversation goes blank until
-  // the component remounts). Recompute from the current scroll position so
-  // content reappears in place, even when no scroll event can fire.
-  useLayoutEffect(() => {
-    if (visibleMessages.length === 0) return
-    if (virtualWindow.end > visibleStartIndex) return
-    updateWindow()
-  }, [virtualWindow.end, visibleStartIndex, visibleMessages.length, updateWindow])
-
-  const loadOlderMessages = useCallback(() => {
-    const container = scrollContainerRef.current
-    if (!container || !hasOlderMessages || loadingOlderRef.current) return
-    loadingOlderRef.current = true
-    historyExpandedRef.current = true
-    pendingAnchorRef.current = {
-      scrollHeight: container.scrollHeight,
-      scrollTop: container.scrollTop,
-    }
-    const nextStartIndex = expandConversationWindowStart(
-      messages,
-      Math.min(startIndex, initialConversationWindowStart(messages)),
-      conversationHistoryBatchSize,
-    )
-    setStartIndex(nextStartIndex)
-    // Pre-expand the render window over the newly revealed rows: without
-    // this, virtualWindow keeps its old absolute start and the freshly
-    // exposed older messages stay outside the rendered slice until a later
-    // recompute, which can never fire when the estimated offsets already
-    // cover the viewport (the "blank above a threshold" symptom).
-    setVirtualWindow((current) => ({
-      start: Math.min(current.start, nextStartIndex),
-      end: current.end,
-    }))
-    // Release the in-flight guard once the state updates are queued: the
-    // anchoring effect resets it too, but when scrollTop stays at 0 the
-    // anchor restore never runs (scrollHeight keeps growing) and a stuck
-    // guard would reject every subsequent wheel-triggered batch.
-    window.requestAnimationFrame(() => {
-      loadingOlderRef.current = false
-    })
-  }, [hasOlderMessages, messages, scrollContainerRef, startIndex])
-
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container || !hasOlderMessages) return
-    const onWheel = (event: WheelEvent): void => {
-      if (event.deltaY < 0 && container.scrollTop <= 1) loadOlderMessages()
-    }
-    container.addEventListener('wheel', onWheel, { passive: true })
-    return () => container.removeEventListener('wheel', onWheel)
-  }, [hasOlderMessages, loadOlderMessages, scrollContainerRef])
-
-  useEffect(() => {
-    scheduleWindowUpdate()
-  }, [layout.offsets, scheduleWindowUpdate])
-
-  const getRowRef = useCallback((id: string) => {
-    const existing = rowRefCallbacksRef.current.get(id)
-    if (existing) return existing
-    const callback = (node: HTMLDivElement | null): void => {
-      const previous = observedRowsRef.current.get(id)
-      if (previous && previous !== node) {
-        resizeObserverRef.current?.unobserve(previous)
-        observedRowsRef.current.delete(id)
-      }
-      if (!node) {
-        rowRefCallbacksRef.current.delete(id)
-        return
-      }
-      observedRowsRef.current.set(id, node)
-      resizeObserverRef.current?.observe(node)
-    }
-    rowRefCallbacksRef.current.set(id, callback)
-    return callback
-  }, [])
-  const renderedStart = Math.min(
-    Math.max(0, virtualWindow.start - visibleStartIndex),
-    visibleMessages.length,
+  const conversationKey = `${projectId}:${conversationId}`
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
+    [conversationKey],
   )
-  // Rendered range hard floor: at least 16 rows or the full visible list.
-  // Estimated heights compress the virtual window math on first paint
-  // (a "screenful" of 180px rows is only ~2 real rows), and the self-heal
-  // loop cannot widen a window whose end already exceeds the visible start —
-  // fast upward scrolling then shows a long blank stretch until real heights
-  // trickle in. Forcing a wide initial slice trades one cheap paint of a
-  // dozen extra rows for never blanking above the fold.
-  const renderedEnd = Math.max(
-    Math.min(
-      Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
-      visibleMessages.length,
-    ),
-    Math.min(renderedStart + 16, visibleMessages.length),
-  )
-  const topHeight = layout.offsets[renderedStart] ?? 0
-  const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
-
+  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
+  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const historyRows = useMemo(() => conversationHistoryRows(messages), [messages])
+  const rows = useMemo(() => mergeConversationRows(historyRows, conversationLiveRows(progress, messages)), [historyRows, progress, messages])
+  const createdAt = conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined
   return (
-    <>
-      {hasOlderMessages && (
-        <div className="conversation-history-fold">
-          <Button appearance="subtle" size="small" onClick={loadOlderMessages}>
-            {t('loadOlderConversationRounds', {
-              count: Math.min(
-                conversationHistoryBatchSize,
-                messages.slice(0, visibleStartIndex).filter((message) => message.role === 'user').length,
-              ),
-            })}
-          </Button>
-        </div>
+    <ConversationHistory
+      messages={messages}
+      pagination={pagination}
+      rows={rows}
+      scrollContainerRef={scrollContainerRef}
+      shouldStickToBottom={shouldStickToBottom}
+      renderLoadOlder={(loadOlder, count) => (
+        <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
+          {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
+        </Button>
       )}
-      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: topHeight }} />
-      {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
-        <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
-          <ConversationMessage
-            message={message}
-            messages={messages}
-            projectId={projectId}
-            conversationId={conversationId}
-            conversationTurn={conversationTurn}
-            showContinue={message.id === lastUserMessageId}
-            onContinue={onContinue}
-          />
-        </div>
-      ))}
-      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: bottomHeight }} />
-    </>
+      renderRow={(row) => row.kind === 'message' ? (
+        <ConversationMessage
+          message={row.message}
+          block={row.block}
+          messages={messages}
+          projectId={projectId}
+          conversationId={conversationId}
+          conversationTurn={conversationTurn}
+          showContinue={row.message.id === lastUserMessageId}
+          onContinue={onContinue}
+        />
+      ) : (
+        <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
+      )}
+    />
   )
 })
 
@@ -1494,64 +1234,48 @@ function LiveFunctionCallMessage({
 }): React.JSX.Element {
   const { t } = useTranslation()
   return (
-    <details className="function-call">
-      <summary>{block.name}</summary>
-      <div className="tool-output-section">
+    <LazyDetails className="function-call" summary={block.name}>
+      {() => <div className="tool-output-section">
         <span>{t('toolParameters')}</span>
         <pre>{block.parameters}</pre>
-      </div>
-    </details>
+      </div>}
+    </LazyDetails>
   )
 }
 
-function LiveDevelopmentResponse({
-  conversationKey,
-  projectId,
-  conversationId,
-  createdAt,
-}: {
-  conversationKey: string
+const LiveConversationRow = memo(function LiveConversationRow({ row, projectId, conversationId, createdAt }: {
+  row: Exclude<ConversationRenderRow, { kind: 'message' }>
   projectId: string
   conversationId: string
   createdAt?: string
-}): React.JSX.Element | null {
-  const subscribe = useCallback(
-    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
-    [conversationKey],
-  )
-  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
-  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-
-  if (progress.timeline.length === 0 && progress.streamingBlocks.length === 0) return null
-
+}): React.JSX.Element {
+  if (row.kind === 'stream') {
+    return (
+      <div className="message assistant live-response">
+        {row.block.type === 'content'
+          ? <LiveAssistantContent content={row.block.content} createdAt={createdAt} />
+          : <LiveFunctionCallMessage block={row.block} />}
+      </div>
+    )
+  }
+  const item = row.item
   return (
     <div className="message assistant live-response">
-      {progress.timeline.map((item, index) =>
-        item.type === 'compression' ? (
-          <MemoCompressionMessage compression={item.compression} key={`live-compression-${index}`} />
-        ) : item.type === 'model-request' ? (
-          <ModelRequestNotice event={item.event} key={`live-model-request-${index}`} />
-        ) : item.block.type === 'content' ? (
-          <MemoAssistantContent content={item.block.content} createdAt={createdAt} key={`live-block-${index}`} />
-        ) : (
-          <MemoFunctionCallMessage
-            block={item.block}
-            projectId={projectId}
-            conversationId={conversationId}
-            key={item.block.id || `live-block-${index}`}
-          />
-        ),
-      )}
-      {progress.streamingBlocks.map((block, index) =>
-        block.type === 'content' ? (
-          <LiveAssistantContent content={block.content} createdAt={createdAt} key={`stream-block-${index}`} />
-        ) : (
-          <LiveFunctionCallMessage block={block} key={block.id || `stream-block-${index}`} />
-        ),
+      {item.type === 'compression' ? (
+        <MemoCompressionMessage compression={item.compression} />
+      ) : item.type === 'model-request' ? (
+        <ModelRequestNotice event={item.event} />
+      ) : item.block.type === 'content' ? (
+        <MemoAssistantContent content={item.block.content} createdAt={createdAt} />
+      ) : (
+        <MemoFunctionCallMessage block={item.block} projectId={projectId} conversationId={conversationId} />
       )}
     </div>
   )
-}
+}, (previous, next) => previous.projectId === next.projectId && previous.conversationId === next.conversationId &&
+  previous.createdAt === next.createdAt && previous.row.id === next.row.id &&
+  (previous.row.kind === 'live' && next.row.kind === 'live' ? previous.row.item === next.row.item :
+    previous.row.kind === 'stream' && next.row.kind === 'stream' && previous.row.block === next.row.block))
 
 type ContextStrategyMode = 'default' | 'layered' | 'custom'
 
@@ -2351,9 +2075,11 @@ export function App(): React.JSX.Element {
     .flatMap((project) => project.conversations
       .filter((conversation) => conversation.archived)
       .map((conversation) => ({ project, conversation })))
-  const activeConversation = visibleConversations.find(
+  const selectedConversation = visibleConversations.find(
     (conversation) => conversation.id === activeConversationId,
   )
+  const messageHistory = useConversationMessages(activeProject?.id, selectedConversation?.id, selectedConversation?.history?.revision)
+  const activeConversation = selectedConversation ? { ...selectedConversation, messages: messageHistory.messages } : undefined
   const installedSkillIds = new Set(installedSkills.map((skill) => skill.id))
   const effectiveSkillIds = resolveEffectiveResourceIds(
     config.defaultSkillIds,
@@ -2377,6 +2103,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
+        if (conv.history) { counts[conv.id] = conv.history.unreadCount; continue }
         const assistantMessages = conv.messages.filter((m) => m.role === 'assistant')
         if (!conv.lastReadMessageId) {
           counts[conv.id] = assistantMessages.length
@@ -2393,6 +2120,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
+        if (conv.history) { errors[conv.id] = conv.history.hasError && conv.lastReadMessageId !== conv.history.lastMessageId; continue }
         const lastMsg = conv.messages[conv.messages.length - 1]
         let hasError = Boolean(
           lastMsg?.turn && (
@@ -2456,7 +2184,7 @@ export function App(): React.JSX.Element {
       ? t('contextStrategyLayeredShort')
       : t('contextStrategyDefault')
   const configured = Boolean(effectiveModelConfig?.baseUrl && effectiveModelConfig.apiKey && effectiveModelConfig.modelName)
-  const conversationRoundCount = activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
+  const conversationRoundCount = activeConversation?.history?.turnCount ?? activeConversation?.messages.filter((message) => message.role === 'user').length ?? 0
   const context = activeConversation?.context
   const contextStatus = context
     ? `${Math.round((context.compressedTokens / context.modelMaxContext) * 100)}% context / ${Math.round((context.compressedTokens / context.maxInputTokens) * 100)}% input`
@@ -2473,7 +2201,7 @@ export function App(): React.JSX.Element {
       activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
       effectiveModelConfig.modelMaxContext,
     ))
-  const canSend = Boolean(configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const canSend = Boolean(messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   activeConversationKeyRef.current = activeConversationKey
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
@@ -2951,7 +2679,7 @@ export function App(): React.JSX.Element {
   async function markProjectAllRead(project: Project): Promise<void> {
     for (const conv of project.conversations) {
       if (conv.archived) continue
-      const lastAssistant = [...conv.messages].reverse().find(m => m.role === 'assistant')
+      const lastAssistant = conv.history?.lastAssistantMessageId ? { id: conv.history.lastAssistantMessageId } : [...conv.messages].reverse().find(m => m.role === 'assistant')
       if (lastAssistant) {
         try {
           const result = await window.codey.setConversationReadState(project.id, conv.id, lastAssistant.id, Date.now())
@@ -4006,21 +3734,7 @@ export function App(): React.JSX.Element {
     const sendStartedAt = performance.now()
     setError('')
     const userMessageId = crypto.randomUUID()
-    const optimisticProject: Project = {
-      ...activeProject,
-      conversations: activeProject.conversations.map((conversation) =>
-        conversation.id === conversationId
-          ? {
-              ...conversation,
-              messages: [
-                ...conversation.messages,
-                { id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() },
-              ],
-            }
-          : conversation,
-      ),
-    }
-    replaceProject(optimisticProject)
+    messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
     window.codey.recordPerformanceTrace({
       traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
       durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
@@ -4046,11 +3760,8 @@ export function App(): React.JSX.Element {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
         )
-        const updatedUserMessage = [...(updatedConversation?.messages ?? [])]
-          .reverse()
-          .find((message) => message.role === 'user' && message.content === content &&
-            (images.length === 0 || message.images?.[0]?.id === images[0].id) &&
-            (attachments.length === 0 || message.attachments?.[0]?.id === attachments[0].id))
+        const updatedUserMessage = updatedConversation?.history?.lastUserMessage
+        await messageHistory.refresh()
         setConversationTurns((current) => ({
           ...current,
           [conversationKey]: {
@@ -4246,7 +3957,7 @@ export function App(): React.JSX.Element {
                         setOpenConversationMenuId(null);
                         setError('');
                         scrollToBottom();
-                        const lastMsg = conversation.messages[conversation.messages.length - 1];
+                        const lastMsg = conversation.history?.lastMessageId ? { id: conversation.history.lastMessageId } : conversation.messages[conversation.messages.length - 1];
                         if (lastMsg && conversation.lastReadMessageId !== lastMsg.id) {
                           void window.codey.setConversationReadState(activeProject.id, conversation.id, lastMsg.id, Date.now()).then(replaceProject);
                         }
@@ -4433,7 +4144,7 @@ export function App(): React.JSX.Element {
               className="conversation"
               aria-label={t('conversation')}
             >
-            {!activeConversation || (activeConversation.messages.length === 0 && !interactionLocked) ? (
+            {!activeConversation || (messageHistory.loaded && activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
                 <h1>{emptyTitle}</h1>
                 <p>{emptyDescription}</p>
@@ -4450,9 +4161,12 @@ export function App(): React.JSX.Element {
               </div>
             ) : (
               <div className="messages" aria-live="polite">
+                {messageHistory.loading && <div role="status">{t('loadingConversationMessages')}</div>}
+                {messageHistory.error && <div role="alert">{t('unableLoadConversationMessages')} {messageHistory.error} <Button size="small" onClick={() => void messageHistory.retry()}>{t('retryConversationMessages')}</Button></div>}
                 <VirtualizedConversationHistory
                   key={activeConversationKey}
                   messages={activeConversation.messages}
+                  pagination={{ hasOlder: Boolean(messageHistory.before), loading: messageHistory.loadingOlder, loadOlder: messageHistory.loadOlder }}
                   projectId={activeProjectId}
                   conversationId={activeConversation.id}
                   conversationTurn={conversationTurn}
@@ -4460,12 +4174,6 @@ export function App(): React.JSX.Element {
                   shouldStickToBottom={!showScrollToBottom}
                   lastUserMessageId={lastUserMessageId}
                   onContinue={continueConversation}
-                />
-                <LiveDevelopmentResponse
-                  conversationKey={activeConversationKey}
-                  projectId={activeProjectId}
-                  conversationId={activeConversation.id}
-                  createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
                 />
                 <div aria-hidden="true" className="conversation-end" ref={conversationEndRef} />
               </div>

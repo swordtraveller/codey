@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process'
-import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
+  processPipeDrainGraceMs,
+  processTerminationGraceMs,
+  terminateSandboxProcessIds,
   runSandboxProcess,
   terminateSandboxProcess,
   safeResolveExistingPath,
+  safeResolvePath,
   safeResolveWritablePath,
   truncateOutput,
   type SandboxProcessResult,
@@ -32,6 +36,10 @@ const { fileURLToPath } = require('node:url')
 
 const sandboxRoot = path.resolve(process.env.CODEY_NODE_SANDBOX_ROOT || process.cwd())
 const enforce = Boolean(process.env.npm_lifecycle_event)
+const processRegistry = process.env.CODEY_NODE_PROCESS_REGISTRY
+if (processRegistry) {
+  try { fs.appendFileSync(processRegistry, String(process.pid) + '\n') } catch {}
+}
 const originalExistsSync = fs.existsSync.bind(fs)
 const originalRealpathNative = fs.realpath.native
 const originalRealpathSyncNative = (fs.realpathSync.native || fs.realpathSync).bind(fs.realpathSync)
@@ -225,8 +233,14 @@ function assertPackageCommand(value: string): asserts value is PackageCommand {
   }
 }
 
+function windowsPathDirectories(): string[] {
+  return (process.env.PATH ?? process.env.Path ?? '').split(';')
+    .map((directory) => directory.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean)
+}
+
 function packagePathCandidates(manager: PackageManager): string[] {
-  const directories = (process.env.PATH ?? '').split(';').filter(Boolean)
+  const directories = windowsPathDirectories()
   return directories.flatMap((directory) => [
     join(directory, `${manager}.cmd`),
     join(directory, `${manager}.exe`),
@@ -243,12 +257,28 @@ function packageManagerCliFromShim(shim: string, manager: PackageManager): strin
   return scripts.find((script) => expectedNames.has(script.split(/[\\/]/).at(-1)?.toLowerCase() ?? ''))
 }
 
-async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string }> {
+async function windowsNodeExecutable(managerDirectory: string): Promise<string> {
+  // Electron's process.execPath points to the GUI executable. Package managers
+  // also reuse their runtime to spawn children, so they must run with real Node.
+  for (const directory of new Set([managerDirectory, ...windowsPathDirectories()])) {
+    const candidate = join(directory, 'node.exe')
+    try {
+      if ((await stat(candidate)).isFile()) return candidate
+    } catch {
+      // Try the next Node installation.
+    }
+  }
+  throw new Error('Unable to locate node.exe; install Node.js or add it to PATH')
+}
+
+async function managerInvocation(manager: PackageManager): Promise<{ command: string; prefixArgs: string[]; readRoot: string; nodeRoot?: string }> {
   if (process.platform !== 'win32') {
     return { command: manager, prefixArgs: [], readRoot: dirname(process.execPath) }
   }
 
   for (const candidate of packagePathCandidates(manager)) {
+    let cliPath: string
+    let readRoot: string
     try {
       await access(candidate)
       const lowerCandidate = candidate.toLowerCase()
@@ -257,31 +287,28 @@ async function managerInvocation(manager: PackageManager): Promise<{ command: st
       }
       if (!lowerCandidate.endsWith('.cmd')) {
         const script = await readFile(candidate, 'utf8')
-        if (/^#!.*\bnode\b/i.test(script)) {
-          return { command: process.execPath, prefixArgs: [candidate], readRoot: dirname(process.execPath) }
-        }
-        continue
-      }
-      const shim = await readFile(candidate, 'utf8')
-      const cli = packageManagerCliFromShim(shim, manager)
-      if (cli) {
+        if (!/^#!.*\bnode\b/i.test(script)) continue
+        cliPath = candidate
+        readRoot = dirname(candidate)
+      } else {
+        const shim = await readFile(candidate, 'utf8')
+        const cli = packageManagerCliFromShim(shim, manager)
+        if (!cli) continue
         const root = dirname(candidate)
-        const cliPath = join(root, cli)
-        let readRoot = root
+        cliPath = join(root, cli)
+        readRoot = root
         try {
           readRoot = await realpath(dirname(dirname(dirname(dirname(cliPath)))))
         } catch {
           // Keep the shim directory when the package path cannot be resolved.
         }
-        return {
-          command: process.execPath,
-          prefixArgs: [cliPath],
-          readRoot,
-        }
       }
     } catch {
       // Try the next PATH entry.
+      continue
     }
+    const command = await windowsNodeExecutable(dirname(candidate))
+    return { command, prefixArgs: [cliPath], readRoot, nodeRoot: dirname(command) }
   }
   throw new Error(`Unable to locate ${manager}; install it or add it to PATH`)
 }
@@ -315,16 +342,18 @@ function resultFromProcess(result: SandboxProcessResult): NodePackageExecutionRe
   }
 }
 
-async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ guardPath?: string; temporaryDirectory: string }> {
+async function prepareNodeSandbox(root: string, withGuard = true): Promise<{ guardPath?: string; processRegistryPath?: string; temporaryDirectory: string }> {
   const temporaryDirectory = await safeResolveWritablePath(root, '.agent_tmp')
   await mkdir(temporaryDirectory, { recursive: true })
   if (!withGuard) return { temporaryDirectory }
   const guardPath = await safeResolveWritablePath(root, '.agent_tmp/node-sandbox-guard.cjs')
+  const processRegistryPath = safeResolvePath(temporaryDirectory, 'node-processes.txt')
+  await writeFile(processRegistryPath, '', 'utf8')
   await writeFile(guardPath, nodeGuardSource, 'utf8')
-  return { guardPath, temporaryDirectory }
+  return { guardPath, processRegistryPath, temporaryDirectory }
 }
 
-function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string): NodeJS.ProcessEnv {
+function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoot: string, guardPath?: string, nodeRoot?: string, processRegistryPath?: string): NodeJS.ProcessEnv {
   const corepackHome = process.env.COREPACK_HOME ?? join(temporaryDirectory, 'corepack')
   const hostHome = process.env.USERPROFILE ?? process.env.HOME
   const hostCargoHome = process.env.CARGO_HOME ?? (hostHome ? join(hostHome, '.cargo') : undefined)
@@ -370,6 +399,12 @@ function sandboxEnvironment(root: string, temporaryDirectory: string, managerRoo
     CODEY_NODE_SANDBOX_ROOT: root,
     CODEY_NODE_ALLOWED_READ_ROOTS: [managerRoot, temporaryDirectory, corepackHome].join(process.platform === 'win32' ? ';' : ':'),
     CODEY_NODE_ALLOWED_WRITE_ROOTS: temporaryDirectory,
+    ...(processRegistryPath ? { CODEY_NODE_PROCESS_REGISTRY: processRegistryPath } : {}),
+  }
+  if (nodeRoot) {
+    // Windows environment keys are case-insensitive; keep only one PATH entry.
+    delete environment.Path
+    environment.PATH = [nodeRoot, ...windowsPathDirectories()].join(';')
   }
   if (guardPath) {
     environment.NODE_OPTIONS = '--require=' + guardPath.replaceAll('\\', '/')
@@ -411,7 +446,7 @@ export async function runPackageManagerCommand(
   if (command === 'ci' && packages.length > 0) throw new Error('packages are not supported with the ci command')
   if ((command === 'list' || command === 'outdated') && packages.length > 0) throw new Error(`packages are not supported with the ${command} command`)
   const root = await safeResolveExistingPath(projectRoot, '.')
-  const { command: executable, prefixArgs, readRoot } = await managerInvocation(packageManager)
+  const { command: executable, prefixArgs, readRoot, nodeRoot } = await managerInvocation(packageManager)
   const { temporaryDirectory } = await prepareNodeSandbox(root, false)
   const args: string[] = [...prefixArgs, command]
   if (packageManager === 'pnpm' && command === 'ci') {
@@ -421,7 +456,7 @@ export async function runPackageManagerCommand(
     args.push('--ignore-scripts')
   }
   if (command === 'install' || command === 'update') args.push(...packages)
-  const result = await runSandboxProcess(executable, args, root, normalizeTimeout(timeoutSeconds), sandboxEnvironment(root, temporaryDirectory, readRoot), undefined, signal)
+  const result = await runSandboxProcess(executable, args, root, normalizeTimeout(timeoutSeconds), sandboxEnvironment(root, temporaryDirectory, readRoot, undefined, nodeRoot), undefined, signal)
   return resultFromProcess(result)
 }
 
@@ -442,22 +477,23 @@ async function preparePackageScript(
   packageManager: PackageManager,
   script: string,
   argv: string[],
-): Promise<{ root: string; executable: string; args: string[]; environment: NodeJS.ProcessEnv }> {
+): Promise<{ root: string; executable: string; args: string[]; environment: NodeJS.ProcessEnv; processRegistryPath?: string }> {
   assertPackageManager(packageManager)
   if (!/^[A-Za-z0-9._:-]{1,100}$/.test(script)) throw new Error('script must be a package.json script name')
   validateArguments(argv)
   const root = await safeResolveExistingPath(projectRoot, '.')
   const scripts = await readPackageScripts(root)
   if (!Object.hasOwn(scripts, script)) throw new Error(`Script '${script}' is not defined in package.json`)
-  const { command: executable, prefixArgs, readRoot } = await managerInvocation(packageManager)
-  const { temporaryDirectory, guardPath } = await prepareNodeSandbox(root)
+  const { command: executable, prefixArgs, readRoot, nodeRoot } = await managerInvocation(packageManager)
+  const { temporaryDirectory, guardPath, processRegistryPath } = await prepareNodeSandbox(root)
   const args: string[] = [...prefixArgs, 'run', script]
   if (argv.length > 0) args.push('--', ...argv)
   return {
     root,
     executable,
     args,
-    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath),
+    processRegistryPath,
+    environment: sandboxEnvironment(root, temporaryDirectory, readRoot, guardPath, nodeRoot, processRegistryPath),
   }
 }
 
@@ -481,7 +517,11 @@ export async function startPackageScript(
   let stderr = ''
   let stopped = false
   let settled = false
+  let exitCode: number | null = null
+  let exitGraceTimer: ReturnType<typeof setTimeout> | undefined
+  let stopGraceTimer: ReturnType<typeof setTimeout> | undefined
   let resolveDone: ((result: NodePackageExecutionResult) => void) | null = null
+  let finish: (closeCode?: number | null, destroyStreams?: boolean) => void = () => undefined
   const listeners = new Set<(stream: 'stdout' | 'stderr', chunk: string) => void>()
   if (onOutput) listeners.add(onOutput)
   const notify = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
@@ -495,26 +535,46 @@ export async function startPackageScript(
     resolveDone = resolveResult
     child.stdout?.on('data', (chunk: Buffer | string) => notify('stdout', chunk))
     child.stderr?.on('data', (chunk: Buffer | string) => notify('stderr', chunk))
-    child.once('error', (error) => {
+    finish = (closeCode?: number | null, destroyStreams = false): void => {
       if (settled) return
-      settled = true
-      if (stopped) {
-        resolveResult({ success: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), exit_code: -1, duration_ms: Date.now() - startedAt, timed_out: false })
-      } else {
-        rejectResult(error)
+      if (destroyStreams) {
+        child.stdout?.destroy()
+        child.stderr?.destroy()
       }
-    })
-    child.once('close', (exitCode) => {
-      if (settled) return
       settled = true
+      if (exitGraceTimer) clearTimeout(exitGraceTimer)
+      if (stopGraceTimer) clearTimeout(stopGraceTimer)
       resolveResult({
-        success: !stopped && exitCode === 0,
+        success: !stopped && (closeCode ?? exitCode) === 0,
         stdout,
         stderr,
-        exit_code: stopped ? -1 : (exitCode ?? -1),
+        exit_code: stopped ? -1 : (closeCode ?? exitCode ?? -1),
         duration_ms: Date.now() - startedAt,
         timed_out: false,
       })
+    }
+    child.once('exit', (code) => {
+      exitCode = code
+      // `exit` means the process itself is gone. `close` additionally waits for
+      // every stdio stream, so bound the wait for a leaked pipe.
+      if (!settled) {
+        exitGraceTimer = setTimeout(() => finish(undefined, true), processPipeDrainGraceMs)
+      }
+    })
+    child.once('error', (error) => {
+      if (settled) return
+      if (stopped) {
+        stderr = `${stderr}\n${error.message}`.trim()
+        finish(undefined, true)
+      } else {
+        settled = true
+        if (exitGraceTimer) clearTimeout(exitGraceTimer)
+        if (stopGraceTimer) clearTimeout(stopGraceTimer)
+        rejectResult(error)
+      }
+    })
+    child.once('close', (closeCode) => {
+      finish(closeCode)
     })
   })
   let stopPromise: Promise<void> | null = null
@@ -529,28 +589,24 @@ export async function startPackageScript(
       if (settled) return Promise.resolve()
       stopped = true
       stopPromise = (async () => {
-        const startupDelay = 1_000 - (Date.now() - startedAt)
-        if (process.platform === 'win32' && startupDelay > 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, startupDelay))
+        // Do not wait for `taskkill` itself: an inaccessible or wedged process
+        // tree must not leave a frontend/tool call pending indefinitely. Exit or
+        // close will settle sooner; this is the hard upper bound.
+        void terminateSandboxProcess(child).catch(() => undefined)
+        stopGraceTimer = setTimeout(() => finish(undefined, true), processTerminationGraceMs)
+        await new Promise<void>((resolve) => setTimeout(resolve, 100))
+        if (prepared.processRegistryPath) {
+          try {
+            const pids = (await readFile(prepared.processRegistryPath, 'utf8'))
+              .split(/\r?\n/)
+              .map((value) => Number.parseInt(value, 10))
+              .filter((value) => Number.isInteger(value) && value > 0)
+            await terminateSandboxProcessIds(pids)
+          } catch {
+            // The registry may disappear with the temporary project directory.
+          }
         }
-        await terminateSandboxProcess(child)
-        await Promise.race([
-          done.then(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
-        ])
-        child.stdout?.destroy()
-        child.stderr?.destroy()
-        if (!settled) {
-          settled = true
-          resolveDone?.({
-            success: false,
-            stdout,
-            stderr,
-            exit_code: -1,
-            duration_ms: Date.now() - startedAt,
-            timed_out: false,
-          })
-        }
+        await done.then(() => undefined, () => undefined)
       })()
       return stopPromise
     },

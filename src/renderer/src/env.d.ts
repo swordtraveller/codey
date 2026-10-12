@@ -9,6 +9,7 @@ import type {
   ContextDebugOverview,
   ContextManagementConfig,
   ConversationStateChange,
+  ConversationMessagePage,
   DevelopmentProgress,
   DevelopmentProgressState,
   DevelopmentResult,
@@ -65,6 +66,7 @@ declare global {
       testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
       listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
       getProjects(): Promise<Project[]>
+      getConversationMessages(projectId: string, conversationId: string, before?: string | null): Promise<ConversationMessagePage>
       listSkills(): Promise<InstalledSkill[]>
       previewGitHubSkill(url: string): Promise<SkillImportPreview>
       installSkillPreview(previewId: string, selectedCandidateIds: string[]): Promise<InstalledSkill>

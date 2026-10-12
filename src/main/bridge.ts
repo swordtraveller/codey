@@ -189,9 +189,11 @@ export class BridgeHandoverService {
     const channel = this.channel(channelId)
     await this.request(channel, `/v1/channels/${channel.channelId}/requests/${requestId}/reject`, { method: 'POST', body: '{}' }, true)
   }
-  async sync(projects: Project[], channelId?: string): Promise<void> {
+  async sync(source: Project[] | (() => Promise<Project[]>), channelId?: string): Promise<void> {
     await this.load()
     const channels = channelId ? [this.channel(channelId)] : this.state.channels
+    if (!channels.length) return
+    const projects = typeof source === 'function' ? await source() : source
     for (const channel of channels) await this.syncChannel(channel, projects)
   }
   private async syncChannel(channel: StoredBridgeChannel, projects: Project[]): Promise<void> {
