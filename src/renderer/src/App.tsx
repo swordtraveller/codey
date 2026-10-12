@@ -63,6 +63,8 @@ import {
   updateDevelopmentProgress,
 } from './development-progress-store'
 import { ConversationHistory } from './ConversationHistory'
+import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
+import { LazyDetails } from './components/LazyDetails'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -507,11 +509,12 @@ function ValidationResultView({ result }: { result: NodeValidationResult }): Rea
             <span>{statusLabel(check.status)} · {formatValidationDuration(check.duration_ms)} · {t('exitCode')} {check.exit_code}</span>
           </div>
           {(check.stdout || check.stderr) && (
-            <details className="validation-logs">
-              <summary>{t('validationLogs')}</summary>
-              {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
-              {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
-            </details>
+            <LazyDetails stateKey={`validation-${index}`} className="validation-logs" summary={t('validationLogs')}>
+              {() => <>
+                {check.stdout && <pre><strong>{t('standardOutput')}</strong>{'\n'}{check.stdout}</pre>}
+                {check.stderr && <pre><strong>{t('standardError')}</strong>{'\n'}{check.stderr}</pre>}
+              </>}
+            </LazyDetails>
           )}
         </div>
       ))}
@@ -529,8 +532,8 @@ function FunctionCallMessage({
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [previewError, setPreviewError] = useState('')
-  const server = parseFrontendServerResult(block)
-  const validation = parseNodeValidationResult(block)
+  const server = useMemo(() => parseFrontendServerResult(block), [block.name, block.result, block.resultError])
+  const validation = useMemo(() => parseNodeValidationResult(block), [block.name, block.result, block.resultError])
   const canPreview = (server?.status === 'starting' || server?.status === 'running') && Boolean(server.serverId && projectId && conversationId)
   const openPreview = async (): Promise<void> => {
     if (!projectId || !conversationId || !server?.serverId) return
@@ -544,43 +547,44 @@ function FunctionCallMessage({
   }
 
   return (
-    <details className={`function-call${block.resultError ? ' tool-error' : ''}`}>
-      <summary>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</summary>
-      <div className="tool-output-section">
-        <span>{t('toolParameters')}</span>
-        <pre>{formatToolOutput(block.parameters)}</pre>
-      </div>
-      {block.review && block.review.length > 0 && (
-        <div className="tool-output-section tool-review-section">
-          <span>{t('toolReviewChain')}</span>
-          <ul className="tool-review-steps">
-            {block.review.map((step, index) => (
-              <li key={index} className={`review-step review-${step.outcome}`}>
-                <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
-                <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
-                {step.detail && <span className="review-detail">{step.detail}</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {block.result !== undefined && (
+    <LazyDetails className={`function-call${block.resultError ? ' tool-error' : ''}`} summary={<>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</>}>
+      {() => <>
         <div className="tool-output-section">
-          <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
-          {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
+          <span>{t('toolParameters')}</span>
+          <pre>{formatToolOutput(block.parameters)}</pre>
         </div>
-      )}
-      {canPreview && (
-        <Button
-          appearance="secondary"
-          size="small"
-          onClick={() => void openPreview()}
-        >
-          {t('openPreview')}
-        </Button>
-      )}
-      {previewError && <p className="tool-preview-error">{previewError}</p>}
-    </details>
+        {block.review && block.review.length > 0 && (
+          <div className="tool-output-section tool-review-section">
+            <span>{t('toolReviewChain')}</span>
+            <ul className="tool-review-steps">
+              {block.review.map((step, index) => (
+                <li key={index} className={`review-step review-${step.outcome}`}>
+                  <span className="review-stage">{t(`reviewStage_${step.stage.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}`)}</span>
+                  <span className={`review-outcome outcome-${step.outcome}`}>{t(`reviewOutcome_${step.outcome}`)}</span>
+                  {step.detail && <span className="review-detail">{step.detail}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {block.result !== undefined && (
+          <div className="tool-output-section">
+            <span>{block.resultError ? t('toolError') : t('toolResult')}</span>
+            {validation ? <ValidationResultView result={validation} /> : <pre>{formatToolOutput(block.result)}</pre>}
+          </div>
+        )}
+        {canPreview && (
+          <Button
+            appearance="secondary"
+            size="small"
+            onClick={() => void openPreview()}
+          >
+            {t('openPreview')}
+          </Button>
+        )}
+        {previewError && <p className="tool-preview-error">{previewError}</p>}
+      </>}
+    </LazyDetails>
   )
 }
 
@@ -600,6 +604,7 @@ function ModelRequestNotice({ event }: { event: ModelRequestEvent }): React.JSX.
 
 const ConversationMessage = memo(function ConversationMessage({
   message,
+  block,
   messages,
   projectId,
   conversationId,
@@ -608,6 +613,7 @@ const ConversationMessage = memo(function ConversationMessage({
   onContinue,
 }: {
   message: ChatMessage
+  block?: AssistantMessageBlock
   messages: ChatMessage[]
   projectId: string
   conversationId: string
@@ -630,18 +636,11 @@ const ConversationMessage = memo(function ConversationMessage({
           <MemoCompressionMessage compression={message.compression} />
         ) : message.modelRequest ? (
           <ModelRequestNotice event={message.modelRequest} />
-        ) : message.role === 'assistant' && message.blocks?.length ? (
-          message.blocks.map((block, index) =>
-            block.type === 'content' ? (
-              <MemoAssistantContent content={block.content} createdAt={message.createdAt} key={`${message.id}-${index}`} />
-            ) : (
-              <MemoFunctionCallMessage
-                block={block}
-                projectId={projectId}
-                conversationId={conversationId}
-                key={block.id}
-              />
-            ),
+        ) : block ? (
+          block.type === 'content' ? (
+            <MemoAssistantContent content={block.content} createdAt={message.createdAt} />
+          ) : (
+            <MemoFunctionCallMessage block={block} projectId={projectId} conversationId={conversationId} />
           )
         ) : message.role === 'assistant' ? (
           <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
@@ -1161,9 +1160,20 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const conversationKey = `${projectId}:${conversationId}`
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
+    [conversationKey],
+  )
+  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
+  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  const historyRows = useMemo(() => conversationHistoryRows(messages), [messages])
+  const rows = useMemo(() => mergeConversationRows(historyRows, conversationLiveRows(progress, messages)), [historyRows, progress, messages])
+  const createdAt = conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined
   return (
     <ConversationHistory
       messages={messages}
+      rows={rows}
       scrollContainerRef={scrollContainerRef}
       shouldStickToBottom={shouldStickToBottom}
       renderLoadOlder={(loadOlder, count) => (
@@ -1171,16 +1181,19 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
           {t('loadOlderConversationRounds', { count })}
         </Button>
       )}
-      renderMessage={(message) => (
+      renderRow={(row) => row.kind === 'message' ? (
         <ConversationMessage
-          message={message}
+          message={row.message}
+          block={row.block}
           messages={messages}
           projectId={projectId}
           conversationId={conversationId}
           conversationTurn={conversationTurn}
-          showContinue={message.id === lastUserMessageId}
+          showContinue={row.message.id === lastUserMessageId}
           onContinue={onContinue}
         />
+      ) : (
+        <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
       )}
     />
   )
@@ -1217,64 +1230,48 @@ function LiveFunctionCallMessage({
 }): React.JSX.Element {
   const { t } = useTranslation()
   return (
-    <details className="function-call">
-      <summary>{block.name}</summary>
-      <div className="tool-output-section">
+    <LazyDetails className="function-call" summary={block.name}>
+      {() => <div className="tool-output-section">
         <span>{t('toolParameters')}</span>
         <pre>{block.parameters}</pre>
-      </div>
-    </details>
+      </div>}
+    </LazyDetails>
   )
 }
 
-function LiveDevelopmentResponse({
-  conversationKey,
-  projectId,
-  conversationId,
-  createdAt,
-}: {
-  conversationKey: string
+const LiveConversationRow = memo(function LiveConversationRow({ row, projectId, conversationId, createdAt }: {
+  row: Exclude<ConversationRenderRow, { kind: 'message' }>
   projectId: string
   conversationId: string
   createdAt?: string
-}): React.JSX.Element | null {
-  const subscribe = useCallback(
-    (listener: () => void) => subscribeDevelopmentProgress(conversationKey, listener),
-    [conversationKey],
-  )
-  const getSnapshot = useCallback(() => getDevelopmentProgress(conversationKey), [conversationKey])
-  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-
-  if (progress.timeline.length === 0 && progress.streamingBlocks.length === 0) return null
-
+}): React.JSX.Element {
+  if (row.kind === 'stream') {
+    return (
+      <div className="message assistant live-response">
+        {row.block.type === 'content'
+          ? <LiveAssistantContent content={row.block.content} createdAt={createdAt} />
+          : <LiveFunctionCallMessage block={row.block} />}
+      </div>
+    )
+  }
+  const item = row.item
   return (
     <div className="message assistant live-response">
-      {progress.timeline.map((item, index) =>
-        item.type === 'compression' ? (
-          <MemoCompressionMessage compression={item.compression} key={`live-compression-${index}`} />
-        ) : item.type === 'model-request' ? (
-          <ModelRequestNotice event={item.event} key={`live-model-request-${index}`} />
-        ) : item.block.type === 'content' ? (
-          <MemoAssistantContent content={item.block.content} createdAt={createdAt} key={`live-block-${index}`} />
-        ) : (
-          <MemoFunctionCallMessage
-            block={item.block}
-            projectId={projectId}
-            conversationId={conversationId}
-            key={item.block.id || `live-block-${index}`}
-          />
-        ),
-      )}
-      {progress.streamingBlocks.map((block, index) =>
-        block.type === 'content' ? (
-          <LiveAssistantContent content={block.content} createdAt={createdAt} key={`stream-block-${index}`} />
-        ) : (
-          <LiveFunctionCallMessage block={block} key={block.id || `stream-block-${index}`} />
-        ),
+      {item.type === 'compression' ? (
+        <MemoCompressionMessage compression={item.compression} />
+      ) : item.type === 'model-request' ? (
+        <ModelRequestNotice event={item.event} />
+      ) : item.block.type === 'content' ? (
+        <MemoAssistantContent content={item.block.content} createdAt={createdAt} />
+      ) : (
+        <MemoFunctionCallMessage block={item.block} projectId={projectId} conversationId={conversationId} />
       )}
     </div>
   )
-}
+}, (previous, next) => previous.projectId === next.projectId && previous.conversationId === next.conversationId &&
+  previous.createdAt === next.createdAt && previous.row.id === next.row.id &&
+  (previous.row.kind === 'live' && next.row.kind === 'live' ? previous.row.item === next.row.item :
+    previous.row.kind === 'stream' && next.row.kind === 'stream' && previous.row.block === next.row.block))
 
 type ContextStrategyMode = 'default' | 'layered' | 'custom'
 
@@ -4183,12 +4180,6 @@ export function App(): React.JSX.Element {
                   shouldStickToBottom={!showScrollToBottom}
                   lastUserMessageId={lastUserMessageId}
                   onContinue={continueConversation}
-                />
-                <LiveDevelopmentResponse
-                  conversationKey={activeConversationKey}
-                  projectId={activeProjectId}
-                  conversationId={activeConversation.id}
-                  createdAt={conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined}
                 />
                 <div aria-hidden="true" className="conversation-end" ref={conversationEndRef} />
               </div>

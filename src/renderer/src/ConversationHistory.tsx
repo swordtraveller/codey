@@ -1,26 +1,30 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { ChatMessage } from '../../shared/types'
 import { conversationHistoryBatchSize, expandConversationWindowStart, initialConversationWindowStart } from '../../shared/conversation-window'
 import { conversationEstimatedRowHeight, conversationRowAtOffset, conversationVirtualWindow, type VirtualWindow } from './conversation-virtual-layout'
+import { DetailsStateContext } from './components/LazyDetails'
+import { conversationRowStart, type ConversationRenderRow } from './conversation-render-rows'
 
 type ReadingAnchor = { id: string; offset: number } | { id: null; offset: number }
 
 /** UI paging only: messages remain in chronological order, independent of model context. */
 export function ConversationHistory({
-  messages, scrollContainerRef, shouldStickToBottom, renderMessage, renderLoadOlder,
+  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder,
 }: {
   messages: ChatMessage[]
+  rows: ConversationRenderRow[]
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
-  renderMessage: (message: ChatMessage) => ReactNode
+  renderRow: (row: ConversationRenderRow) => ReactNode
   renderLoadOlder: (loadOlder: () => void, count: number) => ReactNode
 }): React.JSX.Element {
-  const latestStart = initialConversationWindowStart(messages)
+  const latestMessageStart = useMemo(() => initialConversationWindowStart(messages), [messages])
+  const latestStart = conversationRowStart(rows, latestMessageStart)
   const [startIndex, setStartIndex] = useState(latestStart)
   const expandedRef = useRef(false)
   const visibleStart = expandedRef.current ? Math.min(startIndex, latestStart) : latestStart
   const [windowRange, setWindowRange] = useState<VirtualWindow>(() => ({
-    start: Math.max(latestStart, messages.length - 12), end: messages.length,
+    start: Math.max(latestStart, rows.length - 12), end: rows.length,
   }))
   const [revision, setRevision] = useState(0)
   const loadingRef = useRef(false)
@@ -34,24 +38,24 @@ export function ConversationHistory({
   const observerRef = useRef<ResizeObserver | null>(null)
   const nodesRef = useRef(new Map<string, HTMLDivElement>())
   const callbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
+  const detailsStatesRef = useRef(new Map<string, Map<string, boolean>>())
   const heightsRef = useRef(new Map<string, number>())
   const widthRef = useRef<number | null>(null)
   const handlersRef = useRef({ capture: (): ReadingAnchor | null => null, loadOlder: (): void => {} })
-  const visibleMessages = useMemo(() => messages.slice(visibleStart), [messages, visibleStart])
+  const visibleRows = useMemo(() => rows.slice(visibleStart), [rows, visibleStart])
   const layout = useMemo(() => {
     const offsets = [0]
     const indexes = new Map<string, number>()
-    visibleMessages.forEach((message, index) => {
-      indexes.set(message.id, index)
-      offsets.push(offsets[index] + (heightsRef.current.get(message.id) ?? conversationEstimatedRowHeight))
+    visibleRows.forEach((row, index) => {
+      indexes.set(row.id, index)
+      offsets.push(offsets[index] + (heightsRef.current.get(row.id) ?? conversationEstimatedRowHeight))
     })
     return { offsets, indexes }
-  }, [visibleMessages, revision])
-  const effectiveWindowRange = expandedRef.current
-    ? windowRange
-    : { start: latestStart, end: messages.length }
-  const renderedStart = Math.min(Math.max(effectiveWindowRange.start - visibleStart, 0), Math.max(0, visibleMessages.length - 1))
-  const renderedEnd = Math.min(visibleMessages.length, Math.max(renderedStart + 1, effectiveWindowRange.end - visibleStart))
+  }, [visibleRows, revision])
+  // Virtualize from the first mount, even before the user expands older turns.
+  const effectiveWindowRange = windowRange
+  const renderedStart = Math.min(Math.max(effectiveWindowRange.start - visibleStart, 0), Math.max(0, visibleRows.length - 1))
+  const renderedEnd = Math.min(visibleRows.length, Math.max(renderedStart + 1, effectiveWindowRange.end - visibleStart))
   const topHeight = layout.offsets[renderedStart] ?? 0
   const bottomHeight = (layout.offsets.at(-1) ?? 0) - (layout.offsets[renderedEnd] ?? 0)
 
@@ -82,11 +86,18 @@ export function ConversationHistory({
   }, [])
 
   useLayoutEffect(() => {
+    const ids = new Set(rows.map((row) => row.id))
+    for (const id of heightsRef.current.keys()) if (!ids.has(id)) heightsRef.current.delete(id)
+    for (const id of detailsStatesRef.current.keys()) if (!ids.has(id)) detailsStatesRef.current.delete(id)
+    for (const id of callbacksRef.current.keys()) if (!ids.has(id)) callbacksRef.current.delete(id)
+  }, [rows])
+
+  useLayoutEffect(() => {
     followingRef.current = shouldStickToBottom
   }, [shouldStickToBottom])
 
   // Measure and reconcile before paint. Keep a message ID + viewport offset, never
-  // a total scrollHeight delta (which also includes unrelated live output below).
+  // a total scrollHeight delta (which also includes newly appended output).
   useLayoutEffect(() => {
     const container = scrollContainerRef.current
     const topSpacer = topSpacerRef.current
@@ -98,41 +109,38 @@ export function ConversationHistory({
       lastScrollTopRef.current = container.scrollTop
     }
     const capture = (): ReadingAnchor | null => {
-      if (!visibleMessages.length) return null
+      if (!visibleRows.length) return null
       const top = viewportTop()
-      for (const message of visibleMessages.slice(renderedStart, renderedEnd)) {
+      for (const message of visibleRows.slice(renderedStart, renderedEnd)) {
         const rect = nodesRef.current.get(message.id)?.getBoundingClientRect()
         if (rect && rect.bottom > top && rect.top < top + container.clientHeight) {
           return { id: message.id, offset: rect.top - top }
         }
       }
       const end = bottomSpacerRef.current?.getBoundingClientRect().bottom
-      // When reading the separate live-response section, anchor its history boundary.
+      // If the viewport is below all rows, retain its offset from the list boundary.
       if (end !== undefined && end <= top) return { id: null, offset: end - top }
       const index = conversationRowAtOffset(layout.offsets, container.scrollTop - origin())
-      return { id: visibleMessages[index].id, offset: origin() + layout.offsets[index] - container.scrollTop }
+      return { id: visibleRows[index].id, offset: origin() + layout.offsets[index] - container.scrollTop }
     }
     handlersRef.current = {
       capture,
       loadOlder: () => {
         if (loadingRef.current || visibleStart <= 0) return
-        const next = expandConversationWindowStart(messages, visibleStart)
+        const messageStart = rows[visibleStart]?.messageIndex ?? messages.length
+        const next = conversationRowStart(rows, expandConversationWindowStart(messages, messageStart))
         if (next === visibleStart) return
         anchorRef.current = capture()
         followingRef.current = false
         loadingRef.current = true
         expandedRef.current = true
         setStartIndex(next)
-        setWindowRange((current) => ({
-          start: Math.min(current.start, next),
-          end: Math.max(current.end, next + 12),
-        }))
       },
     }
 
     if (followingRef.current && !expandedRef.current && startIndex !== latestStart) {
       setStartIndex(latestStart)
-      setWindowRange({ start: Math.max(latestStart, messages.length - 12), end: messages.length })
+      setWindowRange({ start: Math.max(latestStart, rows.length - 12), end: rows.length })
       return
     }
     if (followingRef.current && !loadingRef.current) {
@@ -187,7 +195,10 @@ export function ConversationHistory({
     lastScrollTopRef.current = container.scrollTop
   })
 
-  useLayoutEffect(() => {
+  // The scrolling element can be an ancestor mounted in the same commit.
+  // Its ref is guaranteed to be attached by the passive effect, not by a
+  // child's layout effect. The scheduled reconciliation measures before paint.
+  useEffect(() => {
     const container = scrollContainerRef.current
     if (!container) return
     const observer = new ResizeObserver(scheduleUpdate)
@@ -230,7 +241,7 @@ export function ConversationHistory({
     }
   }, [scheduleUpdate, scrollContainerRef])
 
-  const olderCount = Math.min(conversationHistoryBatchSize, messages.slice(0, visibleStart).filter((message) => message.role === 'user').length)
+  const olderCount = Math.min(conversationHistoryBatchSize, messages.slice(0, rows[visibleStart]?.messageIndex ?? messages.length).filter((message) => message.role === 'user').length)
   return (
     <div className="conversation-history" ref={historyRef} data-history-start={visibleStart}>
       {visibleStart > 0 && (
@@ -239,11 +250,18 @@ export function ConversationHistory({
         </div>
       )}
       <div aria-hidden="true" className="conversation-virtual-spacer" ref={topSpacerRef} style={{ height: topHeight }} />
-      {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
-        <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
-          {renderMessage(message)}
-        </div>
-      ))}
+      {visibleRows.slice(renderedStart, renderedEnd).map((row) => {
+        let detailsState = detailsStatesRef.current.get(row.id)
+        if (!detailsState) {
+          detailsState = new Map()
+          detailsStatesRef.current.set(row.id, detailsState)
+        }
+        return (
+          <div className="conversation-message-row" data-message-id={row.id} key={row.id} ref={getRowRef(row.id)}>
+            <DetailsStateContext.Provider value={detailsState}>{renderRow(row)}</DetailsStateContext.Provider>
+          </div>
+        )
+      })}
       <div aria-hidden="true" className="conversation-virtual-spacer" ref={bottomSpacerRef} style={{ height: bottomHeight }} />
     </div>
   )
