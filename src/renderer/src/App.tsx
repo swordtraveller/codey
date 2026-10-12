@@ -17,7 +17,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -62,11 +62,7 @@ import {
   subscribeDevelopmentProgress,
   updateDevelopmentProgress,
 } from './development-progress-store'
-import {
-  conversationHistoryBatchSize,
-  expandConversationWindowStart,
-  initialConversationWindowStart,
-} from '../../shared/conversation-window'
+import { ConversationHistory } from './ConversationHistory'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -1145,34 +1141,6 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
   )
 }
 
-type VirtualWindow = { start: number; end: number }
-
-const conversationEstimatedRowHeight = 480
-const conversationVirtualOverscan = 5
-
-function updateVirtualWindow(
-  current: VirtualWindow,
-  offsets: number[],
-  scrollTop: number,
-  viewportHeight: number,
-): VirtualWindow {
-  const total = offsets.length - 1
-  if (total <= 0) return { start: 0, end: 0 }
-  const lowerBound = (value: number): number => {
-    let low = 0
-    let high = total
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2)
-      if (offsets[middle + 1] <= value) low = middle + 1
-      else high = middle
-    }
-    return Math.min(low, total - 1)
-  }
-  const start = Math.max(0, lowerBound(Math.max(0, scrollTop)) - conversationVirtualOverscan)
-  const end = Math.min(total, lowerBound(Math.max(0, scrollTop + viewportHeight)) + conversationVirtualOverscan + 1)
-  return current.start === start && current.end === end ? current : { start, end }
-}
-
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
   projectId,
@@ -1193,273 +1161,28 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue?: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const latestInitialStart = initialConversationWindowStart(messages)
-  const [startIndex, setStartIndex] = useState(latestInitialStart)
-  const loadingOlderRef = useRef(false)
-  const pendingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
-  const historyExpandedRef = useRef(false)
-  const heightCacheRef = useRef(new Map<string, number>())
-  const resizeObserverRef = useRef<ResizeObserver | null>(null)
-  const observedRowsRef = useRef(new Map<string, HTMLDivElement>())
-  const rowRefCallbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
-  const [heightVersion, setHeightVersion] = useState(0)
-  const initialVisibleMessageCount = messages.length - latestInitialStart
-  const [virtualWindow, setVirtualWindow] = useState<VirtualWindow>(() => ({
-    start: latestInitialStart + Math.max(0, initialVisibleMessageCount - 12),
-    end: messages.length,
-  }))
-  const scrollFrameRef = useRef<number | null>(null)
-  const visibleStartIndex = historyExpandedRef.current
-    ? Math.min(startIndex, latestInitialStart)
-    : latestInitialStart
-  const hasOlderMessages = visibleStartIndex > 0
-  const historyFoldHeight = hasOlderMessages ? 36 : 0
-  const visibleMessages = useMemo(() => messages.slice(visibleStartIndex), [messages, visibleStartIndex])
-  const layout = useMemo(() => {
-    const offsets = [0]
-    for (const message of visibleMessages) {
-      offsets.push(offsets.at(-1)! + (heightCacheRef.current.get(message.id) ?? conversationEstimatedRowHeight))
-    }
-    return { offsets, totalHeight: offsets.at(-1) ?? 0 }
-  }, [visibleMessages, heightVersion])
-
-  const updateWindow = useCallback(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-    const next = updateVirtualWindow(
-      { start: 0, end: 0 },
-      layout.offsets,
-      Math.max(0, container.scrollTop - historyFoldHeight),
-      container.clientHeight,
-    )
-    setVirtualWindow((current) => {
-      const start = visibleStartIndex + next.start
-      const end = visibleStartIndex + next.end
-      if (current.start === start && current.end === end) return current
-      // Monotonic expansion: a stale-offsets recompute (rows still at the
-      // estimated height) must never clip rows that are already rendered,
-      // otherwise fast scrolling blanks the region above until the heights
-      // settle. Shrinking back happens naturally once real heights land.
-      return {
-        start: Math.min(current.start, start),
-        end: Math.max(current.end, end),
-      }
-    })
-  }, [historyFoldHeight, layout.offsets, scrollContainerRef, visibleStartIndex])
-
-  const scheduleWindowUpdate = useCallback(() => {
-    if (scrollFrameRef.current !== null) return
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null
-      updateWindow()
-    })
-  }, [updateWindow])
-
-  useEffect(() => () => {
-    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
-  }, [])
-
-  useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      let changed = false
-      for (const entry of entries) {
-        const id = entry.target.getAttribute('data-message-id')
-        if (!id) continue
-        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
-        if (height > 0 && heightCacheRef.current.get(id) !== height) {
-          heightCacheRef.current.set(id, height)
-          changed = true
-        }
-      }
-      if (changed) setHeightVersion((version) => version + 1)
-    })
-    resizeObserverRef.current = observer
-    return () => {
-      observer.disconnect()
-      observedRowsRef.current.clear()
-      rowRefCallbacksRef.current.clear()
-      resizeObserverRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-    const onScroll = (): void => {
-      scheduleWindowUpdate()
-    }
-    container.addEventListener('scroll', onScroll, { passive: true })
-    return () => container.removeEventListener('scroll', onScroll)
-  }, [scheduleWindowUpdate, scrollContainerRef])
-
-  // Stream progress is rendered outside this component, so this effect only runs for
-  // history changes and never performs layout work for individual stream deltas.
-  useEffect(() => {
-    if (!shouldStickToBottom) return
-    const container = scrollContainerRef.current
-    if (!container) return
-    const frame = window.requestAnimationFrame(() => {
-      container.scrollTo({ top: Number.MAX_SAFE_INTEGER })
-      scheduleWindowUpdate()
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [messages.length, scheduleWindowUpdate, scrollContainerRef, shouldStickToBottom])
-
-  useLayoutEffect(() => {
-    const anchor = pendingAnchorRef.current
-    const container = scrollContainerRef.current
-    if (!anchor || !container) return
-    container.scrollTop = anchor.scrollTop + (container.scrollHeight - anchor.scrollHeight)
-    pendingAnchorRef.current = null
-    loadingOlderRef.current = false
-    scheduleWindowUpdate()
-  }, [scheduleWindowUpdate, scrollContainerRef, visibleStartIndex])
-
-  const previousMessageCountRef = useRef(messages.length)
-  useLayoutEffect(() => {
-    if (previousMessageCountRef.current === messages.length) return
-    // Do not consume the pending growth while the user is scrolled away:
-    // the effect re-runs when they return to the bottom (shouldStickToBottom
-    // is a dependency) and the window resyncs then.
-    if (!shouldStickToBottom) return
-    previousMessageCountRef.current = messages.length
-    const nextStart = historyExpandedRef.current
-      ? visibleStartIndex
-      : initialConversationWindowStart(messages)
-    const nextLength = messages.length - nextStart
-    setVirtualWindow({
-      start: nextStart + Math.max(0, nextLength - 12),
-      end: messages.length,
-    })
-  }, [messages.length, shouldStickToBottom, visibleStartIndex])
-
-  // Self-heal a degenerate virtual window (its end at or before the visible
-  // region start renders an empty slice — the conversation goes blank until
-  // the component remounts). Recompute from the current scroll position so
-  // content reappears in place, even when no scroll event can fire.
-  useLayoutEffect(() => {
-    if (visibleMessages.length === 0) return
-    if (virtualWindow.end > visibleStartIndex) return
-    updateWindow()
-  }, [virtualWindow.end, visibleStartIndex, visibleMessages.length, updateWindow])
-
-  const loadOlderMessages = useCallback(() => {
-    const container = scrollContainerRef.current
-    if (!container || !hasOlderMessages || loadingOlderRef.current) return
-    loadingOlderRef.current = true
-    historyExpandedRef.current = true
-    pendingAnchorRef.current = {
-      scrollHeight: container.scrollHeight,
-      scrollTop: container.scrollTop,
-    }
-    const nextStartIndex = expandConversationWindowStart(
-      messages,
-      Math.min(startIndex, initialConversationWindowStart(messages)),
-      conversationHistoryBatchSize,
-    )
-    setStartIndex(nextStartIndex)
-    // Pre-expand the render window over the newly revealed rows: without
-    // this, virtualWindow keeps its old absolute start and the freshly
-    // exposed older messages stay outside the rendered slice until a later
-    // recompute, which can never fire when the estimated offsets already
-    // cover the viewport (the "blank above a threshold" symptom).
-    setVirtualWindow((current) => ({
-      start: Math.min(current.start, nextStartIndex),
-      end: current.end,
-    }))
-    // Release the in-flight guard once the state updates are queued: the
-    // anchoring effect resets it too, but when scrollTop stays at 0 the
-    // anchor restore never runs (scrollHeight keeps growing) and a stuck
-    // guard would reject every subsequent wheel-triggered batch.
-    window.requestAnimationFrame(() => {
-      loadingOlderRef.current = false
-    })
-  }, [hasOlderMessages, messages, scrollContainerRef, startIndex])
-
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container || !hasOlderMessages) return
-    const onWheel = (event: WheelEvent): void => {
-      if (event.deltaY < 0 && container.scrollTop <= 1) loadOlderMessages()
-    }
-    container.addEventListener('wheel', onWheel, { passive: true })
-    return () => container.removeEventListener('wheel', onWheel)
-  }, [hasOlderMessages, loadOlderMessages, scrollContainerRef])
-
-  useEffect(() => {
-    scheduleWindowUpdate()
-  }, [layout.offsets, scheduleWindowUpdate])
-
-  const getRowRef = useCallback((id: string) => {
-    const existing = rowRefCallbacksRef.current.get(id)
-    if (existing) return existing
-    const callback = (node: HTMLDivElement | null): void => {
-      const previous = observedRowsRef.current.get(id)
-      if (previous && previous !== node) {
-        resizeObserverRef.current?.unobserve(previous)
-        observedRowsRef.current.delete(id)
-      }
-      if (!node) {
-        rowRefCallbacksRef.current.delete(id)
-        return
-      }
-      observedRowsRef.current.set(id, node)
-      resizeObserverRef.current?.observe(node)
-    }
-    rowRefCallbacksRef.current.set(id, callback)
-    return callback
-  }, [])
-  const renderedStart = Math.min(
-    Math.max(0, virtualWindow.start - visibleStartIndex),
-    visibleMessages.length,
-  )
-  // Rendered range hard floor: at least 16 rows or the full visible list.
-  // Estimated heights compress the virtual window math on first paint
-  // (a "screenful" of 180px rows is only ~2 real rows), and the self-heal
-  // loop cannot widen a window whose end already exceeds the visible start —
-  // fast upward scrolling then shows a long blank stretch until real heights
-  // trickle in. Forcing a wide initial slice trades one cheap paint of a
-  // dozen extra rows for never blanking above the fold.
-  const renderedEnd = Math.max(
-    Math.min(
-      Math.max(renderedStart, virtualWindow.end - visibleStartIndex),
-      visibleMessages.length,
-    ),
-    Math.min(renderedStart + 16, visibleMessages.length),
-  )
-  const topHeight = layout.offsets[renderedStart] ?? 0
-  const bottomHeight = Math.max(0, layout.totalHeight - (layout.offsets[renderedEnd] ?? layout.totalHeight))
-
   return (
-    <>
-      {hasOlderMessages && (
-        <div className="conversation-history-fold">
-          <Button appearance="subtle" size="small" onClick={loadOlderMessages}>
-            {t('loadOlderConversationRounds', {
-              count: Math.min(
-                conversationHistoryBatchSize,
-                messages.slice(0, visibleStartIndex).filter((message) => message.role === 'user').length,
-              ),
-            })}
-          </Button>
-        </div>
+    <ConversationHistory
+      messages={messages}
+      scrollContainerRef={scrollContainerRef}
+      shouldStickToBottom={shouldStickToBottom}
+      renderLoadOlder={(loadOlder, count) => (
+        <Button appearance="subtle" size="small" onClick={loadOlder}>
+          {t('loadOlderConversationRounds', { count })}
+        </Button>
       )}
-      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: topHeight }} />
-      {visibleMessages.slice(renderedStart, renderedEnd).map((message) => (
-        <div className="conversation-message-row" data-message-id={message.id} key={message.id} ref={getRowRef(message.id)}>
-          <ConversationMessage
-            message={message}
-            messages={messages}
-            projectId={projectId}
-            conversationId={conversationId}
-            conversationTurn={conversationTurn}
-            showContinue={message.id === lastUserMessageId}
-            onContinue={onContinue}
-          />
-        </div>
-      ))}
-      <div aria-hidden="true" className="conversation-virtual-spacer" style={{ height: bottomHeight }} />
-    </>
+      renderMessage={(message) => (
+        <ConversationMessage
+          message={message}
+          messages={messages}
+          projectId={projectId}
+          conversationId={conversationId}
+          conversationTurn={conversationTurn}
+          showContinue={message.id === lastUserMessageId}
+          onContinue={onContinue}
+        />
+      )}
+    />
   )
 })
 
