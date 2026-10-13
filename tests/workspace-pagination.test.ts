@@ -10,7 +10,7 @@ vi.mock('node:fs/promises', async (original) => {
   return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename) }
 })
 import { BridgeHandoverService } from '../src/main/bridge'
-import { addMessage, createProject, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationHotLongTermContent } from '../src/main/workspace'
+import { addMessage, createProject, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
 
 const headerPath = (projectId: string, conversationId: string): string => join(electronState.userData, 'workspace-data', 'projects', Buffer.from(projectId).toString('base64url'), 'conversations', `${Buffer.from(conversationId).toString('base64url')}.json`)
 async function reload(): Promise<void> {
@@ -144,6 +144,46 @@ describe('disk-backed conversation pagination', () => {
     const readAll = vi.fn(async () => [])
     await new BridgeHandoverService().sync(readAll)
     expect(readAll).not.toHaveBeenCalled()
+  })
+
+  it('keeps read cursors monotonic and errors independent without hydrating bodies', async () => {
+    const { projectId, conversationId } = await seed(2)
+    await updateConversationTurn(projectId, conversationId, 'u1', { startedAt: 1, endedAt: 2, result: 'other', error: 'provider failed' })
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations[0].history).toMatchObject({ unreadCount: 2, hasError: true, hasUnreadError: true })
+    await setConversationReadState(projectId, conversationId, 'a1', 100)
+    await setConversationReadState(projectId, conversationId, 'a0', 200)
+    await setConversationReadState(projectId, conversationId, 'invalid', 300)
+    await setConversationReadState(projectId, conversationId, null, null)
+    const conversation = (await getProjectsForRenderer())[0].conversations[0]
+    expect(conversation.lastReadMessageId).toBe('a1')
+    expect(conversation.lastReadAt).toBe(100)
+    expect(conversation.history).toMatchObject({ unreadCount: 0, hasError: true, hasUnreadError: false })
+    expect(vi.mocked(open)).not.toHaveBeenCalled()
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations[0].history).toMatchObject({ unreadCount: 0, hasError: true })
+    await updateConversationTurn(projectId, conversationId, 'u1', { startedAt: 1, result: 'normal' })
+    expect((await getProjectsForRenderer())[0].conversations[0].history?.hasError).toBe(false)
+  })
+
+  it('upgrades older pagination indexes once, preserving journals and context', async () => {
+    const { projectId, conversationId } = await seed(2)
+    await updateConversationTurn(projectId, conversationId, 'u1', { startedAt: 1, result: 'timeout' })
+    const path = headerPath(projectId, conversationId)
+    const old = JSON.parse(await readFile(path, 'utf8'))
+    delete old.messageIndex.readStateVersion
+    old.messageIndex.messages = old.messageIndex.messages.map(({ turn, replyContent, ...entry }: Record<string, unknown>) => entry)
+    old.history.hasError = false
+    await writeFile(path, JSON.stringify(old))
+    const records = await readFile(path + '.records')
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations[0].history).toMatchObject({ unreadCount: 2, hasError: true })
+    expect(await readFile(path + '.records')).toEqual(records)
+    expect(JSON.parse(await readFile(path, 'utf8')).messageIndex.readStateVersion).toBe(2)
+    await reload()
+    await getProjectsForRenderer()
+    expect(vi.mocked(open)).not.toHaveBeenCalled()
+    expect((await getProject(projectId, conversationId)).conversations[0].agentMessages).toHaveLength(1)
   })
 
 })

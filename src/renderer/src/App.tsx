@@ -1,3 +1,4 @@
+import { conversationReadState } from '../../shared/conversation-read-state'
 import {
   Button,
   Checkbox,
@@ -100,6 +101,7 @@ import {
 } from '../../shared/types'
 import { UnreadBadge } from './components/UnreadBadge'
 import { McpSettings } from './components/McpSettings'
+import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
@@ -1144,6 +1146,7 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
   pagination,
+  onRead,
   projectId,
   conversationId,
   conversationTurn,
@@ -1153,6 +1156,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue,
 }: {
   messages: ChatMessage[]
+  onRead?: (messageId: string) => Promise<void>
   pagination: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   projectId: string
   conversationId: string
@@ -1177,6 +1181,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     <ConversationHistory
       messages={messages}
       pagination={pagination}
+      onRead={onRead}
       rows={rows}
       scrollContainerRef={scrollContainerRef}
       shouldStickToBottom={shouldStickToBottom}
@@ -2055,6 +2060,10 @@ export function App(): React.JSX.Element {
   const [projectError, setProjectError] = useState('')
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(defaultNotificationSettings)
   const [notificationSettingsLoaded, setNotificationSettingsLoaded] = useState(false)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
+  const [updateCheckError, setUpdateCheckError] = useState('')
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -2063,7 +2072,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
@@ -2104,13 +2113,7 @@ export function App(): React.JSX.Element {
       for (const conv of project.conversations) {
         if (conv.archived) continue
         if (conv.history) { counts[conv.id] = conv.history.unreadCount; continue }
-        const assistantMessages = conv.messages.filter((m) => m.role === 'assistant')
-        if (!conv.lastReadMessageId) {
-          counts[conv.id] = assistantMessages.length
-        } else {
-          const lastReadIdx = assistantMessages.findIndex((m) => m.id === conv.lastReadMessageId)
-          counts[conv.id] = lastReadIdx === -1 ? 0 : Math.max(0, assistantMessages.length - lastReadIdx - 1)
-        }
+        counts[conv.id] = conversationReadState(conv.messages, conv.lastReadMessageId).unreadCount
       }
     }
     return counts
@@ -2120,19 +2123,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
-        if (conv.history) { errors[conv.id] = conv.history.hasError && conv.lastReadMessageId !== conv.history.lastMessageId; continue }
-        const lastMsg = conv.messages[conv.messages.length - 1]
-        let hasError = Boolean(
-          lastMsg?.turn && (
-            lastMsg.turn.result === 'timeout' ||
-            lastMsg.turn.result === 'other' ||
-            Boolean(lastMsg.turn.error)
-          )
-        )
-        if (hasError && lastMsg && conv.lastReadMessageId === lastMsg.id) {
-          hasError = false
-        }
-        errors[conv.id] = hasError
+        errors[conv.id] = conv.history?.hasUnreadError ?? conversationReadState(conv.messages, conv.lastReadMessageId).hasUnreadError
       }
     }
     return errors
@@ -2365,19 +2356,20 @@ export function App(): React.JSX.Element {
     }
     const observer = new IntersectionObserver(
       ([entry]) => {
-        setShowScrollToBottom(!entry.isIntersecting)
-        if (entry.isIntersecting && activeConversation) {
-          const lastMsg = activeConversation.messages[activeConversation.messages.length - 1]
-          if (lastMsg) {
-            void window.codey.setConversationReadState(activeProjectId, activeConversation.id, lastMsg.id, Date.now())
-          }
-        }
+        setShowScrollToBottom(entry.intersectionRatio < 0.9)
+
       },
       { root, threshold: 0.9 },
     )
     observer.observe(end)
     return () => observer.disconnect()
   }, [activeConversationId, activeConversation?.messages.length])
+
+  const markVisibleReplyRead = useCallback(async (messageId: string): Promise<void> => {
+    if (!activeProjectId || !activeConversationId) return
+    const updated = await window.codey.setConversationReadState(activeProjectId, activeConversationId, messageId, Date.now())
+    setProjects((current) => current.map((project) => project.id === updated.id ? updated : project))
+  }, [activeProjectId, activeConversationId])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -2678,11 +2670,10 @@ export function App(): React.JSX.Element {
 
   async function markProjectAllRead(project: Project): Promise<void> {
     for (const conv of project.conversations) {
-      if (conv.archived) continue
-      const lastAssistant = conv.history?.lastAssistantMessageId ? { id: conv.history.lastAssistantMessageId } : [...conv.messages].reverse().find(m => m.role === 'assistant')
-      if (lastAssistant) {
+      const lastReplyId = conv.history?.lastReplyMessageId ?? conversationReadState(conv.messages).lastReplyMessageId
+      if (lastReplyId) {
         try {
-          const result = await window.codey.setConversationReadState(project.id, conv.id, lastAssistant.id, Date.now())
+          const result = await window.codey.setConversationReadState(project.id, conv.id, lastReplyId, Date.now())
           replaceProject(result)
         } catch {}
       }
@@ -3957,10 +3948,7 @@ export function App(): React.JSX.Element {
                         setOpenConversationMenuId(null);
                         setError('');
                         scrollToBottom();
-                        const lastMsg = conversation.history?.lastMessageId ? { id: conversation.history.lastMessageId } : conversation.messages[conversation.messages.length - 1];
-                        if (lastMsg && conversation.lastReadMessageId !== lastMsg.id) {
-                          void window.codey.setConversationReadState(activeProject.id, conversation.id, lastMsg.id, Date.now()).then(replaceProject);
-                        }
+
                       }}>
                         <span className="nav-item-title">{conversation.title}</span>
                         <UnreadBadge count={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} />
@@ -4166,6 +4154,7 @@ export function App(): React.JSX.Element {
                 <VirtualizedConversationHistory
                   key={activeConversationKey}
                   messages={activeConversation.messages}
+                  onRead={settingsOpen ? undefined : markVisibleReplyRead}
                   pagination={{ hasOlder: Boolean(messageHistory.before), loading: messageHistory.loadingOlder, loadOlder: messageHistory.loadOlder }}
                   projectId={activeProjectId}
                   conversationId={activeConversation.id}
@@ -4487,6 +4476,9 @@ export function App(): React.JSX.Element {
                   if (next === 'prompts' && !promptSnapshot) {
                     void window.codey.getPromptSnapshot().then(setPromptSnapshot).catch(() => setPromptSnapshot(null))
                   }
+                  if (next === 'about' && appVersion === null) {
+                    void window.codey.getAppVersion().then(setAppVersion).catch(() => setAppVersion(''))
+                  }
                 }}
               >
                 <Tab value="models">{t('models')}</Tab>
@@ -4500,6 +4492,7 @@ export function App(): React.JSX.Element {
                 <Tab value="archive">{t('archivedItems')}</Tab>
                 <Tab value="developer">{t('developerMode')}</Tab>
                 <Tab value="prompts">{t('prompts')}</Tab>
+                <Tab value="about">{t('about')}</Tab>
               </TabList>
               {settingsTab === 'models' && (
               <section className="settings-group">
@@ -5375,6 +5368,49 @@ export function App(): React.JSX.Element {
                       <pre className="prompt-content">{entry.content}</pre>
                     </div>
                   ))}
+                </section>
+              )}
+              {settingsTab === 'about' && (
+                <section className="settings-group">
+                  <h2>{t('aboutCodey')}</h2>
+                  <p className="settings-description">
+                    {appVersion === null ? t('loading') : t('softwareVersion', { version: appVersion || t('notAvailable') })}
+                  </p>
+                  <h2>{t('checkForUpdates')}</h2>
+                  <Button
+                    appearance="secondary"
+                    disabled={updateCheckBusy}
+                    onClick={() => {
+                      setUpdateCheckBusy(true)
+                      setUpdateCheck(null)
+                      setUpdateCheckError('')
+                      void window.codey.checkForUpdates()
+                        .then(setUpdateCheck)
+                        .catch(() => setUpdateCheckError(t('updateCheckFailed')))
+                        .finally(() => setUpdateCheckBusy(false))
+                    }}
+                  >
+                    {updateCheckBusy ? t('checkingForUpdates') : t('checkForUpdates')}
+                  </Button>
+                  {updateCheck?.status === 'ahead' && (
+                    <p className="settings-description" role="status">
+                      {t('updateAhead', { version: updateCheck.latestVersion })}
+                    </p>
+                  )}
+                  {updateCheck?.status === 'current' && (
+                    <p className="settings-description" role="status">
+                      {t('updateCurrent', { version: updateCheck.latestVersion })}
+                    </p>
+                  )}
+                  {updateCheck?.status === 'behind' && (
+                    <Button
+                      appearance="transparent"
+                      onClick={() => void window.codey.openLatestReleasePage().catch(() => setUpdateCheckError(t('unableOpenReleasePage')))}
+                    >
+                      {t('updateBehind', { version: updateCheck.latestVersion })}
+                    </Button>
+                  )}
+                  {updateCheckError && <p className="dialog-error" role="alert">{updateCheckError}</p>}
                 </section>
               )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}

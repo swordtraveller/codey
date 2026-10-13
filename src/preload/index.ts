@@ -34,6 +34,7 @@ import type {
   ScreenshotSource,
 } from '../shared/types'
 import type { BridgeChannelStatus } from '../shared/bridge'
+import type { UpdateCheckResult } from '../shared/update-check'
 
 contextBridge.exposeInMainWorld(
   'runtime',
@@ -44,6 +45,9 @@ contextBridge.exposeInMainWorld(
   'codey',
   Object.freeze({
     getConfig: () => ipcRenderer.invoke('config:get'),
+    getAppVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
+    checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('updates:check'),
+    openLatestReleasePage: (): Promise<void> => ipcRenderer.invoke('updates:open-latest-release-page'),
     getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
     listPerformanceTraceFiles: (): Promise<PerformanceTraceFile[]> => ipcRenderer.invoke('performance:list-files'),
     readPerformanceTraceFile: (fileName: string): Promise<string> => ipcRenderer.invoke('performance:read-file', fileName),

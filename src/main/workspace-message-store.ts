@@ -1,15 +1,16 @@
+import { readMessageMetadata, type ReadMessage } from '../shared/conversation-read-state'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 export type RecordLocation = { offset: number; length: number; hash: string }
-export type MessageLocation = RecordLocation & { id: string; role: 'user' | 'assistant' }
-export type MessageStoreIndex = { messages: MessageLocation[]; context: RecordLocation }
+export type MessageLocation = RecordLocation & ReadMessage
+export type MessageStoreIndex = { readStateVersion?: 2; messages: MessageLocation[]; context: RecordLocation }
 
 /** Append before atomically publishing the index. Interrupted writes leave only unreferenced bytes. */
 export async function appendMessageRecords(
   path: string,
-  messages: Array<{ id: string; role: 'user' | 'assistant' }>,
+  messages: ReadMessage[],
   context: unknown[],
   previous?: MessageStoreIndex,
 ): Promise<MessageStoreIndex> {
@@ -28,7 +29,7 @@ export async function appendMessageRecords(
     }
     const oldMessages = new Map(previous?.messages.map((message) => [message.id, message]))
     const entries: MessageLocation[] = []
-    for (const message of messages) entries.push({ ...await append(message, oldMessages.get(message.id)), id: message.id, role: message.role })
+    for (const message of messages) entries.push({ ...await append(message, oldMessages.get(message.id)), ...readMessageMetadata(message) })
     // Model context is replaced independently; do not append a growing full snapshot
     // to the history journal after every turn.
     const contextBytes = Buffer.from(JSON.stringify(context) + '\n')
@@ -42,7 +43,7 @@ export async function appendMessageRecords(
       try { await rename(temporaryPath, contextPath) } catch (error) { await unlink(temporaryPath).catch(() => undefined); throw error }
     }
     await file.sync()
-    return { messages: entries, context: contextLocation }
+    return { readStateVersion: 2, messages: entries, context: contextLocation }
   } finally {
     await file.close()
   }
