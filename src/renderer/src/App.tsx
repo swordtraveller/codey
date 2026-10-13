@@ -2059,6 +2059,7 @@ export function App(): React.JSX.Element {
   const [projectError, setProjectError] = useState('')
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(defaultNotificationSettings)
   const [notificationSettingsLoaded, setNotificationSettingsLoaded] = useState(false)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -2067,7 +2068,7 @@ export function App(): React.JSX.Element {
   const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
-  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications'>('models')
+  const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
 
   const visibleProjects = projects.filter((project) => !project.archived)
@@ -4471,6 +4472,9 @@ export function App(): React.JSX.Element {
                   if (next === 'prompts' && !promptSnapshot) {
                     void window.codey.getPromptSnapshot().then(setPromptSnapshot).catch(() => setPromptSnapshot(null))
                   }
+                  if (next === 'about' && appVersion === null) {
+                    void window.codey.getAppVersion().then(setAppVersion).catch(() => setAppVersion(''))
+                  }
                 }}
               >
                 <Tab value="models">{t('models')}</Tab>
@@ -4484,6 +4488,7 @@ export function App(): React.JSX.Element {
                 <Tab value="archive">{t('archivedItems')}</Tab>
                 <Tab value="developer">{t('developerMode')}</Tab>
                 <Tab value="prompts">{t('prompts')}</Tab>
+                <Tab value="about">{t('about')}</Tab>
               </TabList>
               {settingsTab === 'models' && (
               <section className="settings-group">
@@ -5359,6 +5364,14 @@ export function App(): React.JSX.Element {
                       <pre className="prompt-content">{entry.content}</pre>
                     </div>
                   ))}
+                </section>
+              )}
+              {settingsTab === 'about' && (
+                <section className="settings-group">
+                  <h2>{t('aboutCodey')}</h2>
+                  <p className="settings-description">
+                    {appVersion === null ? t('loading') : t('softwareVersion', { version: appVersion || t('notAvailable') })}
+                  </p>
                 </section>
               )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}

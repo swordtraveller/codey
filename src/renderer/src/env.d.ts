@@ -51,6 +51,7 @@ declare global {
     readonly runtime?: RuntimeInfo
     readonly codey: {
       getConfig(): Promise<AppConfig>
+      getAppVersion(): Promise<string>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
       listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
       readPerformanceTraceFile(fileName: string): Promise<string>

@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld(
   'codey',
   Object.freeze({
     getConfig: () => ipcRenderer.invoke('config:get'),
+    getAppVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
     getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
     listPerformanceTraceFiles: (): Promise<PerformanceTraceFile[]> => ipcRenderer.invoke('performance:list-files'),
     readPerformanceTraceFile: (fileName: string): Promise<string> => ipcRenderer.invoke('performance:read-file', fileName),

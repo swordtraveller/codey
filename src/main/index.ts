@@ -1234,6 +1234,7 @@ app.setAppUserModelId('com.codey.desktop')
 
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
+  ipcMain.handle('app:get-version', () => app.getVersion())
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
   ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
   ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
