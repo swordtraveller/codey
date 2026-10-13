@@ -1205,6 +1205,60 @@ h1 {
   min-width: 420px;
 }
 
+.settings-dialog-surface.fui-DialogSurface {
+  width: min(1120px, calc(100vw - 64px));
+  max-width: none;
+}
+
+.settings-dialog-body.fui-DialogBody {
+  height: min(780px, calc(100dvh - 96px));
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.settings-dialog-content.settings-layout {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: fit-content(240px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 20px;
+  min-width: 0;
+}
+
+.settings-tab-list.fui-TabList {
+  width: max-content;
+  min-width: 152px;
+  max-width: 240px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-tab-list [role='tab'] {
+  justify-content: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+
+.settings-panel > .settings-group {
+  margin-top: 0;
+}
+
 .settings-group {
   display: grid;
   gap: 14px;
@@ -1283,6 +1337,23 @@ h1 {
 
   .dialog-fields {
     min-width: 0;
+  }
+
+  .settings-dialog-surface.fui-DialogSurface {
+    width: calc(100vw - 32px);
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .settings-tab-list.fui-TabList {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    max-height: 25dvh;
   }
 }
 

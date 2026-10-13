@@ -21,6 +21,7 @@ import { flattenModelLink, groupEnvelope, resolveModelTarget } from '../src/shar
 import { migrateLegacyModel } from '../src/main/config'
 import {
   defaultAgentLimitsConfig,
+  defaultNotificationSettings,
   defaultCommandExecutionConfig,
   defaultCommandReviewConfig,
   defaultContextManagementConfig,
@@ -68,6 +69,7 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     keepAwakeEnabled: false,
     keepAwakeOnlyWhileWorking: true,
     networkAccessEnabled: false,
+    notificationSettings: { ...defaultNotificationSettings },
     performanceTracingEnabled: false,
     commandReviewGlobal: { ...defaultCommandReviewConfig, contentRules: [] },
     agentLimitsGlobal: { ...defaultAgentLimitsConfig },

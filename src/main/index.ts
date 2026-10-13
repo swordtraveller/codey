@@ -1282,6 +1282,7 @@ app.whenReady().then(() => {
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)
+    notificationManager.updateSettings(saved.notificationSettings)
     updateKeepAwake(saved)
     setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
     return saved
@@ -1299,8 +1300,10 @@ app.whenReady().then(() => {
     notificationManager.showNotification(payload)
   })
   ipcMain.handle('notifications:get-settings', () => notificationManager.getSettings())
-  ipcMain.handle('notifications:set-settings', (_event, settings: Partial<NotificationSettings>) => {
-    notificationManager.updateSettings(settings)
+  ipcMain.handle('notifications:set-settings', async (_event, settings: Partial<NotificationSettings>) => {
+    const config = await readConfig()
+    const saved = await saveConfig({ ...config, notificationSettings: { ...config.notificationSettings, ...settings } })
+    notificationManager.updateSettings(saved.notificationSettings)
   })
   ipcMain.handle('projects:get', () => getProjectsForRenderer())
   ipcMain.handle('conversations:messages', (_event, projectId: string, conversationId: string, before: string | null) => getConversationMessagePage(projectId, conversationId, before))
@@ -1605,6 +1608,7 @@ app.whenReady().then(() => {
 
   void readConfig()
     .then((config) => {
+      notificationManager.updateSettings(config.notificationSettings)
       updateKeepAwake(config)
       setPerformanceTracingEnabled(config.developerMode && config.performanceTracingEnabled)
     })

@@ -75,7 +75,6 @@ import {
   defaultContextManagementConfig,
   defaultModelDefinition,
   defaultModelLink,
-  defaultNotificationSettings,
   defaultProviderConfig,
   modelGroupDefaultRetries,
   commandExecutionSupported,
@@ -97,7 +96,6 @@ import {
   type ToolHelpSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
-  type NotificationSettings,
 } from '../../shared/types'
 import { UnreadBadge } from './components/UnreadBadge'
 import { McpSettings } from './components/McpSettings'
@@ -2058,8 +2056,6 @@ export function App(): React.JSX.Element {
   const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
   const [performanceError, setPerformanceError] = useState('')
   const [projectError, setProjectError] = useState('')
-  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(defaultNotificationSettings)
-  const [notificationSettingsLoaded, setNotificationSettingsLoaded] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
@@ -2230,14 +2226,6 @@ export function App(): React.JSX.Element {
       .listKnowledgeBases()
       .then(setKnowledgeBases)
       .catch(() => setKnowledgeBaseError(t('unableLoadKnowledgeBases')))
-
-    void window.codey
-      .getNotificationSettings()
-      .then((saved: NotificationSettings) => {
-        setNotificationSettings(saved)
-        setNotificationSettingsLoaded(true)
-      })
-      .catch(() => setNotificationSettingsLoaded(true))
 
     void window.codey
       .getProjects()
@@ -4464,11 +4452,13 @@ export function App(): React.JSX.Element {
       )}
 
       <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
+        <DialogSurface className="settings-dialog-surface">
+          <DialogBody className="settings-dialog-body">
             <DialogTitle>{t('settings')}</DialogTitle>
-            <DialogContent className="dialog-fields">
+            <DialogContent className="settings-dialog-content settings-layout">
               <TabList
+                className="settings-tab-list"
+                vertical
                 selectedValue={settingsTab}
                 onTabSelect={(_, data) => {
                   const next = data.value as typeof settingsTab
@@ -4494,6 +4484,7 @@ export function App(): React.JSX.Element {
                 <Tab value="prompts">{t('prompts')}</Tab>
                 <Tab value="about">{t('about')}</Tab>
               </TabList>
+              <div className="settings-panel" key={settingsTab}>
               {settingsTab === 'models' && (
               <section className="settings-group">
                 <p className="model-config-status-line" role="status">
@@ -5336,6 +5327,37 @@ export function App(): React.JSX.Element {
                  />
                </section>
               )}
+              {settingsTab === 'notifications' && (
+                <section className="settings-group">
+                  <Switch
+                    checked={configDraft.notificationSettings.enabled}
+                    label={t('notificationsEnabled')}
+                    onChange={(_, data) => setConfigDraft((current) => ({
+                      ...current,
+                      notificationSettings: { ...current.notificationSettings, enabled: data.checked },
+                    }))}
+                  />
+                  {([
+                    ['onlyWhenUnfocused', 'notificationsOnlyWhenUnfocused'],
+                    ['taskComplete', 'notificationsTaskComplete'],
+                    ['taskFailed', 'notificationsTaskFailed'],
+                    ['needsConfirmation', 'notificationsNeedsConfirmation'],
+                    ['connectionError', 'notificationsConnectionError'],
+                    ['modelError', 'notificationsModelError'],
+                  ] as const).map(([key, label]) => (
+                    <Switch
+                      key={key}
+                      checked={configDraft.notificationSettings[key]}
+                      disabled={!configDraft.notificationSettings.enabled}
+                      label={t(label)}
+                      onChange={(_, data) => setConfigDraft((current) => ({
+                        ...current,
+                        notificationSettings: { ...current.notificationSettings, [key]: data.checked },
+                      }))}
+                    />
+                  ))}
+                </section>
+              )}
               {settingsTab === 'archive' && (
                <section className="settings-group">
                  <p className="settings-description">{t('archivedItemsDescription')}</p>
@@ -5414,6 +5436,7 @@ export function App(): React.JSX.Element {
                 </section>
               )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}
+              </div>
             </DialogContent>
             <DialogActions>
               <Button appearance="secondary" onClick={() => setSettingsOpen(false)}>
