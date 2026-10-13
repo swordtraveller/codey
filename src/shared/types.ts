@@ -526,6 +526,7 @@ export type AppConfig = {
   keepAwakeEnabled: boolean
   keepAwakeOnlyWhileWorking: boolean
   networkAccessEnabled: boolean
+  notificationSettings: NotificationSettings
   performanceTracingEnabled: boolean
   /** Global command-review defaults; projects and conversations may override. */
   commandReviewGlobal: CommandReviewConfig
@@ -543,6 +544,16 @@ export type AppConfig = {
   mcpServers: McpStdioServerConfig[]
 }
 
+export const defaultNotificationSettings: NotificationSettings = {
+  enabled: true,
+  taskComplete: true,
+  taskFailed: true,
+  needsConfirmation: true,
+  connectionError: true,
+  modelError: true,
+  onlyWhenUnfocused: true,
+}
+
 export const defaultAppConfig: AppConfig = {
   modelConfigs: [],
   providers: [],
@@ -556,6 +567,7 @@ export const defaultAppConfig: AppConfig = {
   keepAwakeEnabled: false,
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
+  notificationSettings: { ...defaultNotificationSettings },
   performanceTracingEnabled: false,
   commandReviewGlobal: { ...defaultCommandReviewConfig },
   commandExecutionGlobal: { ...defaultCommandExecutionConfig, review: null },
@@ -1119,14 +1131,4 @@ export type NotificationSettings = {
   connectionError: boolean
   modelError: boolean
   onlyWhenUnfocused: boolean
-}
-
-export const defaultNotificationSettings: NotificationSettings = {
-  enabled: true,
-  taskComplete: true,
-  taskFailed: true,
-  needsConfirmation: true,
-  connectionError: true,
-  modelError: true,
-  onlyWhenUnfocused: true,
 }

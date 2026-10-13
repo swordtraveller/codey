@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
+  defaultNotificationSettings,
+  type NotificationSettings,
   type AgentLimitsConfig,
   type AppConfig,
   type AppLanguage,
@@ -50,6 +52,7 @@ type StoredAppConfig = {
   keepAwakeEnabled?: boolean
   keepAwakeOnlyWhileWorking?: boolean
   networkAccessEnabled?: boolean
+  notificationSettings?: Partial<NotificationSettings>
   performanceTracingEnabled?: boolean
   commandReview?: Partial<CommandReviewConfig>
   agentLimits?: Partial<AgentLimitsConfig>
@@ -65,6 +68,14 @@ type LegacyStoredConfig = LegacyStoredModel & {
 
 function getConfigPath(): string {
   return join(app.getPath('userData'), 'model-config.json')
+}
+
+function normalizeNotificationSettings(value: Partial<NotificationSettings> | undefined): NotificationSettings {
+  const settings = { ...defaultNotificationSettings }
+  for (const key of Object.keys(settings) as (keyof NotificationSettings)[]) {
+    if (typeof value?.[key] === 'boolean') settings[key] = value[key]
+  }
+  return settings
 }
 
 function isAppLanguage(value: unknown): value is AppLanguage {
@@ -369,6 +380,7 @@ function readCommandExecutionGlobal(stored: StoredAppConfig): CommandExecutionCo
 export async function readConfig(): Promise<AppConfig> {
   try {
     const stored = JSON.parse(await readFile(getConfigPath(), 'utf8')) as StoredAppConfig & LegacyStoredConfig
+    const notificationSettings = normalizeNotificationSettings(stored.notificationSettings)
     const language = isAppLanguage(stored.language) ? stored.language : defaultAppConfig.language
     const keepAwakeEnabled = stored.keepAwakeEnabled === true
     const keepAwakeOnlyWhileWorking = stored.keepAwakeOnlyWhileWorking !== false
@@ -404,6 +416,7 @@ export async function readConfig(): Promise<AppConfig> {
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
+        notificationSettings,
         commandReviewGlobal,
         agentLimitsGlobal,
         commandExecutionGlobal,
@@ -445,6 +458,7 @@ export async function readConfig(): Promise<AppConfig> {
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
         networkAccessEnabled,
+        notificationSettings,
         commandReviewGlobal: stored.commandReview === undefined
           ? { ...defaultAppConfig.commandReviewGlobal }
           : normalizeCommandReviewConfig(stored.commandReview),
@@ -471,6 +485,7 @@ export async function readConfig(): Promise<AppConfig> {
       keepAwakeEnabled,
       keepAwakeOnlyWhileWorking,
       networkAccessEnabled,
+      notificationSettings,
       commandReviewGlobal: stored.commandReview === undefined
         ? { ...defaultAppConfig.commandReviewGlobal }
         : normalizeCommandReviewConfig(stored.commandReview),
@@ -537,6 +552,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     keepAwakeEnabled: config.keepAwakeEnabled === true,
     keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
     networkAccessEnabled: config.networkAccessEnabled === true,
+    notificationSettings: normalizeNotificationSettings(config.notificationSettings),
     performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
     commandReviewGlobal,
     agentLimitsGlobal,
