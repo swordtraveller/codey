@@ -1,3 +1,5 @@
+import { completedReplyIds } from '../../shared/conversation-read-state'
+import { observeConversationReadReceipts } from './conversation-read-receipts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { ChatMessage } from '../../shared/types'
 import { conversationHistoryBatchSize, expandConversationWindowStart, initialConversationWindowStart } from '../../shared/conversation-window'
@@ -9,8 +11,9 @@ type ReadingAnchor = { id: string; offset: number } | { id: null; offset: number
 
 /** Virtual rows stay independent of model context and data-page ownership. */
 export function ConversationHistory({
-  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder, pagination,
+  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder, pagination, onRead,
 }: {
+  onRead?: (messageId: string) => Promise<void>
   pagination?: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   messages: ChatMessage[]
   rows: ConversationRenderRow[]
@@ -19,6 +22,10 @@ export function ConversationHistory({
   renderRow: (row: ConversationRenderRow) => ReactNode
   renderLoadOlder: (loadOlder: () => void, count: number) => ReactNode
 }): React.JSX.Element {
+  const replyEnds = useMemo(() => new Set(completedReplyIds(messages)), [messages])
+  const receiptRows = useMemo(() => new Map(rows.flatMap((row, index) =>
+    row.kind === 'message' && replyEnds.has(row.message.id) && rows[index + 1]?.messageIndex !== row.messageIndex
+      ? [[row.id, row.message.id] as const] : [])), [rows, replyEnds])
   const latestMessageStart = useMemo(() => pagination ? 0 : initialConversationWindowStart(messages), [messages, pagination])
   const latestStart = conversationRowStart(rows, latestMessageStart)
   const [startIndex, setStartIndex] = useState(latestStart)
@@ -250,6 +257,11 @@ export function ConversationHistory({
     }
   }, [scheduleUpdate, scrollContainerRef])
 
+  useEffect(() => {
+    if (!onRead || !scrollContainerRef.current || !historyRef.current) return
+    return observeConversationReadReceipts(scrollContainerRef.current, historyRef.current, onRead)
+  }, [onRead, scrollContainerRef])
+
   const olderCount = pagination ? conversationHistoryBatchSize : Math.min(conversationHistoryBatchSize, messages.slice(0, rows[visibleStart]?.messageIndex ?? messages.length).filter((message) => message.role === 'user').length)
   return (
     <div className="conversation-history" ref={historyRef} data-history-start={visibleStart}>
@@ -268,6 +280,7 @@ export function ConversationHistory({
         return (
           <div className="conversation-message-row" data-message-id={row.id} key={row.id} ref={getRowRef(row.id)}>
             <DetailsStateContext.Provider value={detailsState}>{renderRow(row)}</DetailsStateContext.Provider>
+            {receiptRows.has(row.id) && <div aria-hidden="true" data-read-message-id={receiptRows.get(row.id)} style={{ height: 1 }} />}
           </div>
         )
       })}

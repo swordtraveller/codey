@@ -1,3 +1,4 @@
+import { observeConversationReadReceipts } from '../../src/renderer/src/conversation-read-receipts'
 import React, { StrictMode, useMemo, useRef, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ChatMessage, DevelopmentProgressState } from '../../src/shared/types'
@@ -200,6 +201,56 @@ async function runTests(): Promise<unknown> {
   await scroll(scroller().scrollHeight)
   assert(atBottom(), 'paged return to bottom failed')
   passed.push('async data pages: duplicate request guard, concurrent tail update, prepend anchor and oldest boundary')
+
+  // The hidden Electron harness cannot gain OS focus: inject the foreground
+  // predicate while exercising real DOM geometry, observers and timers.
+  await render({ messages: history, session: 'receipts' })
+  const read: string[] = []
+  let foreground = false
+  const readRoot = scroller()
+  const content = readRoot.querySelector<HTMLElement>('.conversation-history')!
+  const stopReceipts = observeConversationReadReceipts(readRoot, content, async (id) => { read.push(id) }, () => foreground)
+  const dwell = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 650))
+  await dwell()
+  assert(read.length === 0, 'background window must not acknowledge a visible reply')
+  await scroll(scroller().scrollHeight / 2)
+  foreground = true
+  window.dispatchEvent(new Event('focus'))
+  await dwell()
+  assert(read.length === 0, 'viewing a long reply halfway must not acknowledge its end')
+  await scroll(scroller().scrollHeight)
+  window.dispatchEvent(new Event('blur'))
+  foreground = false
+  await dwell()
+  assert(read.length === 0, 'losing focus during dwell must cancel the receipt')
+  foreground = true
+  window.dispatchEvent(new Event('focus'))
+  await dwell()
+  assert(read.join(',') === 'answer', 'focusing the visible reply end must acknowledge it')
+  stopReceipts()
+
+  const nextMessages: ChatMessage[] = [...history, { ...user('pending'), turn: { startedAt: 1, result: 'processing' } }]
+  await render({ messages: nextMessages, session: 'receipts' })
+  assert(!content.querySelector('[data-read-message-id="pending"]'), 'a running turn cannot produce a receipt')
+  let completeWrite: (() => void) | undefined
+  const concurrentReads: string[] = []
+  const stopConcurrent = observeConversationReadReceipts(readRoot, content, async (id) => {
+    concurrentReads.push(id)
+    if (concurrentReads.length === 1) await new Promise<void>((resolve) => { completeWrite = resolve })
+  }, () => true)
+  await dwell()
+  await render({ messages: [...history, { ...user('pending'), turn: { startedAt: 1, result: 'other', error: 'failed' } }], session: 'receipts' })
+  completeWrite?.()
+  await dwell()
+  assert(concurrentReads.includes('pending'), 'a newly completed reply during a receipt write must still be acknowledged')
+  stopConcurrent()
+
+  const switched: string[] = []
+  const stopSwitch = observeConversationReadReceipts(readRoot, content, async (id) => { switched.push(id) }, () => true)
+  stopSwitch()
+  await dwell()
+  assert(switched.length === 0, 'switching conversations must cancel pending receipts')
+  passed.push('read receipts: foreground, long reply end, dwell cancellation, completion during write and disposal')
 
   root.unmount()
   return { passed, maxMounted }

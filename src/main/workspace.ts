@@ -1,3 +1,4 @@
+import { conversationReadState, readMessageMetadata, type ReadMessage } from '../shared/conversation-read-state'
 import { createHash, randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
@@ -337,19 +338,17 @@ function storedProjectMetadata(project: Project): StoredProjectMetadata {
   return { ...metadata, conversationIds: conversations.map((conversation) => conversation.id) }
 }
 
-function summarizeConversation(conversation: { messages: Array<Pick<ChatMessage, 'id' | 'role' | 'turn'>>; lastReadMessageId?: string }): ConversationHistorySummary {
+function summarizeConversation(conversation: { messages: ReadMessage[]; lastReadMessageId?: string }): ConversationHistorySummary {
   const messages = conversation.messages
   const last = messages.at(-1)
-  const readIndex = messages.findIndex((message) => message.id === conversation.lastReadMessageId)
   return {
     revision: createHash('sha256').update(JSON.stringify(messages.map(({ id, turn }) => [id, turn]))).digest('hex'),
     messageCount: messages.length,
     turnCount: messages.filter((message) => message.role === 'user').length,
-    unreadCount: messages.filter((message, index) => message.role === 'assistant' && index > readIndex).length,
+    ...conversationReadState(messages, conversation.lastReadMessageId),
     lastMessageId: last?.id,
     lastAssistantMessageId: [...messages].reverse().find((message) => message.role === 'assistant')?.id,
     lastUserMessage: (() => { const user = [...messages].reverse().find((message) => message.role === 'user'); return user ? { id: user.id, turn: user.turn } : undefined })(),
-    hasError: Boolean(last?.turn && (last.turn.result === 'timeout' || last.turn.result === 'other' || last.turn.error)),
   }
 }
 
@@ -379,8 +378,7 @@ async function persistConversation(projectId: string, conversation: Conversation
     : await appendMessageRecords(path + '.records', messages, agentMessages ?? [], state?.index)
   // Read state changes must not hydrate message bodies.
   if (unloaded) {
-    const readIndex = index.messages.findIndex((message) => message.id === conversation.lastReadMessageId)
-    history.unreadCount = index.messages.filter((message, i) => message.role === 'assistant' && i > readIndex).length
+    Object.assign(history, conversationReadState(index.messages, conversation.lastReadMessageId))
   }
   const stored: PagedConversation = { ...metadata, storageVersion: 3, messageIndex: index, history }
   await writeJson(path, stored)
@@ -501,6 +499,16 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
         if (parsed.storageVersion === 3) {
           const stored = parsed as PagedConversation
           if (!isMessageStoreIndex(stored.messageIndex) || !stored.history) throw new Error('Invalid conversation index')
+          if (stored.messageIndex.readStateVersion !== 2) {
+            // Upgrade only the small index; preserve the original bodies and model context.
+            try {
+              const messages = await readMessageRecords<ChatMessage>(storedPath + '.records', stored.messageIndex.messages)
+              stored.messageIndex.messages = stored.messageIndex.messages.map((entry, i) => ({ ...entry, ...readMessageMetadata(messages[i]) }))
+              stored.messageIndex.readStateVersion = 2
+              stored.history = summarizeConversation({ messages, lastReadMessageId: stored.lastReadMessageId })
+              await writeJson(storedPath, stored)
+            } catch (error) { throw new WorkspaceMigrationError('Conversation read index migration failed', { cause: error }) }
+          }
           const { storageVersion: _version, messageIndex: _index, ...metadata } = stored
           const conversation = await normalizeConversation({ ...metadata, messages: [], agentMessages: [] })
           historyStates.set(storedPath, { index: stored.messageIndex, loaded: false })
@@ -842,8 +850,14 @@ export function setConversationReadState(projectId: string, conversationId: stri
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
     const conversation = findConversation(project, conversationId)
-    conversation.lastReadMessageId = lastReadMessageId ?? undefined
-    conversation.lastReadAt = lastReadAt ?? undefined
+    const state = historyStates.get(conversationPath(projectId, conversationId))
+    const messages = state && !state.loaded ? state.index.messages : conversation.messages
+    const next = messages.findIndex((message) => message.id === lastReadMessageId)
+    const previous = messages.findIndex((message) => message.id === conversation.lastReadMessageId)
+    // Delayed observers must never rewind the durable read cursor.
+    if (next < 0 || next <= previous) return project
+    conversation.lastReadMessageId = messages[next].id
+    conversation.lastReadAt = Math.max(conversation.lastReadAt ?? 0, lastReadAt ?? Date.now())
     await persistConversation(projectId, conversation)
     return project
   })

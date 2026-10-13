@@ -824,9 +824,12 @@ export type ConversationHistorySummary = {
   turnCount: number
   unreadCount: number
   lastMessageId?: string
+  lastReplyMessageId?: string
   lastAssistantMessageId?: string
   lastUserMessage?: Pick<ChatMessage, 'id' | 'turn'>
   hasError: boolean
+  /** A failed latest task whose result has not been viewed yet. */
+  hasUnreadError: boolean
 }
 
 export type ConversationMessagePage = {

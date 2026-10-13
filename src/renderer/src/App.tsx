@@ -1,3 +1,4 @@
+import { conversationReadState } from '../../shared/conversation-read-state'
 import {
   Button,
   Checkbox,
@@ -1144,6 +1145,7 @@ function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
   pagination,
+  onRead,
   projectId,
   conversationId,
   conversationTurn,
@@ -1153,6 +1155,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   onContinue,
 }: {
   messages: ChatMessage[]
+  onRead?: (messageId: string) => Promise<void>
   pagination: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   projectId: string
   conversationId: string
@@ -1177,6 +1180,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
     <ConversationHistory
       messages={messages}
       pagination={pagination}
+      onRead={onRead}
       rows={rows}
       scrollContainerRef={scrollContainerRef}
       shouldStickToBottom={shouldStickToBottom}
@@ -2104,13 +2108,7 @@ export function App(): React.JSX.Element {
       for (const conv of project.conversations) {
         if (conv.archived) continue
         if (conv.history) { counts[conv.id] = conv.history.unreadCount; continue }
-        const assistantMessages = conv.messages.filter((m) => m.role === 'assistant')
-        if (!conv.lastReadMessageId) {
-          counts[conv.id] = assistantMessages.length
-        } else {
-          const lastReadIdx = assistantMessages.findIndex((m) => m.id === conv.lastReadMessageId)
-          counts[conv.id] = lastReadIdx === -1 ? 0 : Math.max(0, assistantMessages.length - lastReadIdx - 1)
-        }
+        counts[conv.id] = conversationReadState(conv.messages, conv.lastReadMessageId).unreadCount
       }
     }
     return counts
@@ -2120,19 +2118,7 @@ export function App(): React.JSX.Element {
     for (const project of projects) {
       for (const conv of project.conversations) {
         if (conv.archived) continue
-        if (conv.history) { errors[conv.id] = conv.history.hasError && conv.lastReadMessageId !== conv.history.lastMessageId; continue }
-        const lastMsg = conv.messages[conv.messages.length - 1]
-        let hasError = Boolean(
-          lastMsg?.turn && (
-            lastMsg.turn.result === 'timeout' ||
-            lastMsg.turn.result === 'other' ||
-            Boolean(lastMsg.turn.error)
-          )
-        )
-        if (hasError && lastMsg && conv.lastReadMessageId === lastMsg.id) {
-          hasError = false
-        }
-        errors[conv.id] = hasError
+        errors[conv.id] = conv.history?.hasUnreadError ?? conversationReadState(conv.messages, conv.lastReadMessageId).hasUnreadError
       }
     }
     return errors
@@ -2365,19 +2351,20 @@ export function App(): React.JSX.Element {
     }
     const observer = new IntersectionObserver(
       ([entry]) => {
-        setShowScrollToBottom(!entry.isIntersecting)
-        if (entry.isIntersecting && activeConversation) {
-          const lastMsg = activeConversation.messages[activeConversation.messages.length - 1]
-          if (lastMsg) {
-            void window.codey.setConversationReadState(activeProjectId, activeConversation.id, lastMsg.id, Date.now())
-          }
-        }
+        setShowScrollToBottom(entry.intersectionRatio < 0.9)
+
       },
       { root, threshold: 0.9 },
     )
     observer.observe(end)
     return () => observer.disconnect()
   }, [activeConversationId, activeConversation?.messages.length])
+
+  const markVisibleReplyRead = useCallback(async (messageId: string): Promise<void> => {
+    if (!activeProjectId || !activeConversationId) return
+    const updated = await window.codey.setConversationReadState(activeProjectId, activeConversationId, messageId, Date.now())
+    setProjects((current) => current.map((project) => project.id === updated.id ? updated : project))
+  }, [activeProjectId, activeConversationId])
 
   function replaceProject(updated: Project): void {
     setProjects((current) => current.map((project) =>
@@ -2678,11 +2665,10 @@ export function App(): React.JSX.Element {
 
   async function markProjectAllRead(project: Project): Promise<void> {
     for (const conv of project.conversations) {
-      if (conv.archived) continue
-      const lastAssistant = conv.history?.lastAssistantMessageId ? { id: conv.history.lastAssistantMessageId } : [...conv.messages].reverse().find(m => m.role === 'assistant')
-      if (lastAssistant) {
+      const lastReplyId = conv.history?.lastReplyMessageId ?? conversationReadState(conv.messages).lastReplyMessageId
+      if (lastReplyId) {
         try {
-          const result = await window.codey.setConversationReadState(project.id, conv.id, lastAssistant.id, Date.now())
+          const result = await window.codey.setConversationReadState(project.id, conv.id, lastReplyId, Date.now())
           replaceProject(result)
         } catch {}
       }
@@ -3957,10 +3943,7 @@ export function App(): React.JSX.Element {
                         setOpenConversationMenuId(null);
                         setError('');
                         scrollToBottom();
-                        const lastMsg = conversation.history?.lastMessageId ? { id: conversation.history.lastMessageId } : conversation.messages[conversation.messages.length - 1];
-                        if (lastMsg && conversation.lastReadMessageId !== lastMsg.id) {
-                          void window.codey.setConversationReadState(activeProject.id, conversation.id, lastMsg.id, Date.now()).then(replaceProject);
-                        }
+
                       }}>
                         <span className="nav-item-title">{conversation.title}</span>
                         <UnreadBadge count={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} />
@@ -4166,6 +4149,7 @@ export function App(): React.JSX.Element {
                 <VirtualizedConversationHistory
                   key={activeConversationKey}
                   messages={activeConversation.messages}
+                  onRead={settingsOpen ? undefined : markVisibleReplyRead}
                   pagination={{ hasOlder: Boolean(messageHistory.before), loading: messageHistory.loadingOlder, loadOlder: messageHistory.loadOlder }}
                   projectId={activeProjectId}
                   conversationId={activeConversation.id}
