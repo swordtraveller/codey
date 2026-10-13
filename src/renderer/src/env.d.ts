@@ -1,4 +1,5 @@
 import type { BridgeChannelStatus } from '../../shared/bridge'
+import type { UpdateCheckResult } from '../../shared/update-check'
 import type {
   AgentLimitsConfig,
   AppConfig,
@@ -52,6 +53,8 @@ declare global {
     readonly codey: {
       getConfig(): Promise<AppConfig>
       getAppVersion(): Promise<string>
+      checkForUpdates(): Promise<UpdateCheckResult>
+      openLatestReleasePage(): Promise<void>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
       listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
       readPerformanceTraceFile(fileName: string): Promise<string>

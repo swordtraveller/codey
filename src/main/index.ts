@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
-import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
@@ -46,6 +46,7 @@ import {
 import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
+import { checkForUpdates, latestReleasePageUrl } from './update-check'
 import { readConfig, saveConfig } from './config'
 import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
@@ -1235,6 +1236,8 @@ app.setAppUserModelId('com.codey.desktop')
 app.whenReady().then(() => {
   ipcMain.handle('config:get', () => readConfig())
   ipcMain.handle('app:get-version', () => app.getVersion())
+  ipcMain.handle('updates:check', () => checkForUpdates(app.getVersion()))
+  ipcMain.handle('updates:open-latest-release-page', () => shell.openExternal(latestReleasePageUrl))
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
   ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
   ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))

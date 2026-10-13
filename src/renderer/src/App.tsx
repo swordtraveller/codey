@@ -101,6 +101,7 @@ import {
 } from '../../shared/types'
 import { UnreadBadge } from './components/UnreadBadge'
 import { McpSettings } from './components/McpSettings'
+import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
 
@@ -2060,6 +2061,9 @@ export function App(): React.JSX.Element {
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(defaultNotificationSettings)
   const [notificationSettingsLoaded, setNotificationSettingsLoaded] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
+  const [updateCheckError, setUpdateCheckError] = useState('')
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -5372,6 +5376,41 @@ export function App(): React.JSX.Element {
                   <p className="settings-description">
                     {appVersion === null ? t('loading') : t('softwareVersion', { version: appVersion || t('notAvailable') })}
                   </p>
+                  <h2>{t('checkForUpdates')}</h2>
+                  <Button
+                    appearance="secondary"
+                    disabled={updateCheckBusy}
+                    onClick={() => {
+                      setUpdateCheckBusy(true)
+                      setUpdateCheck(null)
+                      setUpdateCheckError('')
+                      void window.codey.checkForUpdates()
+                        .then(setUpdateCheck)
+                        .catch(() => setUpdateCheckError(t('updateCheckFailed')))
+                        .finally(() => setUpdateCheckBusy(false))
+                    }}
+                  >
+                    {updateCheckBusy ? t('checkingForUpdates') : t('checkForUpdates')}
+                  </Button>
+                  {updateCheck?.status === 'ahead' && (
+                    <p className="settings-description" role="status">
+                      {t('updateAhead', { version: updateCheck.latestVersion })}
+                    </p>
+                  )}
+                  {updateCheck?.status === 'current' && (
+                    <p className="settings-description" role="status">
+                      {t('updateCurrent', { version: updateCheck.latestVersion })}
+                    </p>
+                  )}
+                  {updateCheck?.status === 'behind' && (
+                    <Button
+                      appearance="transparent"
+                      onClick={() => void window.codey.openLatestReleasePage().catch(() => setUpdateCheckError(t('unableOpenReleasePage')))}
+                    >
+                      {t('updateBehind', { version: updateCheck.latestVersion })}
+                    </Button>
+                  )}
+                  {updateCheckError && <p className="dialog-error" role="alert">{updateCheckError}</p>}
                 </section>
               )}
               {settingsError && <p className="dialog-error">{settingsError}</p>}
