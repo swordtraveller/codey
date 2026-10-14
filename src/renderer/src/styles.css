@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Codey Mono";
+  src: url("./assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
 :root {
   color-scheme: light;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
@@ -2553,9 +2560,10 @@ h1 {
 .code-reading-header button { flex: none; padding: 6px 10px; border: 1px solid #b8b8b8; border-radius: 5px; background: #fff; cursor: pointer; }
 .code-reading-header button:hover { background: #eef5fc; border-color: #7aa9d9; }
 .code-reading-range { padding: 7px 20px; background: #fffce7; border-bottom: 1px solid #ece5bd; }
-.code-reading-source { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 0 22px; tab-size: 2; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; background: #fcfcfb; }
+.code-reading-source { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 0 22px; tab-size: 2; font: 13px/1.55 "Codey Mono", "Cascadia Code", "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace; font-variant-ligatures: none; background: #fcfcfb; }
+.code-reading-source > code { font: inherit; }
 .code-reading-line { display: grid; grid-template-columns: minmax(4em, auto) minmax(0, 1fr); min-width: max-content; padding-right: 20px; }
 .code-reading-line.target { background: #fff2ad; box-shadow: inset 3px 0 #d99b00; }
-.code-reading-number { user-select: none; padding: 0 14px; color: #8a8a8a; text-align: right; border-right: 1px solid #e7e7e7; }
+.code-reading-number { user-select: none; padding: 0 14px; color: #8a8a8a; text-align: right; border-right: 1px solid #e7e7e7; font: inherit; }
 .code-reading-code { padding-left: 14px; white-space: pre; }
 .syntax-comment { color: #6a737d; font-style: italic; }.syntax-string { color: #a31515; }.syntax-number { color: #098658; }.syntax-keyword { color: #0000a8; font-weight: 600; }

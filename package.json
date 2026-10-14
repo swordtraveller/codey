@@ -92,6 +92,10 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "licenses/JetBrainsMono-OFL.txt",
+        "to": "licenses/JetBrainsMono-OFL.txt"
       }
     ]
   }
