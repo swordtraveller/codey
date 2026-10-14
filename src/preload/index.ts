@@ -1,4 +1,5 @@
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../shared/message-navigation'
+import type { CodeReadViewerData } from '../shared/code-reading'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
@@ -76,6 +77,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('message-navigation:selected', handler)
       return () => ipcRenderer.removeListener('message-navigation:selected', handler)
     },
+    openCodeRead: (projectId: string, conversationId: string, messageId: string, sourceLink: string): Promise<void> => ipcRenderer.invoke('code-reading:open', { projectId, conversationId, messageId, sourceLink }),
+    getCodeReadData: (): Promise<CodeReadViewerData> => ipcRenderer.invoke('code-reading:data'),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getConversationMessages: (projectId: string, conversationId: string, before: string | null = null) => ipcRenderer.invoke('conversations:messages', projectId, conversationId, before),
     listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),

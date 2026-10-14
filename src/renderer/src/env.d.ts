@@ -1,4 +1,5 @@
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../../shared/message-navigation'
+import type { CodeReadViewerData } from '../../shared/code-reading'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import type {
@@ -74,6 +75,8 @@ declare global {
       getMessageNavigationEntries(): Promise<MessageNavigationEntry[]>
       selectMessageNavigation(messageId: string): void
       onMessageNavigation(listener: (target: MessageNavigationTarget) => void): () => void
+      openCodeRead(projectId: string, conversationId: string, messageId: string, sourceLink: string): Promise<void>
+      getCodeReadData(): Promise<CodeReadViewerData>
       getProjects(): Promise<Project[]>
       getConversationMessages(projectId: string, conversationId: string, before?: string | null): Promise<ConversationMessagePage>
       listSkills(): Promise<InstalledSkill[]>

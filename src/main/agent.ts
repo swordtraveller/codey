@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
+import { codeReadLinkPrompt } from '../shared/code-reading'
 import type {
   AgentContextMessage,
   AgentLimitsConfig,
@@ -663,6 +664,7 @@ export function createAgentSystemMessage(
       'Each folder is an independent sandbox root. Every path-based tool requires folder_id and a relative path.',
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and file_write for complete file creation or replacement.',
       'Use file and project tools for general development work.',
+    codeReadLinkPrompt,
       'Some specialized toolsets are hidden to keep the tool list small (python, node, frontend, git). Call find_hidden_toolset with the keyword before attempting work in that domain; the tools are appended from the next request onward for the whole conversation.',
       ...(strategyPrompt ? ['', `Context policy: ${strategyPrompt}`] : []),
       networkAccessEnabled

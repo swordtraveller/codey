@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
 import { registerMessageNavigation } from './message-navigation-window'
+import { registerCodeReadingWindow } from './code-reading-window'
+import { captureCodeReadSnapshots, getCodeReadSnapshot } from './code-reading'
 import { getConversationNavigation } from './workspace'
 import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
@@ -932,7 +934,9 @@ async function developProject(
         .map((block) => block.content)
         .join('\n\n')
       pendingBlocks = []
-      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks)
+      const assistantMessageId = randomUUID()
+      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId)
+      await captureCodeReadSnapshots(project, conversationId, assistantMessageId, content)
     }
     for (const item of result.timeline) {
       if (item.type === 'block') {
@@ -1354,6 +1358,13 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('projects:get', () => getProjectsForRenderer())
   registerMessageNavigation({ getMainWindow: () => mainWindow, getEntries: getConversationNavigation, loadRenderer, icon: getAppIconPath() })
+  registerCodeReadingWindow({
+    getMainWindow: () => mainWindow,
+    getSnapshot: async ({ projectId, conversationId, messageId, sourceLink }) =>
+      getCodeReadSnapshot(await getProject(projectId, conversationId), conversationId, messageId, sourceLink),
+    loadRenderer,
+    icon: getAppIconPath(),
+  })
   ipcMain.handle('conversations:messages', (_event, projectId: string, conversationId: string, before: string | null) => getConversationMessagePage(projectId, conversationId, before))
   ipcMain.handle('skills:list', () => listInstalledSkills())
   ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))

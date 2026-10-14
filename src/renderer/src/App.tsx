@@ -21,7 +21,7 @@ import {
 } from '@fluentui/react-components'
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import Markdown from 'react-markdown'
+import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
@@ -106,6 +106,7 @@ import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
+import { parseCodeReadReference } from '../../shared/code-reading'
 
 const markdownPlugins = [remarkGfm]
 
@@ -415,7 +416,30 @@ function CompressionMessage({ compression }: { compression: ContextCompressionNo
   )
 }
 
-function AssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
+function CodeReadLink({
+  href,
+  children,
+  projectId,
+  conversationId,
+  messageId,
+}: {
+  href?: string
+  children?: ReactNode
+  projectId?: string
+  conversationId?: string
+  messageId?: string
+}): React.JSX.Element {
+  const codeReference = href && parseCodeReadReference(href)
+  if (!codeReference || !projectId || !conversationId || !messageId) return <a href={href}>{children}</a>
+  return <a href={href} onClick={(event) => {
+    event.preventDefault()
+    void window.codey.openCodeRead(projectId, conversationId, messageId, href).catch((error) => {
+      window.alert(`Unable to open code snapshot: ${String(error)}`)
+    })
+  }}>{children}</a>
+}
+
+function AssistantContent({ content, createdAt, projectId, conversationId, messageId }: { content: string; createdAt?: string; projectId?: string; conversationId?: string; messageId?: string }): React.JSX.Element {
   const { t } = useTranslation()
   const fallback = <p>{content}</p>
   const timestamp = formatMessageTime(createdAt)
@@ -437,7 +461,7 @@ function AssistantContent({ content, createdAt }: { content: string; createdAt?:
       {looksLikeMarkdown(content) ? (
         <MarkdownErrorBoundary fallback={fallback}>
           <div className="markdown-content">
-            <Markdown remarkPlugins={markdownPlugins}>{content}</Markdown>
+            <Markdown remarkPlugins={markdownPlugins} urlTransform={(url) => parseCodeReadReference(url) ? url : defaultUrlTransform(url)} components={{ a: ({ href, children }) => <CodeReadLink href={href} projectId={projectId} conversationId={conversationId} messageId={messageId}>{children}</CodeReadLink> }}>{content}</Markdown>
           </div>
         </MarkdownErrorBoundary>
       ) : (
@@ -646,12 +670,12 @@ const ConversationMessage = memo(function ConversationMessage({
           <ModelRequestNotice event={message.modelRequest} />
         ) : block ? (
           block.type === 'content' ? (
-            <MemoAssistantContent content={block.content} createdAt={message.createdAt} />
+            <MemoAssistantContent content={block.content} createdAt={message.createdAt} projectId={projectId} conversationId={conversationId} messageId={message.id} />
           ) : (
             <MemoFunctionCallMessage block={block} projectId={projectId} conversationId={conversationId} />
           )
         ) : message.role === 'assistant' ? (
-          <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
+          <MemoAssistantContent content={message.content} createdAt={message.createdAt} projectId={projectId} conversationId={conversationId} messageId={message.id} />
         ) : (
           <div className="user-message-content">
             <div className="message-card-header">

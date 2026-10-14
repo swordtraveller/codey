@@ -2543,3 +2543,19 @@ h1 {
 .dag-status-blocked { color: #a4262c; background: #fce8e9; border-color: #c65056; }
 .dag-status-finished { color: #107c10; background: #edf7ed; border-color: #5a9f5a; }
 .dag-accessible { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Immutable code snapshots are rendered in an isolated viewer, never in the chat document. */
+.code-reading-window { height: 100vh; overflow: hidden; display: flex; flex-direction: column; box-sizing: border-box; background: #f7f7f5; color: #242424; font-size: 14px; }
+.code-reading-window > p { padding: 20px; }
+.code-reading-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 20px 12px; border-bottom: 1px solid #dededb; background: #fff; }
+.code-reading-header h1 { margin: 0; font-size: 16px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.code-reading-header p, .code-reading-range { margin: 6px 0 0; color: #606060; font-size: 12px; }
+.code-reading-header button { flex: none; padding: 6px 10px; border: 1px solid #b8b8b8; border-radius: 5px; background: #fff; cursor: pointer; }
+.code-reading-header button:hover { background: #eef5fc; border-color: #7aa9d9; }
+.code-reading-range { padding: 7px 20px; background: #fffce7; border-bottom: 1px solid #ece5bd; }
+.code-reading-source { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 0 22px; tab-size: 2; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; background: #fcfcfb; }
+.code-reading-line { display: grid; grid-template-columns: minmax(4em, auto) minmax(0, 1fr); min-width: max-content; padding-right: 20px; }
+.code-reading-line.target { background: #fff2ad; box-shadow: inset 3px 0 #d99b00; }
+.code-reading-number { user-select: none; padding: 0 14px; color: #8a8a8a; text-align: right; border-right: 1px solid #e7e7e7; }
+.code-reading-code { padding-left: 14px; white-space: pre; }
+.syntax-comment { color: #6a737d; font-style: italic; }.syntax-string { color: #a31515; }.syntax-number { color: #098658; }.syntax-keyword { color: #0000a8; font-weight: 600; }
