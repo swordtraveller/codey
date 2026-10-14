@@ -46,8 +46,11 @@ describe('code-reading snapshots', () => {
   })
   afterEach(async () => { await removeTemporaryDirectory(directory) })
 
-  it('persists an immutable snapshot scoped to the assistant message', async () => {
+  it.each(['markdown', 'architecture'])('persists an immutable %s snapshot scoped to the assistant message', async (format) => {
     const link = 'codey://coderead/text?root=source&path=src%2Fentry.ts#L1'
+    const content = format === 'architecture'
+      ? '```architecture\n' + JSON.stringify({ nodes: [{ id: 'entry', label: 'Entry', source: { root: 'source', path: 'src/entry.ts', startLine: 1 } }], edges: [] }) + '\n```'
+      : `[entry](${link})`
     const project = {
       id: 'project', name: 'Project', archived: false, defaultModelConfigId: null,
       contextConfigOverride: null, commandExecutionDefault: null, agentLimitsDefault: null,
@@ -55,9 +58,9 @@ describe('code-reading snapshots', () => {
       folders: [{ id: 'source', path: join(directory, 'project') }], pythonEnvironmentFolderId: null,
       conversations: [{ id: 'conversation', title: '', archived: false, modelConfigId: null, contextConfigOverride: null,
         skillSelection: { include: [], exclude: [] }, knowledgeBaseSelection: { include: [], exclude: [] }, agentLimits: null,
-        commandExecution: null, messages: [{ id: 'assistant-1', role: 'assistant', content: `[entry](${link})`, createdAt: '' }], agentMessages: [] }],
+        commandExecution: null, messages: [{ id: 'assistant-1', role: 'assistant', content, createdAt: '' }], agentMessages: [] }],
     } as unknown as Project
-    await captureCodeReadSnapshots(project, 'conversation', 'assistant-1', `[entry](${link})`)
+    await captureCodeReadSnapshots(project, 'conversation', 'assistant-1', content)
     await writeFile(join(directory, 'project', 'src', 'entry.ts'), 'export const version = 2\n', 'utf8')
     await expect(getCodeReadSnapshot(project, 'conversation', 'assistant-1', link)).resolves.toMatchObject({
       content: 'export const version = 1\n', reference: { path: 'src/entry.ts', startLine: 1 }, language: 'typescript',

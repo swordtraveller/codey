@@ -79,6 +79,10 @@ async function captureReference(project: Project, projectId: string, conversatio
     if (bytes.includes(0)) throw new Error('The referenced file appears to be binary')
     let content: string
     try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { throw new Error('The referenced file is not valid UTF-8 text') }
+    const lineCount = content.split('\n').length
+    if ((reference.startLine ?? 1) > lineCount || (reference.endLine ?? reference.startLine ?? 1) > lineCount) {
+      throw new Error('The referenced line range exceeds the saved file')
+    }
     const id = randomUUID()
     const snapshot: StoredSnapshot = {
       version: 1, id, projectId, conversationId, messageId, sourceLink, reference,
