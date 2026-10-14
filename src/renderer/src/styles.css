@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Codey Mono";
+  src: url("./assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
 :root {
   color-scheme: light;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
@@ -940,6 +947,56 @@ h1 {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.todo-function-call {
+  border-color: #c5d5e9;
+  background: #f8fbff;
+}
+
+.todo-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #dce7f3;
+}
+
+.todo-empty, .todo-error {
+  margin: 0;
+  padding: 5px 0;
+}
+
+.todo-error { color: #a4262c; }
+
+.todo-list {
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  padding: 0;
+  margin: 0;
+}
+
+.todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid #e3eaf2;
+  background: #fff;
+}
+
+.todo-item-new { border-color: #9bbfee; background: #f1f7ff; }
+.todo-status-mark { width: 14px; flex: none; font-size: 14px; font-weight: 700; text-align: center; }
+.todo-item-name { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.todo-item-status { color: #66788b; white-space: nowrap; }
+.todo-status-in_progress { border-left: 3px solid #0f6cbd; }
+.todo-status-finished { color: #107c10; background: #f1faf1; }
+.todo-status-blocked { color: #a4262c; background: #fdf3f4; }
+.todo-status-skipped { color: #777; opacity: .8; }
+.todo-item-deleted { color: #999; border-style: dashed; background: #f8f8f8; }
+.todo-item-deleted .todo-item-name { text-decoration: line-through; }
+.todo-change { padding: 1px 5px; border-radius: 4px; font-size: 10px; white-space: nowrap; }
+.todo-change-added { color: #0f6cbd; background: #e4f1ff; }
+.todo-change-deleted { color: #a4262c; background: #fce8e9; }
 
 .validation-result {
   display: grid;
@@ -2457,3 +2514,76 @@ h1 {
 .resource-unavailable {
   color: var(--colorNeutralForeground3, #707070);
 }
+
+.message-navigation-window { height: 100vh; overflow-y: auto; padding: 20px; box-sizing: border-box; background: #f7f7f5; color: #242424; font-size: 14px; }
+.message-navigation-window h1 { margin: 0 0 16px; font-size: 18px; }
+.message-navigation-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.message-navigation-list button { display: flex; gap: 12px; width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; background: white; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.message-navigation-list button:hover { background: #eef5fc; border-color: #9bbfee; }
+.message-navigation-list button:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
+.message-navigation-number { color: #66788b; flex: none; min-width: 1.5em; }
+.message-navigation-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+
+/* DAG snapshots show current statuses only; additions/removals have no special styling. */
+.dag-function-call { min-width: 0; max-width: 100%; overflow: hidden; }
+.dag-panel { width: 100%; min-width: 0; max-width: 100%; padding: 12px; }
+.dag-legend { display: flex; flex-wrap: wrap; gap: 8px; }
+.dag-legend > span { border: 1px solid; border-radius: 4px; padding: 2px 7px; font-size: 12px; }
+.dag-progress, .dag-footnote { margin: 10px 0; font-size: 12px; color: #616161; }
+.dag-viewport { display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 560px; overflow-x: scroll; overflow-y: auto; scrollbar-gutter: stable; border: 1px solid #e0e0e0; border-radius: 8px; background: #fafafa; }
+.dag-viewport { scrollbar-color: #8a8a8a #ededed; scrollbar-width: auto; }
+.dag-viewport::-webkit-scrollbar { width: 10px; height: 10px; }
+.dag-viewport::-webkit-scrollbar-track { background: #ededed; border-radius: 5px; }
+.dag-viewport::-webkit-scrollbar-thumb { background: #a6a6a6; border: 2px solid #ededed; border-radius: 5px; }
+.dag-viewport::-webkit-scrollbar-thumb:hover { background: #7a7a7a; }
+.dag-viewport:focus-visible, .dag-node:focus-visible { outline: 2px solid #0f6cbd; outline-offset: -2px; }
+.dag-canvas { position: relative; margin: 0 auto; }
+.dag-edges { position: absolute; inset: 0; color: #737373; pointer-events: none; }
+.dag-nodes { margin: 0; padding: 0; list-style: none; }
+.dag-node { position: absolute; padding: 7px 9px; border: 1px solid; border-left-width: 3px; border-radius: 7px; display: flex; flex-direction: column; gap: 2px; }
+.dag-node-status { font-size: 10px; }
+.dag-node-name { font-size: 12px; line-height: 16px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.dag-node-detail { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dag-terminal { border-radius: 24px; align-items: center; justify-content: center; border-left-width: 1px; }
+.dag-status-pending { color: #505050; background: #f0f0f0; border-color: #a0a0a0; }
+.dag-status-in_progress { color: #704d00; background: #fff4ce; border-color: #c19c00; }
+.dag-status-blocked { color: #a4262c; background: #fce8e9; border-color: #c65056; }
+.dag-status-finished { color: #107c10; background: #edf7ed; border-color: #5a9f5a; }
+.dag-accessible { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Immutable code snapshots are rendered in an isolated viewer, never in the chat document. */
+.code-reading-window { height: 100vh; overflow: hidden; display: flex; flex-direction: column; box-sizing: border-box; background: #f7f7f5; color: #242424; font-size: 14px; }
+.code-reading-window > p { padding: 20px; }
+.code-reading-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 20px 12px; border-bottom: 1px solid #dededb; background: #fff; }
+.code-reading-header h1 { margin: 0; font-size: 16px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.code-reading-header p, .code-reading-range { margin: 6px 0 0; color: #606060; font-size: 12px; }
+.code-reading-header button { flex: none; padding: 6px 10px; border: 1px solid #b8b8b8; border-radius: 5px; background: #fff; cursor: pointer; }
+.code-reading-header button:hover { background: #eef5fc; border-color: #7aa9d9; }
+.code-reading-range { padding: 7px 20px; background: #fffce7; border-bottom: 1px solid #ece5bd; }
+.code-reading-source { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 0 22px; tab-size: 2; font: 13px/1.55 "Codey Mono", "Cascadia Code", "Cascadia Mono", "Segoe UI Mono", Consolas, "Liberation Mono", monospace; font-variant-ligatures: none; background: #fcfcfb; }
+.code-reading-source > code { font: inherit; }
+.code-reading-line { display: grid; grid-template-columns: minmax(4em, auto) minmax(0, 1fr); min-width: max-content; padding-right: 20px; }
+.code-reading-line.target { background: #fff2ad; box-shadow: inset 3px 0 #d99b00; }
+.code-reading-number { user-select: none; padding: 0 14px; color: #8a8a8a; text-align: right; border-right: 1px solid #e7e7e7; font: inherit; }
+.code-reading-code { padding-left: 14px; white-space: pre; }
+.syntax-comment { color: #6a737d; font-style: italic; }.syntax-string { color: #a31515; }.syntax-number { color: #098658; }.syntax-keyword { color: #0000a8; font-weight: 600; }
+
+/* Architecture diagrams share the execution graph canvas, but have no task status semantics. */
+.architecture-panel { min-width: 0; max-width: 100%; margin: 12px 0; padding: 12px; border: 1px solid #d6dee6; border-radius: 8px; background: #fff; }
+.architecture-heading { color: #243b53; }
+.architecture-hint { margin: 8px 0 !important; color: #606d7a; font-size: 12px; }
+.architecture-nodes { margin: 0 !important; padding: 0 !important; list-style: none; }
+.architecture-node { position: absolute; margin: 0 !important; padding: 0 !important; }
+.architecture-node > button, .architecture-concept { display: flex; flex-direction: column; justify-content: center; gap: 4px; width: 100%; height: 100%; padding: 8px 10px; border: 1px solid #8da9c4; border-radius: 7px; background: #f0f6fc; color: #243b53; text-align: left; font: inherit; }
+.architecture-node > button { cursor: pointer; }
+.architecture-node > button:hover:enabled { background: #deedfc; border-color: #0f6cbd; }
+.architecture-node > button:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
+.architecture-node > button:disabled { cursor: default; opacity: .7; }
+.architecture-concept { border-style: dashed; border-color: #adb5bd; background: #f6f6f6; color: #505b66; }
+.architecture-node-label { font-size: 13px; line-height: 17px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.architecture-node-description, .architecture-node-source { display: block; width: 100%; font-size: 11px; line-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.architecture-node-source { color: #0f6cbd; }
+.graph-edge-label { fill: #506274; font: 11px "Segoe UI", sans-serif; paint-order: stroke; stroke: #fafafa; stroke-width: 4px; stroke-linejoin: round; }
+.architecture-relations { margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.architecture-relations summary { cursor: pointer; color: #506274; }
+.architecture-error, .architecture-invalid > p { color: #a4262c; overflow-wrap: anywhere; }

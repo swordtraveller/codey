@@ -1,6 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './i18n'
+import { MessageNavigationApp } from './MessageNavigationApp'
+import { CodeReadingApp } from './CodeReadingApp'
 import { App } from './App'
 import { ContextDebugApp } from './ContextDebugApp'
 import { PerformanceTraceApp } from './PerformanceTraceApp'
@@ -11,7 +13,11 @@ const root = document.querySelector<HTMLDivElement>('#root')
 if (!root) throw new Error('Application root was not found')
 
 const params = new URLSearchParams(window.location.search)
-const content = params.get('view') === 'context-debug'
+const content = params.get('view') === 'message-navigation'
+  ? <MessageNavigationApp />
+  : params.get('view') === 'coderead'
+  ? <CodeReadingApp />
+  : params.get('view') === 'context-debug'
   ? <ContextDebugApp
       projectId={params.get('projectId') ?? ''}
       conversationId={params.get('conversationId') ?? ''}

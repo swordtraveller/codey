@@ -1,3 +1,5 @@
+import type { MessageNavigationEntry, MessageNavigationTarget } from '../shared/message-navigation'
+import type { CodeReadViewerData } from '../shared/code-reading'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
@@ -67,6 +69,16 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('models:test-provider', provider),
     listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
       ipcRenderer.invoke('models:list-provider-models', provider),
+    openMessageNavigation: (projectId: string, conversationId: string): Promise<void> => ipcRenderer.invoke('message-navigation:open', projectId, conversationId),
+    getMessageNavigationEntries: (): Promise<MessageNavigationEntry[]> => ipcRenderer.invoke('message-navigation:entries'),
+    selectMessageNavigation: (messageId: string): void => { ipcRenderer.send('message-navigation:select', messageId) },
+    onMessageNavigation: (listener: (target: MessageNavigationTarget) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, target: MessageNavigationTarget): void => listener(target)
+      ipcRenderer.on('message-navigation:selected', handler)
+      return () => ipcRenderer.removeListener('message-navigation:selected', handler)
+    },
+    openCodeRead: (projectId: string, conversationId: string, messageId: string, sourceLink: string): Promise<void> => ipcRenderer.invoke('code-reading:open', { projectId, conversationId, messageId, sourceLink }),
+    getCodeReadData: (): Promise<CodeReadViewerData> => ipcRenderer.invoke('code-reading:data'),
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getConversationMessages: (projectId: string, conversationId: string, before: string | null = null) => ipcRenderer.invoke('conversations:messages', projectId, conversationId, before),
     listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),
@@ -201,8 +213,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('conversations:set-archived', projectId, conversationId, archived),
     setConversationReadState: (projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) =>
       ipcRenderer.invoke('conversations:set-read-state', projectId, conversationId, lastReadMessageId, lastReadAt),
-    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) =>
-      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, attachments, traceId),
+    develop: (projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string, continueFromMessageId?: string) =>
+      ipcRenderer.invoke('development:send', projectId, conversationId, content, images, attachments, traceId, continueFromMessageId),
     screenshot: (hideWindow: boolean) => ipcRenderer.invoke('clipboard:screenshot', hideWindow),
     onScreenshotSource: (listener: (source: ScreenshotSource) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, source: ScreenshotSource) => listener(source)

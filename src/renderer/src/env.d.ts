@@ -1,3 +1,5 @@
+import type { MessageNavigationEntry, MessageNavigationTarget } from '../../shared/message-navigation'
+import type { CodeReadViewerData } from '../../shared/code-reading'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import type {
@@ -69,6 +71,12 @@ declare global {
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>
       testProviderConnectivity(provider: { baseUrl: string; apiKey: string }): Promise<ModelConnectivityResult>
       listProviderModels(provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }>
+      openMessageNavigation(projectId: string, conversationId: string): Promise<void>
+      getMessageNavigationEntries(): Promise<MessageNavigationEntry[]>
+      selectMessageNavigation(messageId: string): void
+      onMessageNavigation(listener: (target: MessageNavigationTarget) => void): () => void
+      openCodeRead(projectId: string, conversationId: string, messageId: string, sourceLink: string): Promise<void>
+      getCodeReadData(): Promise<CodeReadViewerData>
       getProjects(): Promise<Project[]>
       getConversationMessages(projectId: string, conversationId: string, before?: string | null): Promise<ConversationMessagePage>
       listSkills(): Promise<InstalledSkill[]>
@@ -156,6 +164,7 @@ declare global {
         images?: ImageAttachment[],
         attachments?: MediaAttachment[],
         traceId?: string,
+        continueFromMessageId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
       subscribeDevelopmentProgress(

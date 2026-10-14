@@ -29,6 +29,16 @@ export class ConversationPageLoader {
     this.optimistic = { message, previousUserId: [...this.state.messages].reverse().find((item) => item.role === 'user')?.id }
     this.update({ messages: [...this.state.messages, message] })
   }
+  ensureMessage = async (id: string, cancelled: () => boolean = () => false): Promise<void> => {
+    if (!this.state.loaded) await this.refresh()
+    while (!cancelled() && !this.state.messages.some((message) => message.id === id)) {
+      const before = this.state.before
+      if (!before) throw new Error('Conversation message no longer exists')
+      await this.loadOlder()
+      if (this.state.error) throw new Error(this.state.error)
+      if (this.state.before === before) throw new Error('Conversation pagination made no progress')
+    }
+  }
   retry = (): Promise<void> => this.failedOperation === 'older' ? this.loadOlder() : this.refresh()
   refresh = async (): Promise<void> => {
     const version = ++this.refreshVersion

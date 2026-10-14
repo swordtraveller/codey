@@ -1,6 +1,6 @@
 {
   "name": "codey",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "A desktop app for conversation, work and coding.",
   "main": "out/main/index.js",
   "license": "Apache-2.0",
@@ -92,6 +92,10 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "licenses/JetBrainsMono-OFL.txt",
+        "to": "licenses/JetBrainsMono-OFL.txt"
       }
     ]
   }

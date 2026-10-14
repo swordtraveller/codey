@@ -8,5 +8,5 @@ export function useConversationMessages(projectId: string | undefined, conversat
   }), [projectId, conversationId])
   const state = useSyncExternalStore(loader.subscribe, loader.getSnapshot, loader.getSnapshot)
   useEffect(() => { if (conversationId) void loader.refresh() }, [loader, conversationId, revision])
-  return { ...state, retry: loader.retry, loadOlder: loader.loadOlder, refresh: loader.refresh, addOptimistic: (message: Parameters<ConversationPageLoader['addOptimistic']>[0]) => loader.addOptimistic(message) }
+  return { ...state, ensureMessage: loader.ensureMessage, retry: loader.retry, loadOlder: loader.loadOlder, refresh: loader.refresh, addOptimistic: (message: Parameters<ConversationPageLoader['addOptimistic']>[0]) => loader.addOptimistic(message) }
 }

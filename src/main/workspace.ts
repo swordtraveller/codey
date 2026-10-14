@@ -1,3 +1,4 @@
+import { messageNavigationPreview, type MessageNavigationEntry } from '../shared/message-navigation'
 import { conversationReadState, readMessageMetadata, type ReadMessage } from '../shared/conversation-read-state'
 import { createHash, randomUUID } from 'node:crypto'
 import { app } from 'electron'
@@ -130,6 +131,11 @@ function projectPath(projectId: string): string {
 
 function conversationPath(projectId: string, conversationId: string): string {
   return join(storageRoot(), 'projects', key(projectId), 'conversations', `${key(conversationId)}.json`)
+}
+
+/** Stored beside the conversation shard; IDs are encoded as data, never interpolated as paths. */
+export function taskRunJournalPath(projectId: string, conversationId: string): string {
+  return `${conversationPath(projectId, conversationId)}.task-runs.jsonl`
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -423,6 +429,21 @@ export async function getConversationMessagePage(projectId: string, conversation
     })))
     : conversation.messages.slice(start, end)
   return { messages, before: start > 0 ? entries[start].id : null, revision: history.revision }
+}
+
+/** Read only user records, without hydrating attachment payloads or loading assistant history. */
+export async function getConversationNavigation(projectId: string, conversationId: string): Promise<MessageNavigationEntry[]> {
+  const project = await findProject(projectId)
+  const conversation = findConversation(project, conversationId)
+  const path = conversationPath(projectId, conversationId)
+  const state = historyStates.get(path)
+  const messages = state && !state.loaded
+    ? await readMessageRecords<PersistedChatMessage>(path + '.records', state.index.messages.filter((message) => message.role === 'user'))
+    : conversation.messages.filter((message) => message.role === 'user')
+  return messages.map((message) => ({
+    id: message.id, createdAt: message.createdAt,
+    preview: messageNavigationPreview(message.content || message.attachments?.map((attachment) => attachment.name).join(', ') || ''),
+  }))
 }
 
 async function persistProjectMetadata(project: Project): Promise<void> {

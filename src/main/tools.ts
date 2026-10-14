@@ -1,3 +1,5 @@
+import { dagToolDefinition } from './dag-tool'
+import { todoToolDefinition } from './todo-tool'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { commandExecutionSupported, defaultCommandReviewConfig, supportedCommandCombos, type CommandEnvironment, type CommandExecutionConfig, type CommandInterpreter, type CommandReviewStep, type Project, type ProjectFolder, type ShellDetectionResult } from '../shared/types'
@@ -1145,6 +1147,8 @@ export function createAgentTools(project: Project, networkAccessEnabled = false,
   return [
     ...webTools,
     ...commandTools,
+    todoToolDefinition,
+    dagToolDefinition,
     { type: 'function', function: { name: 'find_hidden_toolset', description: 'Unlock a hidden toolset by keyword. Hidden toolsets contain specialized tools (currently: python, node, frontend, git). The unlocked tools are appended to your tool list from the next request onward and stay unlocked for the whole conversation. Call this before attempting work that needs a specialized tool; the returned JSON lists matched toolsets.', parameters: { type: 'object', properties: { keyword: { type: 'string', minLength: 1, maxLength: 100, description: 'The toolset keyword to unlock, e.g. "python".' } }, required: ['keyword'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_search', description: 'Search indexed conversation Cold truth and summary records. Returns metadata only; use context_read for content.', parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false } } },
     { type: 'function', function: { name: 'context_read', description: 'Read selected conversation context records. Truth records are authoritative; summaries are explicitly lossy and non-authoritative.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 } }, required: ['ids'], additionalProperties: false } } },

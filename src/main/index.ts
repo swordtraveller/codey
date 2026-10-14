@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
+import { registerMessageNavigation } from './message-navigation-window'
+import { registerCodeReadingWindow } from './code-reading-window'
+import { captureCodeReadSnapshots, getCodeReadSnapshot } from './code-reading'
+import { getConversationNavigation } from './workspace'
 import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -44,6 +48,9 @@ import {
   createDevelopmentProgressState,
 } from '../shared/development-progress'
 import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
+import { TaskRunJournal } from './task-run-journal'
+import { createDagToolProvider } from './dag-tool'
+import { createTodoToolProvider } from './todo-tool'
 import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
 import { checkForUpdates, latestReleasePageUrl } from './update-check'
@@ -130,6 +137,7 @@ import {
   setProjectKnowledgeBaseSelection,
   updateConversationAgentMessages,
   updateConversationTurn,
+  taskRunJournalPath,
 } from './workspace'
 import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
 import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
@@ -686,6 +694,7 @@ async function developProject(
   startedAt = Date.now(),
   onProjectUpdated?: (project: Project) => void,
   traceId: string = randomUUID(),
+  continueFromMessageId?: string,
 ): Promise<DevelopmentResult> {
   const totalStartedAt = performance.now()
   const normalizedContent = content.trim()
@@ -766,6 +775,15 @@ async function developProject(
     }
   }
 
+  const lastUserMessage = [...conversation.messages].reverse().find((message) => message.role === 'user')
+  if (continueFromMessageId && continueFromMessageId !== lastUserMessage?.id) {
+    return { project, writtenFiles: [], error: 'Continue must reference the latest user message' }
+  }
+  const journal = await TaskRunJournal.open(taskRunJournalPath(projectId, conversationId))
+  const parent = continueFromMessageId ? journal.findRunByUserMessage(continueFromMessageId) : undefined
+  const runId = randomUUID()
+  const continuedFromRunId = parent?.runId
+  const taskId = parent?.type === 'run-started' ? parent.taskId : runId
   const userMessageId = randomUUID()
   const currentUserMessage = {
     id: userMessageId,
@@ -785,7 +803,7 @@ async function developProject(
     undefined,
     createModelConfigSnapshot(modelConfig),
     contextConfig,
-    { startedAt, result: 'processing' },
+    { startedAt, result: 'processing', runId, taskId, continuedFromRunId },
     images,
     attachments,
     userMessageId,
@@ -801,156 +819,189 @@ async function developProject(
   // The latest message is supplied directly to context reads below, so no
   // context-store write needs to delay the first model request.
 
-  const roundId = randomUUID()
-  const roundCount = conversation.agentMessages.filter((message) => message.role === 'user').length + 1
-  const contextReadStartedAt = performance.now()
-  const requestHistory = contextConfig.layeredEnabled
-    ? await readConversationWorkingSet(
-        projectId,
-        conversationId,
-        contextConfig,
-        normalizedContent,
-        [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
-        getPromotedHotMessages(projectId, conversationId),
-        conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
-        userMessageId,
-        currentUserMessage,
-        roundId,
-      )
-    : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
-  recordPerformanceTrace({
-    traceId, scope: 'main', phase: 'context-read', projectId, conversationId,
-    durationMs: performance.now() - contextReadStartedAt,
-    data: { messageCount: requestHistory.length, layered: contextConfig.layeredEnabled },
-  })
-  if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
-    return { project, writtenFiles: [], error: 'Latest user message is missing from the conversation working set' }
-  }
-  const contextPersistStartedAt = performance.now()
-  const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
-    .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
-    .catch((error) => log.warn('context.latest-user.persist.failed', error))
-  recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
-  const mcpProvider = await createMcpToolProvider(
-    appConfig.mcpServers,
-    project.folders[0]?.path,
-    signal,
-    (server, error) => log.warn('mcp.connect.failed', {
-      serverId: server.id,
-      serverName: server.name,
-      error,
-    }),
-  )
-  let result: Awaited<ReturnType<typeof develop>>
+  let runStarted = false
+  let runFinished = false
   try {
-    result = await develop(
-      project,
-      modelConfig,
-      contextConfig,
-      agentLimits,
-      requestHistory,
-      onProgress,
-      (managed) => {
-        const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
-        rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
-      },
-      {
-        conversationId,
-        projectId,
-        traceId,
-        signal,
-        latestUserMessageId: userMessageId,
-        allowCustomStrategy,
-        roundId,
-        roundCount,
-        commandExecution,
-        commandRuntime,
-        shellDetection: getCachedShellDetection(),
-        enabledSkills,
-        enabledKnowledgeBases,
-        mcpProvider,
-        hotLongTermContent: conversation.hotLongTermContent ?? '',
-        onHotLongTermUpdated: async (content: string) => {
-          project = await updateConversationHotLongTermContent(projectId, conversationId, content)
-        },
-        unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
-        onToolsetUnlocked: (keyword: string) => {
-          // Persist the unlock so it survives app restarts and conversation
-          // reopenings, like the conversation context itself.
-          void unlockConversationToolset(projectId, conversationId, keyword)
-            .then((updated) => { project = updated })
-            .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
-        },
-      },
-      appConfig.networkAccessEnabled,
+    await journal.append(runId, { type: 'run-started', userMessageId, taskId, continuedFromRunId })
+    runStarted = true
+    const roundId = runId
+    const roundCount = conversation.agentMessages.filter((message) => message.role === 'user').length + 1
+    const contextReadStartedAt = performance.now()
+    const requestHistory = contextConfig.layeredEnabled
+      ? await readConversationWorkingSet(
+          projectId,
+          conversationId,
+          contextConfig,
+          normalizedContent,
+          [...conversation.agentMessages.filter((message) => message.contextLayer === 'warm'), ...getRememberedWarmMessages(projectId, conversationId)],
+          getPromotedHotMessages(projectId, conversationId),
+          conversation.agentMessages.filter((message) => message.contextLayer !== 'warm'),
+          userMessageId,
+          currentUserMessage,
+          roundId,
+        )
+      : await readConversationMessages(projectId, conversationId, [...conversation.agentMessages, currentUserMessage])
+    recordPerformanceTrace({
+      traceId, scope: 'main', phase: 'context-read', projectId, conversationId,
+      durationMs: performance.now() - contextReadStartedAt,
+      data: { messageCount: requestHistory.length, layered: contextConfig.layeredEnabled },
+    })
+    if (!requestHistory.some((message) => message.id === userMessageId && message.role === 'user')) {
+      throw new Error('Latest user message is missing from the conversation working set')
+    }
+    const contextPersistStartedAt = performance.now()
+    const latestContextWrite = appendConversationMessages(projectId, conversationId, [currentUserMessage])
+      .then(() => recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist', projectId, conversationId, durationMs: performance.now() - contextPersistStartedAt }))
+      .catch((error) => log.warn('context.latest-user.persist.failed', error))
+    recordPerformanceTrace({ traceId, scope: 'main', phase: 'context-persist-enqueue', projectId, conversationId })
+    const mcpProvider = await createMcpToolProvider(
+      appConfig.mcpServers,
+      project.folders[0]?.path,
+      signal,
+      (server, error) => log.warn('mcp.connect.failed', {
+        serverId: server.id,
+        serverName: server.name,
+        error,
+      }),
     )
-  } finally {
-    await mcpProvider.close?.()
-  }
-  project = await saveConversationContext(
-    projectId,
-    conversationId,
-    result.agentMessages,
-    result.context,
-  )
-  try {
-    await latestContextWrite
-    await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
-  } catch (error) {
-    log.warn('context.debug.persist.failed', error)
-  }
-  let pendingBlocks: AssistantMessageBlock[] = []
-  const savePendingBlocks = async (): Promise<void> => {
-    if (pendingBlocks.length === 0) return
-    const messageBlocks = pendingBlocks
-    const content = messageBlocks
-      .filter((block) => block.type === 'content')
-      .map((block) => block.content)
-      .join('\n\n')
-    pendingBlocks = []
-    project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks)
-  }
-  for (const item of result.timeline) {
-    if (item.type === 'block') {
-      pendingBlocks.push(item.block)
-      continue
+    let result: Awaited<ReturnType<typeof develop>>
+    try {
+      result = await develop(
+        project,
+        modelConfig,
+        contextConfig,
+        agentLimits,
+        requestHistory,
+        onProgress,
+        (managed) => {
+          const snapshot = buildContextDebugSnapshot(managed, contextConfig, randomUUID(), roundId, roundCount)
+          rememberSnapshot(projectId, conversationId, snapshot, [...managed.messages, ...managed.warmMessages], managed.summaryArtifacts, managed.actions)
+        },
+        {
+          conversationId,
+          projectId,
+          traceId,
+          signal,
+          latestUserMessageId: userMessageId,
+          allowCustomStrategy,
+          roundId,
+          roundCount,
+          commandExecution,
+          commandRuntime,
+          shellDetection: getCachedShellDetection(),
+          enabledSkills,
+          enabledKnowledgeBases,
+          mcpProvider,
+          todoProvider: createTodoToolProvider(journal, runId, taskId),
+          dagProvider: createDagToolProvider(journal, runId, taskId),
+          onRunEvent: async (payload) => { await journal.append(runId, payload) },
+          hotLongTermContent: conversation.hotLongTermContent ?? '',
+          onHotLongTermUpdated: async (content: string) => {
+            project = await updateConversationHotLongTermContent(projectId, conversationId, content)
+          },
+          unlockedToolsets: [...(conversation.unlockedToolsets ?? [])],
+          onToolsetUnlocked: (keyword: string) => {
+            // Persist the unlock so it survives app restarts and conversation
+            // reopenings, like the conversation context itself.
+            void unlockConversationToolset(projectId, conversationId, keyword)
+              .then((updated) => { project = updated })
+              .catch((error) => log.warn('conversation.toolset.unlock.failed', { projectId, conversationId, keyword, error }))
+          },
+        },
+        appConfig.networkAccessEnabled,
+      )
+    } finally {
+      await mcpProvider.close?.()
+    }
+    project = await saveConversationContext(
+      projectId,
+      conversationId,
+      result.agentMessages,
+      result.context,
+    )
+    try {
+      await latestContextWrite
+      await persistContextDebugMessages(projectId, conversationId, result.agentMessages, result.summaryArtifacts)
+    } catch (error) {
+      log.warn('context.debug.persist.failed', error)
+    }
+    let pendingBlocks: AssistantMessageBlock[] = []
+    const savePendingBlocks = async (): Promise<void> => {
+      if (pendingBlocks.length === 0) return
+      const messageBlocks = pendingBlocks
+      const content = messageBlocks
+        .filter((block) => block.type === 'content')
+        .map((block) => block.content)
+        .join('\n\n')
+      pendingBlocks = []
+      const assistantMessageId = randomUUID()
+      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId)
+      await captureCodeReadSnapshots(project, conversationId, assistantMessageId, content)
+    }
+    for (const item of result.timeline) {
+      if (item.type === 'block') {
+        pendingBlocks.push(item.block)
+        continue
+      }
+      await savePendingBlocks()
+      project = item.type === 'compression'
+        ? await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
+        : await addModelRequestEvent(projectId, conversationId, item.event)
     }
     await savePendingBlocks()
-    project = item.type === 'compression'
-      ? await addMessage(projectId, conversationId, 'assistant', '', undefined, item.compression)
-      : await addModelRequestEvent(projectId, conversationId, item.event)
-  }
-  await savePendingBlocks()
-  const turn: ConversationTurnRecord = {
-    startedAt,
-    endedAt: Date.now(),
-    result: result.stopped ? 'stopped' : result.error ? (/timed out|timeout/i.test(result.error) ? 'timeout' : 'other') : 'normal',
-    error: result.stopped ? undefined : result.error,
-  }
-  project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
-  recordPerformanceTrace({
-    traceId, scope: 'main', phase: 'develop-total', projectId, conversationId,
-    durationMs: performance.now() - totalStartedAt,
-    data: { result: turn.result, timelineItems: result.timeline.length },
-  })
-  if (turn.result === 'normal') {
-    notificationManager.showNotification({
-      type: 'task-complete',
-      title: 'Task completed',
-      body: conversation.title || 'Development finished',
-      projectId,
-      conversationId,
+    const turn: ConversationTurnRecord = {
+      runId, taskId, continuedFromRunId,
+      startedAt,
+      endedAt: Date.now(),
+      result: result.stopped ? 'stopped' : result.error ? (/timed out|timeout/i.test(result.error) ? 'timeout' : 'other') : 'normal',
+      error: result.stopped ? undefined : result.error,
+    }
+    project = await updateConversationTurn(projectId, conversationId, userMessageId, turn)
+    await journal.append(runId, { type: 'run-finished', status: result.stopped ? 'stopped' : result.error ? 'failed' : 'normal', error: result.error })
+    runFinished = true
+    recordPerformanceTrace({
+      traceId, scope: 'main', phase: 'develop-total', projectId, conversationId,
+      durationMs: performance.now() - totalStartedAt,
+      data: { result: turn.result, timelineItems: result.timeline.length },
     })
-  } else if (result.error && turn.result !== 'stopped') {
-    notificationManager.showNotification({
-      type: 'task-failed',
-      title: 'Task failed',
-      body: result.error,
-      projectId,
-      conversationId,
-    })
+    if (turn.result === 'normal') {
+      notificationManager.showNotification({
+        type: 'task-complete',
+        title: 'Task completed',
+        body: conversation.title || 'Development finished',
+        projectId,
+        conversationId,
+      })
+    } else if (result.error && turn.result !== 'stopped') {
+      notificationManager.showNotification({
+        type: 'task-failed',
+        title: 'Task failed',
+        body: result.error,
+        projectId,
+        conversationId,
+      })
+    }
+    return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
+  } catch (error) {
+    // A notification failure after persistence must not rewrite a completed run.
+    if (!runFinished) {
+      const message = error instanceof Error ? error.message : 'Development failed'
+      if (runStarted) {
+        await journal.append(runId, { type: 'run-finished', status: signal?.aborted ? 'stopped' : 'failed', error: message })
+          .catch((journalError) => log.error('task-run.finish.write-failed', journalError))
+      }
+      try {
+        project = await updateConversationTurn(projectId, conversationId, userMessageId, {
+          runId, taskId, continuedFromRunId, startedAt, endedAt: Date.now(),
+          result: signal?.aborted ? 'stopped' : 'other', error: message,
+        })
+        onProjectUpdated?.(project)
+      } catch (persistError) {
+        log.error('task-run.turn.write-failed', persistError)
+      }
+    }
+    throw error
   }
-  return { project, writtenFiles: result.writtenFiles, stopped: result.stopped, error: result.error }
 }
 
 async function processBridgeMessage(message: import('../shared/bridge').HandoverUserMessage): Promise<boolean> {
@@ -1306,6 +1357,14 @@ app.whenReady().then(() => {
     notificationManager.updateSettings(saved.notificationSettings)
   })
   ipcMain.handle('projects:get', () => getProjectsForRenderer())
+  registerMessageNavigation({ getMainWindow: () => mainWindow, getEntries: getConversationNavigation, loadRenderer, icon: getAppIconPath() })
+  registerCodeReadingWindow({
+    getMainWindow: () => mainWindow,
+    getSnapshot: async ({ projectId, conversationId, messageId, sourceLink }) =>
+      getCodeReadSnapshot(await getProject(projectId, conversationId), conversationId, messageId, sourceLink),
+    loadRenderer,
+    icon: getAppIconPath(),
+  })
   ipcMain.handle('conversations:messages', (_event, projectId: string, conversationId: string, before: string | null) => getConversationMessagePage(projectId, conversationId, before))
   ipcMain.handle('skills:list', () => listInstalledSkills())
   ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))
@@ -1539,7 +1598,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
-  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string) => {
+  ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string, continueFromMessageId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
@@ -1554,7 +1613,7 @@ app.whenReady().then(() => {
         publishDevelopmentProgress(event.sender, projectId, conversationId, update)
       }, controller.signal, startedAt, (project) => {
         if (!event.sender.isDestroyed()) event.sender.send('project:updated', projectForRenderer(project))
-      }, traceId)
+      }, traceId, continueFromMessageId)
       if (!result.error && !result.stopped) {
         void bridgeHandover.sync(getProjects).catch((error) => log.warn('bridge.sync.failed', error))
       }

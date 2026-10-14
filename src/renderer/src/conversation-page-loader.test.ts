@@ -90,3 +90,33 @@ describe('conversation page cache', () => {
   })
 
 })
+
+
+describe('navigation target loading', () => {
+  it('loads older pages until the target is available and retains the current tail', async () => {
+    const requests: Array<string | null> = []
+    const loader = new ConversationPageLoader(async (before) => {
+      requests.push(before)
+      return before === '5' ? page(['3', '4'], '3') : before === '3' ? page(['1', '2']) : page(['5', '6'], '5')
+    })
+    await loader.ensureMessage('2')
+    expect(requests).toEqual([null, '5', '3'])
+    expect(loader.getSnapshot().messages.map((item) => item.id)).toEqual(['1', '2', '3', '4', '5', '6'])
+    await loader.ensureMessage('5')
+    expect(requests).toHaveLength(3)
+    await expect(loader.ensureMessage('missing')).rejects.toThrow('no longer exists')
+  })
+  it('stops on errors, allows retry, and does not keep loading after cancellation', async () => {
+    let fail = true
+    const loader = new ConversationPageLoader(async (before) => {
+      if (!before) return page(['5'], '5')
+      if (fail) throw new Error('read failed')
+      return page(['1'])
+    })
+    await expect(loader.ensureMessage('1')).rejects.toThrow('read failed')
+    fail = false
+    await loader.ensureMessage('1')
+    expect(loader.getSnapshot().messages[0].id).toBe('1')
+    await expect(loader.ensureMessage('missing', () => true)).resolves.toBeUndefined()
+  })
+})

@@ -1,3 +1,4 @@
+import type { MessageNavigationTarget } from '../../shared/message-navigation'
 import { conversationReadState } from '../../shared/conversation-read-state'
 import {
   Button,
@@ -20,8 +21,6 @@ import {
 } from '@fluentui/react-components'
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type ErrorInfo, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
 import { isContextConfigValidForModel, isValidContextManagementConfig } from '../../shared/context-validation'
@@ -67,6 +66,9 @@ import { ConversationHistory } from './ConversationHistory'
 import { useConversationMessages } from './useConversationMessages'
 import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
 import { LazyDetails } from './components/LazyDetails'
+import { PlanCardsProvider } from './components/PlanCardsProvider'
+import { renderSpecializedToolCard } from './components/ToolCards'
+import { latestPlanCardId } from './components/todo-card-state'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -102,8 +104,7 @@ import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
-
-const markdownPlugins = [remarkGfm]
+import { CodeReadMarkdown } from './components/CodeReadMarkdown'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
 
@@ -189,7 +190,7 @@ function formatToolOutput(parameters: string): string {
 }
 
 function looksLikeMarkdown(content: string): boolean {
-  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|```|>\s)|\*\*[^*]+\*\*|`[^`]+`|\[[^]]+\]\([^)]+\)|(^|\n)\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?/.test(content)
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|```|~~~|>\s)|\*\*[^*]+\*\*|`[^`]+`|\[[^]]+\]\([^)]+\)|(^|\n)\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?/.test(content)
 }
 
 class MarkdownErrorBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { hasError: boolean }> {
@@ -411,7 +412,7 @@ function CompressionMessage({ compression }: { compression: ContextCompressionNo
   )
 }
 
-function AssistantContent({ content, createdAt }: { content: string; createdAt?: string }): React.JSX.Element {
+function AssistantContent({ content, createdAt, projectId, conversationId, messageId }: { content: string; createdAt?: string; projectId?: string; conversationId?: string; messageId?: string }): React.JSX.Element {
   const { t } = useTranslation()
   const fallback = <p>{content}</p>
   const timestamp = formatMessageTime(createdAt)
@@ -432,9 +433,7 @@ function AssistantContent({ content, createdAt }: { content: string; createdAt?:
       </div>
       {looksLikeMarkdown(content) ? (
         <MarkdownErrorBoundary fallback={fallback}>
-          <div className="markdown-content">
-            <Markdown remarkPlugins={markdownPlugins}>{content}</Markdown>
-          </div>
+          <CodeReadMarkdown content={content} projectId={projectId} conversationId={conversationId} messageId={messageId} />
         </MarkdownErrorBoundary>
       ) : (
         fallback
@@ -547,6 +546,9 @@ function FunctionCallMessage({
     }
   }
 
+  const specialized = renderSpecializedToolCard(block)
+  if (specialized) return specialized
+
   return (
     <LazyDetails className={`function-call${block.resultError ? ' tool-error' : ''}`} summary={<>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</>}>
       {() => <>
@@ -639,12 +641,12 @@ const ConversationMessage = memo(function ConversationMessage({
           <ModelRequestNotice event={message.modelRequest} />
         ) : block ? (
           block.type === 'content' ? (
-            <MemoAssistantContent content={block.content} createdAt={message.createdAt} />
+            <MemoAssistantContent content={block.content} createdAt={message.createdAt} projectId={projectId} conversationId={conversationId} messageId={message.id} />
           ) : (
             <MemoFunctionCallMessage block={block} projectId={projectId} conversationId={conversationId} />
           )
         ) : message.role === 'assistant' ? (
-          <MemoAssistantContent content={message.content} createdAt={message.createdAt} />
+          <MemoAssistantContent content={message.content} createdAt={message.createdAt} projectId={projectId} conversationId={conversationId} messageId={message.id} />
         ) : (
           <div className="user-message-content">
             <div className="message-card-header">
@@ -1150,6 +1152,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn,
   scrollContainerRef,
   shouldStickToBottom,
+  scrollRequest,
   lastUserMessageId,
   onContinue,
 }: {
@@ -1161,6 +1164,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn?: ConversationTurn
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
+  scrollRequest?: { messageId: string; requestId: number }
   lastUserMessageId?: string
   onContinue?: () => void
 }): React.JSX.Element {
@@ -1174,35 +1178,39 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const historyRows = useMemo(() => conversationHistoryRows(messages), [messages])
   const rows = useMemo(() => mergeConversationRows(historyRows, conversationLiveRows(progress, messages)), [historyRows, progress, messages])
+  const latestPlanId = useMemo(() => latestPlanCardId(rows), [rows])
   const createdAt = conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined
   return (
-    <ConversationHistory
-      messages={messages}
-      pagination={pagination}
-      onRead={onRead}
-      rows={rows}
-      scrollContainerRef={scrollContainerRef}
-      shouldStickToBottom={shouldStickToBottom}
-      renderLoadOlder={(loadOlder, count) => (
-        <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
-          {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
-        </Button>
-      )}
-      renderRow={(row) => row.kind === 'message' ? (
-        <ConversationMessage
-          message={row.message}
-          block={row.block}
-          messages={messages}
-          projectId={projectId}
-          conversationId={conversationId}
-          conversationTurn={conversationTurn}
-          showContinue={row.message.id === lastUserMessageId}
-          onContinue={onContinue}
-        />
-      ) : (
-        <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
-      )}
-    />
+    <PlanCardsProvider latestId={latestPlanId}>
+      <ConversationHistory
+        messages={messages}
+        pagination={pagination}
+        onRead={onRead}
+        rows={rows}
+        scrollContainerRef={scrollContainerRef}
+        shouldStickToBottom={shouldStickToBottom}
+        scrollRequest={scrollRequest}
+        renderLoadOlder={(loadOlder, count) => (
+          <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
+            {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
+          </Button>
+        )}
+        renderRow={(row) => row.kind === 'message' ? (
+          <ConversationMessage
+            message={row.message}
+            block={row.block}
+            messages={messages}
+            projectId={projectId}
+            conversationId={conversationId}
+            conversationTurn={conversationTurn}
+            showContinue={row.message.id === lastUserMessageId}
+            onContinue={onContinue}
+          />
+        ) : (
+          <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
+        )}
+      />
+    </PlanCardsProvider>
   )
 })
 
@@ -1236,6 +1244,8 @@ function LiveFunctionCallMessage({
   block: Extract<AssistantMessageBlock, { type: 'function_call' }>
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const specialized = renderSpecializedToolCard(block)
+  if (specialized) return specialized
   return (
     <LazyDetails className="function-call" summary={block.name}>
       {() => <div className="tool-output-section">
@@ -2060,6 +2070,9 @@ export function App(): React.JSX.Element {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
   const [updateCheckError, setUpdateCheckError] = useState('')
+  const [navigationTarget, setNavigationTarget] = useState<(MessageNavigationTarget & { requestId: number }) | null>(null)
+  const [scrollRequest, setScrollRequest] = useState<(MessageNavigationTarget & { requestId: number }) | undefined>()
+  const navigationSequence = useRef(0)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -2204,7 +2217,7 @@ export function App(): React.JSX.Element {
       : lastTurn?.result === 'normal'
         ? prompts[1]
         : prompts[0]
-    void sendMessage(content, [], [])
+    void sendMessage(content, [], [], lastUserMessage.id)
   }
 
   useEffect(() => {
@@ -2329,6 +2342,27 @@ export function App(): React.JSX.Element {
     window.addEventListener('keydown', openDebugger)
     return () => window.removeEventListener('keydown', openDebugger)
   }, [activeConversationId, activeProjectId, config.developerMode, t])
+
+  useEffect(() => window.codey.onMessageNavigation((target) => {
+    setActiveProjectId(target.projectId)
+    setActiveConversationId(target.conversationId)
+    setNavigationTarget({ ...target, requestId: ++navigationSequence.current })
+    setShowScrollToBottom(true)
+  }), [])
+
+  useEffect(() => {
+    if (!navigationTarget || activeProjectId !== navigationTarget.projectId || activeConversationId !== navigationTarget.conversationId) return
+    let cancelled = false
+    void messageHistory.ensureMessage(navigationTarget.messageId, () => cancelled).then(() => {
+      if (cancelled) return
+      setShowScrollToBottom(true)
+      setScrollRequest(navigationTarget)
+      setNavigationTarget(null)
+    }).catch((reason) => {
+      if (!cancelled) { setError(String(reason)); setNavigationTarget(null) }
+    })
+    return () => { cancelled = true }
+  }, [navigationTarget, activeProjectId, activeConversationId, messageHistory.ensureMessage])
 
   function scrollToBottom(): void {
     setShowScrollToBottom(false)
@@ -3700,7 +3734,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[]): Promise<void> {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<void> {
     if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
@@ -3734,7 +3768,7 @@ export function App(): React.JSX.Element {
 
     try {
       window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId)
+      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,
@@ -4034,6 +4068,11 @@ export function App(): React.JSX.Element {
               {activeConversation && (
                 <div className="topbar-row">
                   <span className="conversation-round-count">{t('conversationRoundCount', { count: conversationRoundCount })}</span>
+                  <Button appearance="subtle" size="small" onClick={() => {
+                    void window.codey.openMessageNavigation(activeProjectId, activeConversation.id).catch((reason) => setError(String(reason)))
+                  }}>
+                    {t('messageNavigation')}
+                  </Button>
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
@@ -4149,6 +4188,7 @@ export function App(): React.JSX.Element {
                   conversationTurn={conversationTurn}
                   scrollContainerRef={conversationRef}
                   shouldStickToBottom={!showScrollToBottom}
+                  scrollRequest={scrollRequest?.projectId === activeProjectId && scrollRequest?.conversationId === activeConversation.id ? scrollRequest : undefined}
                   lastUserMessageId={lastUserMessageId}
                   onContinue={continueConversation}
                 />

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
+import { architecturePrompt } from '../shared/architecture'
+import { codeReadLinkPrompt } from '../shared/code-reading'
 import type {
   AgentContextMessage,
   AgentLimitsConfig,
@@ -29,6 +31,7 @@ import type { CommandExecutorRuntime } from './command-executor'
 import { createSkillTools, runSkillTool, skillInstructions } from './skills'
 import { createKnowledgeBaseTools, knowledgeBaseInstructions, runKnowledgeBaseTool } from './knowledge-bases'
 import { executeAgentToolProviders, type AgentToolProvider } from './agent-tool-provider'
+import type { RunEventPayload } from '../shared/task-run'
 import { createHotLongTermProvider, createHotLongTermTools, withHotLongTerm } from './hot-long-term'
 
 type ResponseMessage = {
@@ -508,7 +511,7 @@ export async function requestCompletion(
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
   signal?: AbortSignal,
-  runtime?: { traceId?: string; projectId?: string; conversationId?: string },
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string; requestIndex?: number; onRunEvent?: (event: RunEventPayload) => Promise<void> },
   onModelChange?: (providerName: string, modelName: string) => void,
   onRequestEvent?: (event: ModelRequestEvent) => void,
 ): Promise<ChatResponse> {
@@ -531,6 +534,9 @@ export async function requestCompletion(
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal)
+      const modelCallId = randomUUID()
+      const modelEvent = { callId: modelCallId, model: member.modelName, provider: member.providerName, requestIndex: runtime?.requestIndex ?? 0, attempt }
+      await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'started' })
       const controller = new AbortController()
       const abort = (): void => controller.abort()
       signal?.addEventListener('abort', abort, { once: true })
@@ -549,10 +555,10 @@ export async function requestCompletion(
         }
       }
 
+      let response: ChatResponse
       try {
-        const response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
+        response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
         throwIfAborted(signal)
-        return response
       } catch (error) {
         const details = errorDetails(error)
         const errorPartial = error instanceof Error ? (error as CompletionError).partial : undefined
@@ -569,6 +575,7 @@ export async function requestCompletion(
         )
         failure.status = (error as CompletionError | null | undefined)?.status
         lastFailure = failure
+        await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'failed', reason: failure.message })
         if (signal?.aborted) throw failure
         onRequestEvent?.({
           kind: 'failure',
@@ -622,6 +629,8 @@ export async function requestCompletion(
         clearTimeout(timeout)
         signal?.removeEventListener('abort', abort)
       }
+      await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'finished' })
+      return response
     }
   }
 
@@ -656,6 +665,8 @@ export function createAgentSystemMessage(
       'Each folder is an independent sandbox root. Every path-based tool requires folder_id and a relative path.',
       'Inspect relevant files before editing. Prefer file_patch for a unique local change and file_write for complete file creation or replacement.',
       'Use file and project tools for general development work.',
+      codeReadLinkPrompt,
+      architecturePrompt,
       'Some specialized toolsets are hidden to keep the tool list small (python, node, frontend, git). Call find_hidden_toolset with the keyword before attempting work in that domain; the tools are appended from the next request onward for the whole conversation.',
       ...(strategyPrompt ? ['', `Context policy: ${strategyPrompt}`] : []),
       networkAccessEnabled
@@ -725,6 +736,9 @@ export async function develop(
     enabledKnowledgeBases?: KnowledgeBase[]
     /** MCP tools connected for this request. */
     mcpProvider?: AgentToolProvider
+    todoProvider?: AgentToolProvider
+    dagProvider?: AgentToolProvider
+    onRunEvent?: (event: RunEventPayload) => Promise<void>
     hotLongTermContent?: string
     onHotLongTermUpdated?: (content: string) => Promise<void>
   },
@@ -759,6 +773,8 @@ export async function develop(
       tools: createSkillTools(enabledSkills, project),
       execute: (toolCall, signal) => runSkillTool(enabledSkills, project, toolCall, signal),
     },
+    ...(runtime?.todoProvider ? [runtime.todoProvider] : []),
+    ...(runtime?.dagProvider ? [runtime.dagProvider] : []),
     ...(runtime?.mcpProvider ? [runtime.mcpProvider] : []),
   ]
   const buildTools = (): object[] => [
@@ -907,7 +923,7 @@ export async function develop(
       try {
           response = await requestCompletion(config, requestMessages, tools, (message) => {
             onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
-          }, runtime?.signal, runtime, (providerName, modelName) => {
+          }, runtime?.signal, { ...runtime, requestIndex }, (providerName, modelName) => {
             onProgress?.({ type: 'model-changed', providerName, modelName })
           }, (event) => {
             onProgress?.({ type: 'clear-stream' })
@@ -1024,6 +1040,7 @@ export async function develop(
       })
       for (let index = 0; index < toolCalls.length; index += 1) {
         const toolCall = toolCalls[index]
+        await runtime?.onRunEvent?.({ type: 'tool-call', toolCallId: toolCall.id, name: toolCall.function.name, phase: 'started' })
         let content: string
         let isError = false
         // Review trail for the tool-call card: run_command reports its real
@@ -1032,11 +1049,16 @@ export async function develop(
         // Live review streaming: each reviewer verdict updates the card as it
         // happens (e.g. while the manual-confirmation dialog is pending).
         const liveReviewSteps: CommandReviewStep[] = []
+        const reviewWrites: Promise<void>[] = []
+        const reviewWriteErrors: unknown[] = []
         const commandRuntimeWithSteps: CommandExecutorRuntime | undefined = toolCall.function.name === 'command_run' && runtime?.commandRuntime
           ? {
               ...runtime.commandRuntime,
               onReviewStep: (step: CommandReviewStep): void => {
                 liveReviewSteps.push(step)
+                const write = runtime?.onRunEvent?.({ type: 'approval', toolCallId: toolCall.id,
+                  stage: step.stage, outcome: step.outcome, detail: step.detail })
+                if (write) reviewWrites.push(write.then(() => undefined, (error) => { reviewWriteErrors.push(error) }))
                 onProgress?.({ type: 'update-tool-review', toolCallId: toolCall.id, step })
               },
             }
@@ -1089,10 +1111,32 @@ export async function develop(
                 resultError: true,
               })
             }
+            await Promise.all(reviewWrites)
+            if (reviewWriteErrors.length) throw reviewWriteErrors[0]
+            await runtime?.onRunEvent?.({ type: 'tool-call', toolCallId: toolCall.id,
+              name: toolCall.function.name, phase: 'finished', failed: true, cancelled: true })
+            if (toolCall.function.name === 'node_validate') {
+              await runtime?.onRunEvent?.({ type: 'validation', toolCallId: toolCall.id, status: 'cancelled' })
+            }
             throw error
           }
           content = truncateOutput(`Error: ${error instanceof Error ? error.message : 'Tool failed'}`)
           isError = true
+        }
+        // The approval callbacks are synchronous; drain durable writes before closing this call.
+        await Promise.all(reviewWrites)
+        if (reviewWriteErrors.length) throw reviewWriteErrors[0]
+        await runtime?.onRunEvent?.({ type: 'tool-call', toolCallId: toolCall.id,
+          name: toolCall.function.name, phase: 'finished', failed: isError })
+        if (toolCall.function.name === 'node_validate') {
+          let status = 'error'
+          try {
+            const validation = JSON.parse(content) as { status?: unknown }
+            if (typeof validation.status === 'string' && ['passed', 'failed', 'timed_out', 'cancelled'].includes(validation.status)) {
+              status = validation.status
+            }
+          } catch { /* A tool error is not a successful validation. */ }
+          await runtime?.onRunEvent?.({ type: 'validation', toolCallId: toolCall.id, status })
         }
         history.push({
           role: 'tool',
