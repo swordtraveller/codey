@@ -10,7 +10,7 @@ vi.mock('node:fs/promises', async (original) => {
   return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename) }
 })
 import { BridgeHandoverService } from '../src/main/bridge'
-import { addMessage, createProject, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
+import { addMessage, createProject, getConversationNavigation, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
 
 const headerPath = (projectId: string, conversationId: string): string => join(electronState.userData, 'workspace-data', 'projects', Buffer.from(projectId).toString('base64url'), 'conversations', `${Buffer.from(conversationId).toString('base64url')}.json`)
 async function reload(): Promise<void> {
@@ -186,4 +186,21 @@ describe('disk-backed conversation pagination', () => {
     expect((await getProject(projectId, conversationId)).conversations[0].agentMessages).toHaveLength(1)
   })
 
+})
+
+
+describe('conversation navigation', () => {
+  beforeEach(async () => { electronState.userData = await createTemporaryDirectory('codey-navigation-') })
+  afterEach(async () => { await removeTemporaryDirectory(electronState.userData) })
+  it('lists every user message in order, including unloaded history, without loading model context', async () => {
+    const { projectId, conversationId } = await seed(12)
+    const loaded = await getConversationNavigation(projectId, conversationId)
+    await reload()
+    const entries = await getConversationNavigation(projectId, conversationId)
+    expect(entries).toEqual(loaded)
+    expect(entries.map((entry) => entry.id)).toEqual(Array.from({ length: 12 }, (_, i) => `u${i}`))
+    expect(entries[0].preview).toBe('问题 0')
+    expect((await getProjectsForRenderer())[0].conversations[0].messages).toEqual([])
+    expect(vi.mocked(open).mock.calls).toHaveLength(1)
+  })
 })

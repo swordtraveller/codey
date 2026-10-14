@@ -1,3 +1,4 @@
+import type { MessageNavigationEntry, MessageNavigationTarget } from '../shared/message-navigation'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
@@ -67,6 +68,14 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('models:test-provider', provider),
     listProviderModels: (provider: { baseUrl: string; apiKey: string }): Promise<{ status: 'ok'; models: string[] } | { status: 'error'; detail: string }> =>
       ipcRenderer.invoke('models:list-provider-models', provider),
+    openMessageNavigation: (projectId: string, conversationId: string): Promise<void> => ipcRenderer.invoke('message-navigation:open', projectId, conversationId),
+    getMessageNavigationEntries: (): Promise<MessageNavigationEntry[]> => ipcRenderer.invoke('message-navigation:entries'),
+    selectMessageNavigation: (messageId: string): void => { ipcRenderer.send('message-navigation:select', messageId) },
+    onMessageNavigation: (listener: (target: MessageNavigationTarget) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, target: MessageNavigationTarget): void => listener(target)
+      ipcRenderer.on('message-navigation:selected', handler)
+      return () => ipcRenderer.removeListener('message-navigation:selected', handler)
+    },
     getProjects: () => ipcRenderer.invoke('projects:get'),
     getConversationMessages: (projectId: string, conversationId: string, before: string | null = null) => ipcRenderer.invoke('conversations:messages', projectId, conversationId, before),
     listSkills: (): Promise<InstalledSkill[]> => ipcRenderer.invoke('skills:list'),

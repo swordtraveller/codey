@@ -2507,3 +2507,12 @@ h1 {
 .resource-unavailable {
   color: var(--colorNeutralForeground3, #707070);
 }
+
+.message-navigation-window { height: 100vh; overflow-y: auto; padding: 20px; box-sizing: border-box; background: #f7f7f5; color: #242424; font-size: 14px; }
+.message-navigation-window h1 { margin: 0 0 16px; font-size: 18px; }
+.message-navigation-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.message-navigation-list button { display: flex; gap: 12px; width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; background: white; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.message-navigation-list button:hover { background: #eef5fc; border-color: #9bbfee; }
+.message-navigation-list button:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
+.message-navigation-number { color: #66788b; flex: none; min-width: 1.5em; }
+.message-navigation-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }

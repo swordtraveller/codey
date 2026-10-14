@@ -11,8 +11,9 @@ type ReadingAnchor = { id: string; offset: number } | { id: null; offset: number
 
 /** Virtual rows stay independent of model context and data-page ownership. */
 export function ConversationHistory({
-  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder, pagination, onRead,
+  messages, rows, scrollContainerRef, shouldStickToBottom, renderRow, renderLoadOlder, pagination, onRead, scrollRequest,
 }: {
+  scrollRequest?: { messageId: string; requestId: number }
   onRead?: (messageId: string) => Promise<void>
   pagination?: { hasOlder: boolean; loading: boolean; loadOlder: () => Promise<void> }
   messages: ChatMessage[]
@@ -22,6 +23,7 @@ export function ConversationHistory({
   renderRow: (row: ConversationRenderRow) => ReactNode
   renderLoadOlder: (loadOlder: () => void, count: number) => ReactNode
 }): React.JSX.Element {
+  const handledScrollRequest = useRef<number | null>(null)
   const replyEnds = useMemo(() => new Set(completedReplyIds(messages)), [messages])
   const receiptRows = useMemo(() => new Map(rows.flatMap((row, index) =>
     row.kind === 'message' && replyEnds.has(row.message.id) && rows[index + 1]?.messageIndex !== row.messageIndex
@@ -43,6 +45,7 @@ export function ConversationHistory({
   const historyRef = useRef<HTMLDivElement>(null)
   const topSpacerRef = useRef<HTMLDivElement>(null)
   const bottomSpacerRef = useRef<HTMLDivElement>(null)
+  const navigationSpacerRef = useRef<HTMLDivElement>(null)
   const observerRef = useRef<ResizeObserver | null>(null)
   const nodesRef = useRef(new Map<string, HTMLDivElement>())
   const callbacksRef = useRef(new Map<string, (node: HTMLDivElement | null) => void>())
@@ -152,6 +155,28 @@ export function ConversationHistory({
         expandedRef.current = true
         setStartIndex(next)
       },
+    }
+
+    if (scrollRequest && handledScrollRequest.current !== scrollRequest.requestId) {
+      const targetIndex = rows.findIndex((row) => row.kind === 'message' && row.message.id === scrollRequest.messageId)
+      if (targetIndex >= 0) {
+        followingRef.current = false
+        anchorRef.current = { id: rows[targetIndex].id, offset: 0 }
+        if (targetIndex < visibleStart) {
+          expandedRef.current = true
+          setStartIndex(targetIndex)
+          return
+        }
+        handledScrollRequest.current = scrollRequest.requestId
+      }
+    }
+
+    // A short final turn still needs enough scroll room to align its start.
+    const targetRow = scrollRequest && visibleRows.find((row) => row.kind === 'message' && row.message.id === scrollRequest.messageId)
+    const targetIndex = targetRow ? layout.indexes.get(targetRow.id) : undefined
+    if (navigationSpacerRef.current) {
+      const remainingHeight = targetIndex === undefined ? Infinity : (layout.offsets.at(-1) ?? 0) - layout.offsets[targetIndex]
+      navigationSpacerRef.current.style.height = `${followingRef.current ? 0 : Math.max(0, container.clientHeight + 32 - remainingHeight)}px`
     }
 
     if (followingRef.current && !expandedRef.current && startIndex !== latestStart) {
@@ -285,6 +310,7 @@ export function ConversationHistory({
         )
       })}
       <div aria-hidden="true" className="conversation-virtual-spacer" ref={bottomSpacerRef} style={{ height: bottomHeight }} />
+      <div aria-hidden="true" className="conversation-virtual-spacer" ref={navigationSpacerRef} />
     </div>
   )
 }

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
+import { registerMessageNavigation } from './message-navigation-window'
+import { getConversationNavigation } from './workspace'
 import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
@@ -1349,6 +1351,7 @@ app.whenReady().then(() => {
     notificationManager.updateSettings(saved.notificationSettings)
   })
   ipcMain.handle('projects:get', () => getProjectsForRenderer())
+  registerMessageNavigation({ getMainWindow: () => mainWindow, getEntries: getConversationNavigation, loadRenderer, icon: getAppIconPath() })
   ipcMain.handle('conversations:messages', (_event, projectId: string, conversationId: string, before: string | null) => getConversationMessagePage(projectId, conversationId, before))
   ipcMain.handle('skills:list', () => listInstalledSkills())
   ipcMain.handle('skills:preview-github', (_event, url: string) => previewGitHubSkill(url))

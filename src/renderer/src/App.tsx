@@ -1,3 +1,4 @@
+import type { MessageNavigationTarget } from '../../shared/message-navigation'
 import { conversationReadState } from '../../shared/conversation-read-state'
 import {
   Button,
@@ -1155,6 +1156,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn,
   scrollContainerRef,
   shouldStickToBottom,
+  scrollRequest,
   lastUserMessageId,
   onContinue,
 }: {
@@ -1166,6 +1168,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   conversationTurn?: ConversationTurn
   scrollContainerRef: RefObject<HTMLDivElement | null>
   shouldStickToBottom: boolean
+  scrollRequest?: { messageId: string; requestId: number }
   lastUserMessageId?: string
   onContinue?: () => void
 }): React.JSX.Element {
@@ -1190,6 +1193,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
         rows={rows}
         scrollContainerRef={scrollContainerRef}
         shouldStickToBottom={shouldStickToBottom}
+        scrollRequest={scrollRequest}
         renderLoadOlder={(loadOlder, count) => (
           <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
             {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
@@ -2070,6 +2074,9 @@ export function App(): React.JSX.Element {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
   const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
   const [updateCheckError, setUpdateCheckError] = useState('')
+  const [navigationTarget, setNavigationTarget] = useState<(MessageNavigationTarget & { requestId: number }) | null>(null)
+  const [scrollRequest, setScrollRequest] = useState<(MessageNavigationTarget & { requestId: number }) | undefined>()
+  const navigationSequence = useRef(0)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
@@ -2339,6 +2346,27 @@ export function App(): React.JSX.Element {
     window.addEventListener('keydown', openDebugger)
     return () => window.removeEventListener('keydown', openDebugger)
   }, [activeConversationId, activeProjectId, config.developerMode, t])
+
+  useEffect(() => window.codey.onMessageNavigation((target) => {
+    setActiveProjectId(target.projectId)
+    setActiveConversationId(target.conversationId)
+    setNavigationTarget({ ...target, requestId: ++navigationSequence.current })
+    setShowScrollToBottom(true)
+  }), [])
+
+  useEffect(() => {
+    if (!navigationTarget || activeProjectId !== navigationTarget.projectId || activeConversationId !== navigationTarget.conversationId) return
+    let cancelled = false
+    void messageHistory.ensureMessage(navigationTarget.messageId, () => cancelled).then(() => {
+      if (cancelled) return
+      setShowScrollToBottom(true)
+      setScrollRequest(navigationTarget)
+      setNavigationTarget(null)
+    }).catch((reason) => {
+      if (!cancelled) { setError(String(reason)); setNavigationTarget(null) }
+    })
+    return () => { cancelled = true }
+  }, [navigationTarget, activeProjectId, activeConversationId, messageHistory.ensureMessage])
 
   function scrollToBottom(): void {
     setShowScrollToBottom(false)
@@ -4044,6 +4072,11 @@ export function App(): React.JSX.Element {
               {activeConversation && (
                 <div className="topbar-row">
                   <span className="conversation-round-count">{t('conversationRoundCount', { count: conversationRoundCount })}</span>
+                  <Button appearance="subtle" size="small" onClick={() => {
+                    void window.codey.openMessageNavigation(activeProjectId, activeConversation.id).catch((reason) => setError(String(reason)))
+                  }}>
+                    {t('messageNavigation')}
+                  </Button>
                   <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={openAgentLimitsSettings}>
                     {t('agentLimits')}
                   </Button>
@@ -4159,6 +4192,7 @@ export function App(): React.JSX.Element {
                   conversationTurn={conversationTurn}
                   scrollContainerRef={conversationRef}
                   shouldStickToBottom={!showScrollToBottom}
+                  scrollRequest={scrollRequest?.projectId === activeProjectId && scrollRequest?.conversationId === activeConversation.id ? scrollRequest : undefined}
                   lastUserMessageId={lastUserMessageId}
                   onContinue={continueConversation}
                 />
