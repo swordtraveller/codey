@@ -1,3 +1,4 @@
+import { isDagSnapshot, type DagSnapshot } from './dag'
 import { isTodoSnapshot, type TodoSnapshot } from './todo'
 
 /** Run is an execution attempt; a normal end does not assert that the user's goal was verified. */
@@ -9,6 +10,7 @@ export type RunEventPayload =
   | { type: 'tool-call'; toolCallId: string; name: string; phase: 'started' | 'finished'; failed?: boolean; cancelled?: boolean }
   | { type: 'approval'; toolCallId: string; stage: string; outcome: string; detail?: string }
   | { type: 'validation'; toolCallId: string; status: string }
+  | { type: 'dag-snapshot'; toolCallId: string; taskId: string; snapshot: DagSnapshot }
   | { type: 'todo-snapshot'; toolCallId: string; taskId: string; snapshot: TodoSnapshot }
 
 export type TaskRunEvent = RunEventPayload & {
@@ -38,6 +40,7 @@ export function isTaskRunEvent(value: unknown): value is TaskRunEvent {
       && (event.cancelled === undefined || typeof event.cancelled === 'boolean')
     case 'approval': return text('toolCallId') && text('stage') && text('outcome') && optionalText('detail')
     case 'validation': return text('toolCallId') && text('status')
+    case 'dag-snapshot': return text('toolCallId') && text('taskId') && isDagSnapshot(event.snapshot)
     case 'todo-snapshot': return text('toolCallId') && text('taskId') && isTodoSnapshot(event.snapshot)
     default: return false
   }

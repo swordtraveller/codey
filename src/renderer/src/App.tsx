@@ -68,8 +68,9 @@ import { ConversationHistory } from './ConversationHistory'
 import { useConversationMessages } from './useConversationMessages'
 import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
 import { LazyDetails } from './components/LazyDetails'
-import { TodoCardsProvider, renderSpecializedToolCard } from './components/TodoToolCard'
-import { latestTodoCardId } from './components/todo-card-state'
+import { PlanCardsProvider } from './components/PlanCardsProvider'
+import { renderSpecializedToolCard } from './components/ToolCards'
+import { latestPlanCardId } from './components/todo-card-state'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -1182,10 +1183,10 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const historyRows = useMemo(() => conversationHistoryRows(messages), [messages])
   const rows = useMemo(() => mergeConversationRows(historyRows, conversationLiveRows(progress, messages)), [historyRows, progress, messages])
-  const latestTodoId = useMemo(() => latestTodoCardId(rows), [rows])
+  const latestPlanId = useMemo(() => latestPlanCardId(rows), [rows])
   const createdAt = conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined
   return (
-    <TodoCardsProvider latestId={latestTodoId}>
+    <PlanCardsProvider latestId={latestPlanId}>
       <ConversationHistory
         messages={messages}
         pagination={pagination}
@@ -1214,7 +1215,7 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
           <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
         )}
       />
-    </TodoCardsProvider>
+    </PlanCardsProvider>
   )
 })
 

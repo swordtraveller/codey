@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { latestTodoCardId } from './todo-card-state'
+import { latestPlanCardId } from './todo-card-state'
 import type { ConversationRenderRow } from '../conversation-render-rows'
 import type { TodoSnapshot } from '../../../shared/todo'
 
@@ -14,8 +14,8 @@ describe('Todo card expansion selection', () => {
     const rows: ConversationRenderRow[] = [row('old', snapshot('add')), row('pending'), {
       id: 'live', messageIndex: 1, kind: 'live', item: { type: 'block', block: { type: 'function_call', id: 'new', name: 'todo', parameters: '{}', result: snapshot('get') } },
     }]
-    expect(latestTodoCardId(rows)).toBe('new')
-    expect(latestTodoCardId(rows.slice(0, 2))).toBe('old')
-    expect(latestTodoCardId([row('bad', '{')])).toBeNull()
+    expect(latestPlanCardId(rows)).toBe('new')
+    expect(latestPlanCardId(rows.slice(0, 2))).toBe('old')
+    expect(latestPlanCardId([row('bad', '{')])).toBeNull()
   })
 })

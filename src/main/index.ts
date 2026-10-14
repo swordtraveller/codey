@@ -47,6 +47,7 @@ import {
 } from '../shared/development-progress'
 import { buildAgentContext, develop, createAgentSystemMessage } from './agent'
 import { TaskRunJournal } from './task-run-journal'
+import { createDagToolProvider } from './dag-tool'
 import { createTodoToolProvider } from './todo-tool'
 import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
@@ -890,6 +891,7 @@ async function developProject(
           enabledKnowledgeBases,
           mcpProvider,
           todoProvider: createTodoToolProvider(journal, runId, taskId),
+          dagProvider: createDagToolProvider(journal, runId, taskId),
           onRunEvent: async (payload) => { await journal.append(runId, payload) },
           hotLongTermContent: conversation.hotLongTermContent ?? '',
           onHotLongTermUpdated: async (content: string) => {

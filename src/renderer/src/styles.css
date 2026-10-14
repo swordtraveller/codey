@@ -2516,3 +2516,30 @@ h1 {
 .message-navigation-list button:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 2px; }
 .message-navigation-number { color: #66788b; flex: none; min-width: 1.5em; }
 .message-navigation-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+
+/* DAG snapshots show current statuses only; additions/removals have no special styling. */
+.dag-function-call { min-width: 0; max-width: 100%; overflow: hidden; }
+.dag-panel { width: 100%; min-width: 0; max-width: 100%; padding: 12px; }
+.dag-legend { display: flex; flex-wrap: wrap; gap: 8px; }
+.dag-legend > span { border: 1px solid; border-radius: 4px; padding: 2px 7px; font-size: 12px; }
+.dag-progress, .dag-footnote { margin: 10px 0; font-size: 12px; color: #616161; }
+.dag-viewport { display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 560px; overflow-x: scroll; overflow-y: auto; scrollbar-gutter: stable; border: 1px solid #e0e0e0; border-radius: 8px; background: #fafafa; }
+.dag-viewport { scrollbar-color: #8a8a8a #ededed; scrollbar-width: auto; }
+.dag-viewport::-webkit-scrollbar { width: 10px; height: 10px; }
+.dag-viewport::-webkit-scrollbar-track { background: #ededed; border-radius: 5px; }
+.dag-viewport::-webkit-scrollbar-thumb { background: #a6a6a6; border: 2px solid #ededed; border-radius: 5px; }
+.dag-viewport::-webkit-scrollbar-thumb:hover { background: #7a7a7a; }
+.dag-viewport:focus-visible, .dag-node:focus-visible { outline: 2px solid #0f6cbd; outline-offset: -2px; }
+.dag-canvas { position: relative; margin: 0 auto; }
+.dag-edges { position: absolute; inset: 0; color: #737373; pointer-events: none; }
+.dag-nodes { margin: 0; padding: 0; list-style: none; }
+.dag-node { position: absolute; padding: 7px 9px; border: 1px solid; border-left-width: 3px; border-radius: 7px; display: flex; flex-direction: column; gap: 2px; }
+.dag-node-status { font-size: 10px; }
+.dag-node-name { font-size: 12px; line-height: 16px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.dag-node-detail { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dag-terminal { border-radius: 24px; align-items: center; justify-content: center; border-left-width: 1px; }
+.dag-status-pending { color: #505050; background: #f0f0f0; border-color: #a0a0a0; }
+.dag-status-in_progress { color: #704d00; background: #fff4ce; border-color: #c19c00; }
+.dag-status-blocked { color: #a4262c; background: #fce8e9; border-color: #c65056; }
+.dag-status-finished { color: #107c10; background: #edf7ed; border-color: #5a9f5a; }
+.dag-accessible { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

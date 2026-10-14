@@ -733,6 +733,7 @@ export async function develop(
     /** MCP tools connected for this request. */
     mcpProvider?: AgentToolProvider
     todoProvider?: AgentToolProvider
+    dagProvider?: AgentToolProvider
     onRunEvent?: (event: RunEventPayload) => Promise<void>
     hotLongTermContent?: string
     onHotLongTermUpdated?: (content: string) => Promise<void>
@@ -769,6 +770,7 @@ export async function develop(
       execute: (toolCall, signal) => runSkillTool(enabledSkills, project, toolCall, signal),
     },
     ...(runtime?.todoProvider ? [runtime.todoProvider] : []),
+    ...(runtime?.dagProvider ? [runtime.dagProvider] : []),
     ...(runtime?.mcpProvider ? [runtime.mcpProvider] : []),
   ]
   const buildTools = (): object[] => [

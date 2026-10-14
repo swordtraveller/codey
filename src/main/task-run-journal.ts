@@ -1,3 +1,4 @@
+import type { DagNode } from '../shared/dag'
 import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -45,6 +46,11 @@ export class TaskRunJournal {
     const event = [...this.events].reverse().find((entry) => entry.type === 'todo-snapshot' && entry.taskId === taskId)
     return event?.type === 'todo-snapshot' && isTodoSnapshot(event.snapshot)
       ? structuredClone(event.snapshot.items) : []
+  }
+
+  latestDagNodes(taskId: string): DagNode[] {
+    const event = [...this.events].reverse().find((entry) => entry.type === 'dag-snapshot' && entry.taskId === taskId)
+    return event?.type === 'dag-snapshot' ? structuredClone(event.snapshot.nodes) : []
   }
 
   async append(runId: string, payload: RunEventPayload): Promise<TaskRunEvent> {

@@ -1,17 +1,7 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { usePlanCardExpansion } from './PlanCardsProvider'
 import { useTranslation } from 'react-i18next'
 import type { AssistantMessageBlock } from '../../../shared/types'
-import { parseTodoSnapshot, type TodoSnapshot } from '../../../shared/todo'
-
-const TodoExpansionContext = createContext<{ openId: string | null; setOpenId: (id: string | null) => void } | null>(null)
-
-/** One accordion across persisted and live cards, including virtualized/unmounted rows. */
-export function TodoCardsProvider({ latestId, children }: { latestId: string | null; children: ReactNode }): React.JSX.Element {
-  const [openId, setOpenId] = useState<string | null>(latestId)
-  useEffect(() => { setOpenId(latestId) }, [latestId])
-  const context = useMemo(() => ({ openId, setOpenId }), [openId])
-  return <TodoExpansionContext.Provider value={context}>{children}</TodoExpansionContext.Provider>
-}
+import { type TodoSnapshot } from '../../../shared/todo'
 
 function TodoPanel({ snapshot }: { snapshot: TodoSnapshot }): React.JSX.Element {
   const { t } = useTranslation()
@@ -42,9 +32,9 @@ function TodoPanel({ snapshot }: { snapshot: TodoSnapshot }): React.JSX.Element 
   )
 }
 
-function TodoToolCard({ block, snapshot }: { block: Extract<AssistantMessageBlock, { type: 'function_call' }>; snapshot: TodoSnapshot }): React.JSX.Element {
+export function TodoToolCard({ block, snapshot }: { block: Extract<AssistantMessageBlock, { type: 'function_call' }>; snapshot: TodoSnapshot }): React.JSX.Element {
   const { t } = useTranslation()
-  const expansion = useContext(TodoExpansionContext)
+  const expansion = usePlanCardExpansion()
   const open = expansion?.openId === block.id
   let parameters = block.parameters
   try { parameters = JSON.stringify(JSON.parse(parameters), null, 2) } catch { /* render raw input */ }
@@ -61,17 +51,4 @@ function TodoToolCard({ block, snapshot }: { block: Extract<AssistantMessageBloc
       </>}
     </details>
   )
-}
-
-type ToolCardRenderer = (block: Extract<AssistantMessageBlock, { type: 'function_call' }>) => React.JSX.Element | null
-const toolCards: Record<string, ToolCardRenderer> = {
-  todo: (block) => {
-    const snapshot = parseTodoSnapshot(block.result)
-    return snapshot ? <TodoToolCard block={block} snapshot={snapshot} /> : null
-  },
-}
-
-/** Extensible renderer registry. Unknown/unfinished results keep the generic tool card. */
-export function renderSpecializedToolCard(block: Extract<AssistantMessageBlock, { type: 'function_call' }>): React.JSX.Element | null {
-  return toolCards[block.name]?.(block) ?? null
 }
