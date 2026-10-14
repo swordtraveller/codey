@@ -67,6 +67,8 @@ import { ConversationHistory } from './ConversationHistory'
 import { useConversationMessages } from './useConversationMessages'
 import { conversationHistoryRows, conversationLiveRows, mergeConversationRows, type ConversationRenderRow } from './conversation-render-rows'
 import { LazyDetails } from './components/LazyDetails'
+import { TodoCardsProvider, renderSpecializedToolCard } from './components/TodoToolCard'
+import { latestTodoCardId } from './components/todo-card-state'
 import {
   defaultAgentLimitsConfig,
   defaultAppConfig,
@@ -546,6 +548,9 @@ function FunctionCallMessage({
       setPreviewError(t('unableOpenPreview'))
     }
   }
+
+  const specialized = renderSpecializedToolCard(block)
+  if (specialized) return specialized
 
   return (
     <LazyDetails className={`function-call${block.resultError ? ' tool-error' : ''}`} summary={<>{block.name}{validation ? ` · ${t(`validationStatus_${validation.status}`)}` : ''}</>}>
@@ -1174,35 +1179,38 @@ const VirtualizedConversationHistory = memo(function VirtualizedConversationHist
   const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const historyRows = useMemo(() => conversationHistoryRows(messages), [messages])
   const rows = useMemo(() => mergeConversationRows(historyRows, conversationLiveRows(progress, messages)), [historyRows, progress, messages])
+  const latestTodoId = useMemo(() => latestTodoCardId(rows), [rows])
   const createdAt = conversationTurn ? new Date(conversationTurn.startedAt).toISOString() : undefined
   return (
-    <ConversationHistory
-      messages={messages}
-      pagination={pagination}
-      onRead={onRead}
-      rows={rows}
-      scrollContainerRef={scrollContainerRef}
-      shouldStickToBottom={shouldStickToBottom}
-      renderLoadOlder={(loadOlder, count) => (
-        <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
-          {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
-        </Button>
-      )}
-      renderRow={(row) => row.kind === 'message' ? (
-        <ConversationMessage
-          message={row.message}
-          block={row.block}
-          messages={messages}
-          projectId={projectId}
-          conversationId={conversationId}
-          conversationTurn={conversationTurn}
-          showContinue={row.message.id === lastUserMessageId}
-          onContinue={onContinue}
-        />
-      ) : (
-        <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
-      )}
-    />
+    <TodoCardsProvider latestId={latestTodoId}>
+      <ConversationHistory
+        messages={messages}
+        pagination={pagination}
+        onRead={onRead}
+        rows={rows}
+        scrollContainerRef={scrollContainerRef}
+        shouldStickToBottom={shouldStickToBottom}
+        renderLoadOlder={(loadOlder, count) => (
+          <Button appearance="subtle" size="small" onClick={loadOlder} disabled={pagination.loading}>
+            {pagination.loading ? t('loadingConversationMessages') : t('loadOlderConversationRounds', { count })}
+          </Button>
+        )}
+        renderRow={(row) => row.kind === 'message' ? (
+          <ConversationMessage
+            message={row.message}
+            block={row.block}
+            messages={messages}
+            projectId={projectId}
+            conversationId={conversationId}
+            conversationTurn={conversationTurn}
+            showContinue={row.message.id === lastUserMessageId}
+            onContinue={onContinue}
+          />
+        ) : (
+          <LiveConversationRow row={row} projectId={projectId} conversationId={conversationId} createdAt={createdAt} />
+        )}
+      />
+    </TodoCardsProvider>
   )
 })
 
@@ -1236,6 +1244,8 @@ function LiveFunctionCallMessage({
   block: Extract<AssistantMessageBlock, { type: 'function_call' }>
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const specialized = renderSpecializedToolCard(block)
+  if (specialized) return specialized
   return (
     <LazyDetails className="function-call" summary={block.name}>
       {() => <div className="tool-output-section">
@@ -2204,7 +2214,7 @@ export function App(): React.JSX.Element {
       : lastTurn?.result === 'normal'
         ? prompts[1]
         : prompts[0]
-    void sendMessage(content, [], [])
+    void sendMessage(content, [], [], lastUserMessage.id)
   }
 
   useEffect(() => {
@@ -3700,7 +3710,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[]): Promise<void> {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<void> {
     if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
       return
     }
@@ -3734,7 +3744,7 @@ export function App(): React.JSX.Element {
 
     try {
       window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId)
+      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
       if (result.project) {
         const updatedConversation = result.project.conversations.find(
           (conversation) => conversation.id === conversationId,

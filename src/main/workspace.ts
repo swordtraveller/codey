@@ -132,6 +132,11 @@ function conversationPath(projectId: string, conversationId: string): string {
   return join(storageRoot(), 'projects', key(projectId), 'conversations', `${key(conversationId)}.json`)
 }
 
+/** Stored beside the conversation shard; IDs are encoded as data, never interpolated as paths. */
+export function taskRunJournalPath(projectId: string, conversationId: string): string {
+  return `${conversationPath(projectId, conversationId)}.task-runs.jsonl`
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporaryPath = `${path}.${randomUUID()}.tmp`

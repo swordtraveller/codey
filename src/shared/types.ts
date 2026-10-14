@@ -659,6 +659,9 @@ export type DevelopmentTimelineItem =
 export type ConversationTurnResult = 'processing' | 'normal' | 'timeout' | 'other' | 'stopped'
 
 export type ConversationTurnRecord = {
+  runId?: string
+  taskId?: string
+  continuedFromRunId?: string
   startedAt: number
   endedAt?: number
   result: ConversationTurnResult

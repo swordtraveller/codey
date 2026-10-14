@@ -156,6 +156,7 @@ declare global {
         images?: ImageAttachment[],
         attachments?: MediaAttachment[],
         traceId?: string,
+        continueFromMessageId?: string,
       ): Promise<DevelopmentResult>
       stopDevelopment(projectId: string, conversationId: string): Promise<boolean>
       subscribeDevelopmentProgress(
