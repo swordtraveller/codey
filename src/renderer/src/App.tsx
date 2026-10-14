@@ -27,13 +27,11 @@ import { isContextConfigValidForModel, isValidContextManagementConfig } from '..
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import { defaultLocalEmbeddingModelId } from '../../shared/types'
 import type {
-  AgentLimitsConfig,
   AppLanguage,
   AssistantMessageBlock,
   ChatMessage,
   ContextCompressionNotice,
   ContextManagementConfig,
-  ConversationRuntimeState,
   ConversationTurnRecord,
   ImageAttachment,
   ImageMediaType,
@@ -55,12 +53,8 @@ import {
   supportedMediaTypes,
 } from '../../shared/media-attachments'
 import {
-  clearDevelopmentProgress,
   getDevelopmentProgress,
-  replaceDevelopmentProgress,
-  resetDevelopmentProgress,
   subscribeDevelopmentProgress,
-  updateDevelopmentProgress,
 } from './development-progress-store'
 import { ConversationHistory } from './ConversationHistory'
 import { useConversationMessages } from './useConversationMessages'
@@ -80,16 +74,12 @@ import {
   defaultProviderConfig,
   modelGroupDefaultRetries,
   commandExecutionSupported,
-  deriveContextBudgets,
-  maximumAgentLimit,
   type CommandApprovalMemory,
   type CommandApprovalRequest,
   type CommandExecutionConfig,
   type CommandReviewConfig,
-  type CommandReviewRule,
   type ModelConfig,
   type ModelDefinition,
-  type RuntimeModelConfig,
   type ModelGroupConfig,
   type ModelLink,
   type Project,
@@ -103,8 +93,20 @@ import { UnreadBadge } from './components/UnreadBadge'
 import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
-import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../shared/command-rules'
+import { validateCommandReviewConfig } from '../../shared/command-rules'
 import { CodeReadMarkdown } from './components/CodeReadMarkdown'
+import { ContextSettingsFields } from './components/ContextSettingsFields'
+import {
+  AgentLimitsFields,
+  CommandApprovalDialog,
+  CommandExecutionEditorFields,
+  CommandReviewEditor,
+  environmentLabels,
+  interpreterLabels,
+  isValidAgentLimits,
+} from './components/CommandReviewSettings'
+import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
+import { useConversationRuntime, type ConversationTurn } from './hooks/useConversationRuntime'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
 
@@ -242,42 +244,6 @@ function HighlightedText({ text, keyword }: { text: string; keyword: string }): 
       )}
     </>
   )
-}
-
-const interpreterLabels: Record<string, string> = {  bash: 'bash',
-  pwsh7: 'pwsh 7',
-  pwsh51: 'pwsh 5.1',
-}
-
-const environmentLabels: Record<string, string> = {
-  bare: 'bare',
-  wsl2: 'wsl2',
-  docker: 'docker',
-  'windows-sandbox': 'Windows Sandbox',
-}
-
-function listEnabledCombos(enabledEnvironments: CommandExecutionConfig['enabledEnvironments']): Array<{
-  interpreter: CommandExecutionConfig['interpreter']
-  environment: CommandExecutionConfig['environment']
-}> {
-  return (['bash', 'pwsh7', 'pwsh51'] as const).flatMap((interpreter) =>
-    (['bare', 'wsl2', 'docker'] as const)
-      .filter((environment) => enabledEnvironments[interpreter]?.includes(environment) ?? false)
-      .map((environment) => ({ interpreter, environment })),
-  )
-}
-
-function isValidAgentLimits(value: AgentLimitsConfig): boolean {
-  return Number.isInteger(value.modelRequestsPerRound) &&
-    value.modelRequestsPerRound >= 1 && value.modelRequestsPerRound <= maximumAgentLimit &&
-    Number.isInteger(value.toolCallsPerRequest) &&
-    value.toolCallsPerRequest >= 1 && value.toolCallsPerRequest <= maximumAgentLimit
-}
-
-type ConversationTurn = ConversationTurnRecord & {
-  projectId: string
-  conversationId: string
-  userMessageId: string
 }
 
 /** Formats one completed conversation turn as a log-style event stream for
@@ -708,441 +674,6 @@ const ConversationMessage = memo(function ConversationMessage({
   )
 })
 
-function formatCommandDuration(seconds: number): string {
-  const hours = Math.floor(seconds / 3_600)
-  const minutes = Math.floor((seconds % 3_600) / 60)
-  const rest = seconds % 60
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m`
-  return `${rest}s`
-}
-
-/** Shared Agent-limits fields for the three settings surfaces (global,
- *  project, conversation). */
-function AgentLimitsFields({ value, disabled, onChange }: {
-  value: AgentLimitsConfig
-  disabled?: boolean
-  onChange: (patch: Partial<AgentLimitsConfig>) => void
-}): React.JSX.Element {
-  const { t } = useTranslation()
-  return (
-    <>
-      <Field label={t('modelRequestsPerRound')} hint={t('modelRequestsPerRoundHint')} required>
-        <Input
-          disabled={disabled}
-          min={1}
-          max={maximumAgentLimit}
-          type="number"
-          value={String(value.modelRequestsPerRound)}
-          onChange={(_, data) => onChange({ modelRequestsPerRound: Number(data.value) })}
-        />
-      </Field>
-      <Field label={t('toolCallsPerRequest')} hint={t('toolCallsPerRequestHint')} required>
-        <Input
-          disabled={disabled}
-          min={1}
-          max={maximumAgentLimit}
-          type="number"
-          value={String(value.toolCallsPerRequest)}
-          onChange={(_, data) => onChange({ toolCallsPerRequest: Number(data.value) })}
-        />
-      </Field>
-    </>
-  )
-}
-
-/** Shared command-execution editor (flat: execution + review sections) for
- *  the conversation dialog and the project settings dialog. The override
- *  switch (null = inherit) lives in the caller. */
-function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs, sessionModel, globalReview, onOpenSyntaxHelp, showReview = true }: {
-  value: CommandExecutionConfig
-  onChange: (next: CommandExecutionConfig) => void
-  disabled?: boolean
-  modelConfigs: ModelConfig[]
-  sessionModel?: ModelConfig
-  globalReview: CommandReviewConfig
-  onOpenSyntaxHelp?: () => void
-  showReview?: boolean
-}): React.JSX.Element {
-  const { t } = useTranslation()
-  const setDraft = (next: CommandExecutionConfig): void => onChange(next)
-  const enabledCombos = listEnabledCombos(value.enabledEnvironments)
-  const defaultInEnabled = enabledCombos.some(
-    (combo) => combo.interpreter === value.interpreter && combo.environment === value.environment,
-  )
-  return (
-    <>
-      <Switch
-        checked={value.enabled}
-        disabled={disabled}
-        label={t('commandExecutionEnabled')}
-        onChange={(_, data) => setDraft({ ...value, enabled: data.checked })}
-      />
-      <p className="settings-description">{t('commandExecutionDescription')}</p>
-      <div className="enabled-environments-group">
-        <p className="section-label">{t('enabledEnvironments')}</p>
-        <p className="settings-description">{t('enabledEnvironmentsHint')}</p>
-        {(['bash', 'pwsh7', 'pwsh51'] as const).map((interpreter) => (
-          <div className="enabled-environments-row" key={interpreter}>
-            <span className="enabled-environments-label">
-              {interpreterLabels[interpreter] ?? interpreter}
-            </span>
-            {(['bare', 'wsl2', 'docker'] as const).map((environment) => {
-              if (interpreter === 'pwsh51' && environment === 'wsl2') return null
-              return (
-              <label className="enabled-environments-check" key={environment}>
-                <input
-                  type="checkbox"
-                  disabled={disabled || !value.enabled}
-                  checked={value.enabledEnvironments[interpreter]?.includes(environment) ?? false}
-                  onChange={(event) => {
-                    const current = value.enabledEnvironments[interpreter] ?? []
-                    const next = event.target.checked
-                      ? [...current, environment]
-                      : current.filter((entry) => entry !== environment)
-                    const enabledEnvironments = { ...value.enabledEnvironments, [interpreter]: next }
-                    const draft: CommandExecutionConfig = { ...value, enabledEnvironments }
-                    // Keep the default combo inside the enabled set.
-                    if (!(enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) {
-                      const fallback = listEnabledCombos(enabledEnvironments)[0]
-                      if (fallback) {
-                        draft.interpreter = fallback.interpreter
-                        draft.environment = fallback.environment
-                      }
-                    }
-                    setDraft(draft)
-                  }}
-                />
-                {environmentLabels[environment] ?? environment}
-              </label>
-              )
-            })}
-          </div>
-        ))}
-      </div>
-      <Field label={t('commandDefaultCombo')}>
-        <Select
-          disabled={disabled || !value.enabled || enabledCombos.length === 0}
-          value={defaultInEnabled ? `${value.interpreter}|${value.environment}` : ''}
-          onChange={(_, data) => {
-            const [interpreter, environment] = String(data.value ?? '').split('|')
-            if (!interpreter || !environment) return
-            setDraft({
-              ...value,
-              interpreter: interpreter as CommandExecutionConfig['interpreter'],
-              environment: environment as CommandExecutionConfig['environment'],
-            })
-          }}
-        >
-          {!defaultInEnabled && <option value="" disabled>{t('commandDefaultComboNone')}</option>}
-          {enabledCombos.map((combo) => (
-            <option key={`${combo.interpreter}|${combo.environment}`} value={`${combo.interpreter}|${combo.environment}`}>
-              {`${interpreterLabels[combo.interpreter] ?? combo.interpreter} / ${environmentLabels[combo.environment] ?? combo.environment}`}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      <p className="settings-description">{t('commandDefaultComboHint')}</p>
-      {value.enabled && !defaultInEnabled && (
-        <p className="settings-warning" role="alert">{t('commandDefaultComboInvalid')}</p>
-      )}
-      {showReview && (
-        <>
-          <Switch
-            checked={value.review !== null}
-            disabled={disabled}
-            label={t('reviewOverrideGlobal')}
-            onChange={(_, data) => setDraft({
-              ...value,
-              review: data.checked
-                ? structuredClone(value.review ?? globalReview)
-                : null,
-            })}
-          />
-          {value.review === null ? (
-            <p className="settings-description">{t('reviewFollowingGlobal')}</p>
-          ) : (
-            <CommandReviewEditor
-              value={value.review}
-              disabled={disabled}
-              modelConfigs={modelConfigs}
-              sessionModel={sessionModel}
-              onOpenSyntaxHelp={onOpenSyntaxHelp}
-              onChange={(next) => setDraft({ ...value, review: next })}
-            />
-          )}
-        </>
-      )}
-    </>
-  )
-}
-
-/** Shared review editor for the three settings surfaces (global, project,
- *  conversation): duration gate, reviewer checkboxes, rule list. */
-function CommandReviewEditor({ value, onChange, disabled, modelConfigs, sessionModel, onOpenSyntaxHelp }: {
-  value: CommandReviewConfig
-  onChange: (next: CommandReviewConfig) => void
-  disabled?: boolean
-  modelConfigs: ModelConfig[]
-  sessionModel?: ModelConfig
-  onOpenSyntaxHelp?: () => void
-}): React.JSX.Element {
-  const { t } = useTranslation()
-  const [newPattern, setNewPattern] = useState('')
-  const [newList, setNewList] = useState<'allow' | 'deny'>('deny')
-  const newPatternInvalid = newPattern.trim() !== '' && !isValidGlobPattern(newPattern)
-  const newPatternConflict = newPattern.trim() !== '' && Boolean(findConflictingRule(value.contentRules, { pattern: newPattern, list: newList }))
-  const auditModel = value.reviewers.auditModelConfigId
-    ? modelConfigs.find((model) => model.id === value.reviewers.auditModelConfigId)
-    : undefined
-  const updateRule = (id: string, patch: Partial<CommandReviewRule>): void => {
-    onChange({ ...value, contentRules: value.contentRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) })
-  }
-  const removeRule = (id: string): void => {
-    onChange({ ...value, contentRules: value.contentRules.filter((rule) => rule.id !== id) })
-  }
-  const addRule = (): void => {
-    const pattern = newPattern.trim()
-    if (!pattern || newPatternInvalid) return
-    onChange({
-      ...value,
-      contentRules: [
-        ...value.contentRules.filter((rule) => rule.pattern.trim().toLowerCase() !== pattern.toLowerCase()),
-        { id: crypto.randomUUID(), pattern, patternType: 'glob', list: newList, source: 'user', enabled: true, createdAt: new Date().toISOString() },
-      ],
-    })
-    setNewPattern('')
-  }
-  return (
-    <div className="command-review-editor">
-      <Field label={t('reviewDurationGate')} hint={t('reviewDurationGateHint')}>
-        <Input
-          type="number"
-          min={1}
-          max={1_440}
-          disabled={disabled}
-          value={String(Math.round(value.durationAllowSeconds / 60))}
-          onChange={(_, data) => {
-            const minutes = Math.floor(Number(data.value))
-            if (!Number.isFinite(minutes)) return
-            onChange({ ...value, durationAllowSeconds: Math.min(1_440, Math.max(1, minutes)) * 60 })
-          }}
-        />
-      </Field>
-      <p className="settings-description">{t('reviewDurationGateUnit')}</p>
-
-      <p className="section-label">{t('reviewReviewers')}</p>
-      <Switch checked disabled label={t('reviewProgramRules')} />
-      <p className="settings-description">{t('reviewProgramRulesNote')}</p>
-      <Switch
-        checked={value.reviewers.auditModel}
-        disabled={disabled}
-        label={t('commandModelAudit')}
-        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModel: data.checked } })}
-      />
-      {value.reviewers.auditModel && (
-        <Field label={t('commandAuditModel')} hint={t('commandAuditModelHint')}>
-          <Select
-            disabled={disabled}
-            value={value.reviewers.auditModelConfigId ?? ''}
-            onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModelConfigId: data.value || null } })}
-          >
-            <option value="">{t('notConfigured')}</option>
-            {modelConfigs
-              .filter((model) => model.id !== sessionModel?.id)
-              .map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name || model.modelName || t('unnamedModel')}
-                </option>
-              ))}
-          </Select>
-        </Field>
-      )}
-      {value.reviewers.auditModel && auditModel && sessionModel &&
-        auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase() && (
-        <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
-      )}
-      <Switch
-        checked={value.reviewers.manualConfirmation}
-        disabled={disabled}
-        label={t('commandManualConfirmation')}
-        onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, manualConfirmation: data.checked } })}
-      />
-      <p className="settings-description">{t('reviewManualConfirmationNote')}</p>
-
-      <p className="section-label">{t('reviewContentRules')}</p>
-      {onOpenSyntaxHelp && (
-        <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
-          {t('reviewSyntaxHelp')}
-        </Button>
-      )}
-      <div className="command-rules-list">
-        {value.contentRules.length === 0 && <p className="settings-description">{t('reviewNoRules')}</p>}
-        {value.contentRules.map((rule) => {
-          const conflict = findConflictingRule(value.contentRules, rule)
-          return (
-            <div className="command-rule-row" key={rule.id}>
-              <input
-                aria-label={t('reviewRuleEnabled')}
-                type="checkbox"
-                checked={rule.enabled}
-                disabled={disabled}
-                onChange={(event) => updateRule(rule.id, { enabled: event.target.checked })}
-              />
-              <input
-                aria-label={t('reviewRulePattern')}
-                className="command-rule-pattern"
-                type="text"
-                value={rule.pattern}
-                disabled={disabled}
-                onChange={(event) => updateRule(rule.id, { pattern: event.target.value })}
-              />
-              <Select
-                aria-label={t('reviewRuleList')}
-                disabled={disabled}
-                value={rule.list}
-                onChange={(_, data) => updateRule(rule.id, { list: data.value as 'allow' | 'deny' })}
-              >
-                <option value="deny">{t('reviewRuleDeny')}</option>
-                <option value="allow">{t('reviewRuleAllow')}</option>
-              </Select>
-              <span className={`command-rule-source source-${rule.source}`} title={rule.patternType === 'regex' ? t('reviewRuleRegex') : undefined}>
-                {t(`reviewSource_${rule.source}`)}
-              </span>
-              <Button appearance="subtle" size="small" disabled={disabled} onClick={() => removeRule(rule.id)}>
-                {t('reviewRuleDelete')}
-              </Button>
-              {conflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
-            </div>
-          )
-        })}
-      </div>
-      {!disabled && (
-        <div className="command-rule-add">
-          <Input
-            aria-label={t('reviewNewRulePattern')}
-            placeholder="git *"
-            type="text"
-            value={newPattern}
-            onChange={(_, data) => setNewPattern(data.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') addRule()
-            }}
-          />
-          <Select
-            aria-label={t('reviewNewRuleList')}
-            value={newList}
-            onChange={(_, data) => setNewList(data.value as 'allow' | 'deny')}
-          >
-            <option value="deny">{t('reviewRuleDeny')}</option>
-            <option value="allow">{t('reviewRuleAllow')}</option>
-          </Select>
-          <Button appearance="secondary" disabled={newPatternInvalid || newPattern.trim() === ''} onClick={addRule}>
-            {t('reviewRuleAdd')}
-          </Button>
-        </div>
-      )}
-      {newPatternInvalid && <p className="settings-warning" role="alert">{t('reviewRulePatternInvalid')}</p>}
-      {newPatternConflict && <p className="settings-warning" role="alert">{t('reviewRuleConflict')}</p>}
-    </div>
-  )
-}
-
-/** In-app approval card shown when run_command needs manual review. */
-function CommandApprovalDialog({ request, onRespond, onOpenSyntaxHelp }: {
-  request: CommandApprovalRequest
-  onRespond: (approved: boolean, memory?: CommandApprovalMemory) => void
-  onOpenSyntaxHelp: () => void
-}): React.JSX.Element {
-  const { t } = useTranslation()
-  const [remember, setRemember] = useState(false)
-  const [patternType, setPatternType] = useState<'exact' | 'prefix'>('exact')
-  const [scope, setScope] = useState<'turn' | 'session' | 'project' | 'global'>('project')
-  const [list, setList] = useState<'allow' | 'deny'>('allow')
-  useEffect(() => {
-    setRemember(false)
-    setPatternType('exact')
-    setScope('project')
-    setList('allow')
-  }, [request.requestId])
-  const checkLabels: Record<string, string> = {
-    rules: t('approvalCheckRules'),
-    'model-audit': t('approvalCheckModelAudit'),
-    'manual-confirmation': t('approvalCheckManual'),
-  }
-  const checksText = request.checks.map((check) => checkLabels[check] ?? check).join(', ')
-  const respond = (approved: boolean): void => {
-    onRespond(approved, remember ? { patternType, scope, list } : undefined)
-  }
-  return (
-    <Dialog open modalType="alert" onOpenChange={(_, data) => { if (!data.open) respond(false) }}>
-      <DialogSurface>
-        <DialogBody>
-          <DialogTitle>{t('approvalTitle')}</DialogTitle>
-          <DialogContent className="dialog-fields">
-            <p className="settings-description">
-              {t('approvalDurationInfo', { duration: formatCommandDuration(request.timeoutSeconds) })}
-            </p>
-            <pre className="command-approval-command">{request.command}</pre>
-            <p className="settings-description">
-              {t('approvalEnvironment', { environment: request.environment, workspace: request.workspacePath })}
-            </p>
-            {request.auditModelName && (
-              <p className="settings-description">
-                {t('approvalAuditVerdict', {
-                  model: request.auditModelName,
-                  verdict: request.auditNote?.trim() || t('approvalNoObjection'),
-                })}
-              </p>
-            )}
-            {request.checks.length > 0 && (
-              <p className="settings-description">{t('approvalChecks', { checks: checksText })}</p>
-            )}
-            <div className="command-approval-memory">
-              <Switch checked={remember} label={t('approvalRemember')} onChange={(_, data) => setRemember(data.checked)} />
-              {remember && (
-                <>
-                  <Field label={t('approvalMemoryPattern')}>
-                    <Select value={patternType} onChange={(_, data) => setPatternType(data.value as 'exact' | 'prefix')}>
-                      <option value="exact">{t('approvalMemoryExact')}</option>
-                      <option value="prefix">{t('approvalMemoryPrefix')}</option>
-                    </Select>
-                  </Field>
-                  <Field label={t('approvalMemoryScope')}>
-                    <Select value={scope} onChange={(_, data) => setScope(data.value as typeof scope)}>
-                      <option value="turn">{t('approvalScopeTurn')}</option>
-                      <option value="session">{t('approvalScopeSession')}</option>
-                      <option value="project">{t('approvalScopeProject')}</option>
-                      <option value="global">{t('approvalScopeGlobal')}</option>
-                    </Select>
-                  </Field>
-                  <Field label={t('approvalMemoryList')}>
-                    <Select value={list} onChange={(_, data) => setList(data.value as 'allow' | 'deny')}>
-                      <option value="allow">{t('approvalMemoryAllow')}</option>
-                      <option value="deny">{t('approvalMemoryDeny')}</option>
-                    </Select>
-                  </Field>
-                </>
-              )}
-            </div>
-            <Button appearance="subtle" size="small" onClick={onOpenSyntaxHelp}>
-              {t('reviewSyntaxHelp')}
-            </Button>
-          </DialogContent>
-          <DialogActions>
-            <Button appearance="secondary" onClick={() => respond(false)}>
-              {t('approvalDeny')}
-            </Button>
-            <Button appearance="primary" onClick={() => respond(true)}>
-              {t('approvalApprove')}
-            </Button>
-          </DialogActions>
-        </DialogBody>
-      </DialogSurface>
-    </Dialog>
-  )
-}
-
 const VirtualizedConversationHistory = memo(function VirtualizedConversationHistory({
   messages,
   pagination,
@@ -1290,252 +821,6 @@ const LiveConversationRow = memo(function LiveConversationRow({ row, projectId, 
   (previous.row.kind === 'live' && next.row.kind === 'live' ? previous.row.item === next.row.item :
     previous.row.kind === 'stream' && next.row.kind === 'stream' && previous.row.block === next.row.block))
 
-type ContextStrategyMode = 'default' | 'layered' | 'custom'
-
-function contextStrategyMode(value: ContextManagementConfig, customStrategyAvailable: boolean): ContextStrategyMode {
-  if (customStrategyAvailable && value.customStrategyEnabled) return 'custom'
-  return value.layeredEnabled ? 'layered' : 'default'
-}
-
-function ContextSettingsFields({
-  value,
-  disabled = false,
-  modelDisabled,
-  showCustomStrategy = false,
-  modelTargets,
-  referenceModel,
-  activeModelConfigId,
-  emptyModelOptionLabel,
-  onModelConfigChange,
-  onChange,
-}: {
-  value: ContextManagementConfig
-  disabled?: boolean
-  modelDisabled?: boolean
-  showCustomStrategy?: boolean
-  /** Selectable targets: single models and model groups. */
-  modelTargets?: Array<{ id: string; label: string }>
-  /** Resolved effective target used for budget derivation. */
-  referenceModel?: RuntimeModelConfig
-  activeModelConfigId?: string | null
-  emptyModelOptionLabel?: string
-  onModelConfigChange?: (modelConfigId: string) => void
-  onChange: (patch: Partial<ContextManagementConfig>) => void
-}): React.JSX.Element {
-  const autoBudget = value.autoBudgetEnabled !== false
-  const fieldsDisabled = disabled || autoBudget
-  const { t } = useTranslation()
-  const strategyMode = contextStrategyMode(value, showCustomStrategy)
-
-  function setStrategyMode(mode: ContextStrategyMode): void {
-    if (mode === 'custom') {
-      onChange({ layeredEnabled: false, customStrategyEnabled: true })
-      return
-    }
-    onChange({
-      layeredEnabled: mode === 'layered',
-      customStrategyEnabled: false,
-    })
-  }
-
-  // Auto-apply formula budgets when model changes and autoBudget is enabled
-  useEffect(() => {
-    if (autoBudget && referenceModel) {
-      const budgets = deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens)
-      onChange({
-        ...budgets,
-        ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
-      })
-    }
-  }, [autoBudget, referenceModel?.id, referenceModel?.modelMaxContext, referenceModel?.modelMaxOutputTokens, strategyMode])
-
-  return (
-    <div className="context-settings-fields">
-      <Field label={t('contextStrategyMode')}>
-        <Select
-          disabled={disabled}
-          value={strategyMode}
-          onChange={(_, data) => setStrategyMode(data.value as ContextStrategyMode)}
-        >
-          <option value="default">{t('contextStrategyDefault')}</option>
-          <option value="layered">{t('contextStrategyLayered')}</option>
-          {showCustomStrategy && <option value="custom">{t('contextStrategyCustom')}</option>}
-        </Select>
-      </Field>
-
-      {modelTargets !== undefined && modelTargets.length > 0 && (
-        <>
-          <Field label={t('modelConfiguration')}>
-            <Select
-              disabled={modelDisabled ?? disabled}
-              value={activeModelConfigId ?? referenceModel?.id ?? ''}
-              onChange={(_, data) => onModelConfigChange?.(data.value)}
-            >
-              {emptyModelOptionLabel !== undefined && <option value="">{emptyModelOptionLabel}</option>}
-              {modelTargets.map((target) => (
-                <option key={target.id} value={target.id}>
-                  {target.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          {referenceModel && (
-            <div className="model-context-info">
-              {t('modelMaxContext', { tokens: referenceModel.modelMaxContext.toLocaleString() })}
-            </div>
-          )}
-        </>
-      )}
-
-      {strategyMode === 'custom' ? (
-        <>
-          <Field label={t('customContextStrategyScript')}>
-            <Textarea
-              disabled={disabled}
-              resize="vertical"
-              value={value.customStrategyScript ?? ''}
-              onChange={(_, data) => onChange({ customStrategyScript: data.value })}
-              placeholder={t('customContextStrategyPlaceholder')}
-              rows={12}
-              onKeyDown={(event) => {
-                if (event.key !== 'Tab') return
-                event.preventDefault()
-                const textarea = event.currentTarget
-                const start = textarea.selectionStart
-                const end = textarea.selectionEnd
-                const current = value.customStrategyScript ?? ''
-                const next = `${current.slice(0, start)}\t${current.slice(end)}`
-                onChange({ customStrategyScript: next })
-                window.requestAnimationFrame(() => {
-                  textarea.selectionStart = start + 1
-                  textarea.selectionEnd = start + 1
-                })
-              }}
-            />
-          </Field>
-          <Field label={t('customContextStrategyPrompt')} hint={t('customContextStrategyPromptHint')}>
-            <Textarea
-              disabled={disabled}
-              resize="vertical"
-              value={value.customStrategyPrompt ?? ''}
-              onChange={(_, data) => onChange({ customStrategyPrompt: data.value })}
-              placeholder={t('customContextStrategyPromptPlaceholder')}
-              rows={4}
-            />
-          </Field>
-        </>
-      ) : (
-        <>
-          <Switch
-            checked={value.filterEnabled}
-            disabled={fieldsDisabled}
-            label={t('contextFilter')}
-            onChange={(_, data) => onChange({ filterEnabled: data.checked })}
-          />
-          <Switch
-            checked={value.rewriteEnabled}
-            disabled={fieldsDisabled}
-            label={t('contextRewrite')}
-            onChange={(_, data) => onChange({ rewriteEnabled: data.checked })}
-          />
-          <Switch
-            checked={value.truncateEnabled}
-            disabled={fieldsDisabled}
-            label={t('contextTruncate')}
-            onChange={(_, data) => onChange({ truncateEnabled: data.checked })}
-          />
-          <Field label={t('recentRounds')} required>
-            <Input
-              disabled={fieldsDisabled}
-              max={20}
-              min={1}
-              type="number"
-              value={String(value.recentKeepRounds)}
-              onChange={(_, data) => onChange({ recentKeepRounds: Number(data.value) })}
-            />
-          </Field>
-          <Switch
-            checked={autoBudget}
-            disabled={disabled}
-            label={t('contextUseRecommendedValues')}
-            onChange={(_, data) => {
-              if (data.checked) {
-                const budgets = referenceModel ? deriveContextBudgets(referenceModel.modelMaxContext, referenceModel.modelMaxOutputTokens) : {}
-                onChange({ 
-                  autoBudgetEnabled: true,
-                  ...budgets,
-                  ...(strategyMode === 'layered' ? { filterEnabled: true, rewriteEnabled: true, truncateEnabled: true, recentKeepRounds: 20 } : {})
-                })
-              } else {
-                onChange({ autoBudgetEnabled: false })
-              }
-            }}
-          />
-          {strategyMode === 'default' && (
-            <Field label={t('maxInputTokens')} hint={t('maxInputTokensHint')}>
-              <Input
-                disabled={fieldsDisabled}
-                min={0}
-                step={1000}
-                type="number"
-                value={value.maxInputTokens >= 1 ? String(value.maxInputTokens) : ''}
-                onChange={(_, data) => onChange({
-                  maxInputTokens: data.value === '' || !Number.isFinite(Number(data.value)) || Number(data.value) < 1
-                    ? 0
-                    : Number(data.value),
-                })}
-              />
-            </Field>
-          )}
-          {strategyMode === 'layered' && (
-            <div className="context-budgets">
-              <Field label={t('hotTokenBudget')} required>
-                <Input
-                  disabled={fieldsDisabled}
-                  min={1000}
-                  step={1000}
-                  type="number"
-                  value={String(value.hotTokenBudget)}
-                  onChange={(_, data) => onChange({ hotTokenBudget: Number(data.value) })}
-                />
-              </Field>
-              <Field label={t('hotLongTermTokenBudget')} required>
-                <Input
-                  disabled={disabled}
-                  min={1}
-                  step={100}
-                  type="number"
-                  value={String(value.hotLongTermTokenBudget ?? 1000)}
-                  onChange={(_, data) => onChange({ hotLongTermTokenBudget: Number(data.value) })}
-                />
-              </Field>
-              <Field label={t('warmTokenBudget')} required>
-                <Input
-                  disabled={fieldsDisabled}
-                  min={0}
-                  step={1000}
-                  type="number"
-                  value={String(value.warmTokenBudget)}
-                  onChange={(_, data) => onChange({ warmTokenBudget: Number(data.value) })}
-                />
-              </Field>
-              <Field label={t('coldRecallTokenBudget')} required>
-                <Input
-                  disabled={fieldsDisabled}
-                  min={0}
-                  step={1000}
-                  type="number"
-                  value={String(value.coldRecallTokenBudget)}
-                  onChange={(_, data) => onChange({ coldRecallTokenBudget: Number(data.value) })}
-                />
-              </Field>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  )
-}
 type ComposerProps = {
   canSend: boolean
   supportsImageInput: boolean
@@ -2049,10 +1334,6 @@ export function App(): React.JSX.Element {
   const [archiveError, setArchiveError] = useState('')
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
-  const [conversationStates, setConversationStates] = useState<Record<string, ConversationRuntimeState>>({})
-  const [sessionModelDisplay, setSessionModelDisplay] = useState<{ key: string; providerName: string; modelName: string } | null>(null)
-  const [stoppingConversations, setStoppingConversations] = useState<Record<string, boolean>>({})
-  const [conversationTurns, setConversationTurns] = useState<Record<string, ConversationTurn>>({})
   const [saving, setSaving] = useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
@@ -2076,13 +1357,24 @@ export function App(): React.JSX.Element {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
-  const activeConversationKeyRef = useRef('')
-  const activeTraceIdsRef = useRef<Record<string, string>>({})
-  const lastProgressTraceAtRef = useRef<Record<string, number>>({})
   const toastTimerRef = useRef<number | undefined>(undefined)
   const settingsOpenedOnceRef = useRef(false)
   const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
-  const [globalSettingsTab, setGlobalSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
+  const [globalSettingsTab, setGlobalSettingsTab] = useState<GlobalSettingsTab>('model')
+
+  const {
+    activeConversationKey,
+    activeConversationKeyRef,
+    beginTurn,
+    clearRun,
+    conversationStates,
+    conversationTurns,
+    finishTurn,
+    sessionModelDisplay,
+    setStopping,
+    stoppingConversations,
+    updateTurnUserMessage,
+  } = useConversationRuntime({ activeProjectId, activeConversationId })
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
@@ -2151,9 +1443,6 @@ export function App(): React.JSX.Element {
     }
     return state
   }, [projects, unreadCounts, conversationErrors])
-  const activeConversationKey = activeProject && activeConversation
-    ? `${activeProject.id}:${activeConversation.id}`
-    : ''
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
   const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
@@ -2202,7 +1491,6 @@ export function App(): React.JSX.Element {
       effectiveModelConfig.modelMaxContext,
     ))
   const canSend = Boolean(messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
-  activeConversationKeyRef.current = activeConversationKey
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
     : undefined
@@ -2257,55 +1545,6 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     void window.codey.getPerformanceTraceStatus().then(setPerformanceStatus).catch(() => undefined)
   }, [])
-
-  useEffect(() => window.codey.onDevelopmentProgress((progress) => {
-    const key = `${progress.projectId}:${progress.conversationId}`
-    const now = performance.now()
-    if (now - (lastProgressTraceAtRef.current[key] ?? 0) >= 1_000) {
-      lastProgressTraceAtRef.current[key] = now
-      window.codey.recordPerformanceTrace({
-        traceId: activeTraceIdsRef.current[key] ?? 'renderer-session', scope: 'renderer', phase: 'progress-received',
-        projectId: progress.projectId, conversationId: progress.conversationId,
-      })
-    }
-    if (progress.update.type === 'model-changed') {
-      setSessionModelDisplay({
-        key,
-        providerName: progress.update.providerName,
-        modelName: progress.update.modelName,
-      })
-    }
-    updateDevelopmentProgress(progress)
-  }), [])
-
-  useEffect(() => {
-    let cancelled = false
-    const projectId = activeProjectId || null
-    const conversationId = activeConversationId || null
-    const key = projectId && conversationId ? `${projectId}:${conversationId}` : ''
-    void window.codey
-      .subscribeDevelopmentProgress(projectId, conversationId)
-      .then((state) => {
-        if (!cancelled && key && activeConversationKeyRef.current === key) {
-          replaceDevelopmentProgress(key, state)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [activeConversationId, activeProjectId])
-
-  useEffect(() => () => {
-    void window.codey.subscribeDevelopmentProgress(null, null)
-  }, [])
-
-  useEffect(() => window.codey.onConversationStateChange((change) => {
-    setConversationStates((current) => ({
-      ...current,
-      [`${change.projectId}:${change.conversationId}`]: change.state,
-    }))
-  }), [])
 
   useEffect(() => window.codey.onProjectUpdated((project) => {
     window.codey.recordPerformanceTrace({ traceId: 'renderer-session', scope: 'renderer', phase: 'project-update-received', projectId: project.id })
@@ -3743,7 +2982,6 @@ export function App(): React.JSX.Element {
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
     const traceId = crypto.randomUUID()
-    activeTraceIdsRef.current[conversationKey] = traceId
     const sendStartedAt = performance.now()
     setError('')
     const userMessageId = crypto.randomUUID()
@@ -3752,19 +2990,7 @@ export function App(): React.JSX.Element {
       traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
       durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
     })
-    resetDevelopmentProgress(conversationKey)
-    setConversationStates((current) => ({ ...current, [conversationKey]: 'running' }))
-    setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
-    setConversationTurns((current) => ({
-      ...current,
-      [conversationKey]: {
-        projectId,
-        conversationId,
-        userMessageId,
-        startedAt: Date.now(),
-        result: 'processing',
-      },
-    }))
+    beginTurn({ projectId, conversationId, userMessageId, traceId })
 
     try {
       window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
@@ -3775,29 +3001,17 @@ export function App(): React.JSX.Element {
         )
         const updatedUserMessage = updatedConversation?.history?.lastUserMessage
         await messageHistory.refresh()
-        setConversationTurns((current) => ({
-          ...current,
-          [conversationKey]: {
-            ...current[conversationKey],
-            userMessageId: updatedUserMessage?.id ?? current[conversationKey]?.userMessageId ?? userMessageId,
-          },
-        }))
+        if (updatedUserMessage?.id) updateTurnUserMessage(conversationKey, updatedUserMessage.id)
         replaceProject(result.project)
       }
-      setConversationTurns((current) => ({
-        ...current,
-        [conversationKey]: {
-          ...current[conversationKey],
-          endedAt: Date.now(),
-          result: result.stopped
-            ? 'stopped'
-            : result.error
-              ? /timed out/i.test(result.error) ? 'timeout' : 'other'
-              : 'normal',
-          error: result.stopped ? undefined : result.error,
-        },
-      }))
-      setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
+      finishTurn(conversationKey, {
+        result: result.stopped
+          ? 'stopped'
+          : result.error
+            ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+            : 'normal',
+        error: result.stopped ? undefined : result.error,
+      })
       if (result.error && conversationKey === activeConversationKeyRef.current) {
         const files = result.writtenFiles.length
           ? t('filesWritten', { count: result.writtenFiles.length })
@@ -3805,26 +3019,10 @@ export function App(): React.JSX.Element {
         setError(`${result.error}${files}`)
       }
     } catch {
-      setConversationTurns((current) => ({
-        ...current,
-        [conversationKey]: {
-          ...current[conversationKey],
-          endedAt: Date.now(),
-          result: 'other',
-          error: t('requestFailed'),
-        },
-      }))
-      setConversationStates((current) => ({ ...current, [conversationKey]: 'idle' }))
+      finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
     } finally {
-      delete activeTraceIdsRef.current[conversationKey]
-      clearDevelopmentProgress(conversationKey)
-      setStoppingConversations((current) => {
-        if (!current[conversationKey]) return current
-        const next = { ...current }
-        delete next[conversationKey]
-        return next
-      })
+      clearRun(conversationKey)
     }
   }
   async function stopMessage(): Promise<void> {
@@ -3833,14 +3031,14 @@ export function App(): React.JSX.Element {
     }
 
     const conversationKey = `${activeProject.id}:${activeConversation.id}`
-    setStoppingConversations((current) => ({ ...current, [conversationKey]: true }))
+    setStopping(conversationKey, true)
     try {
       const accepted = await window.codey.stopDevelopment(activeProject.id, activeConversation.id)
       if (!accepted) {
-        setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
+        setStopping(conversationKey, false)
       }
     } catch {
-      setStoppingConversations((current) => ({ ...current, [conversationKey]: false }))
+      setStopping(conversationKey, false)
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableStopRequest'))
     }
   }
@@ -4869,243 +4067,44 @@ export function App(): React.JSX.Element {
                </section>
                )}
               {settingsTab === 'global' && (
-              <section className="settings-group">
-                <TabList
-                  selectedValue={globalSettingsTab}
-                  onTabSelect={(_, data) => setGlobalSettingsTab(data.value as typeof globalSettingsTab)}
-                >
-                  <Tab value="model">{t('globalTabModel')}</Tab>
-                  <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
-                  <Tab value="command">{t('globalTabCommand')}</Tab>
-                  <Tab value="context">{t('globalTabContext')}</Tab>
-                  <Tab value="skills">{t('skills')}</Tab>
-                  <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
-                </TabList>
-                {globalSettingsTab === 'model' && (
-                  <Field label={t('defaultModelTarget')} hint={t('defaultModelTargetHint')}>
-                    <Select
-                      aria-label={t('defaultModelTarget')}
-                      value={configDraft.activeModelConfigId ?? ''}
-                      onChange={(_, data) => setConfigDraft((current) => ({
-                        ...current,
-                        activeModelConfigId: data.value || null,
-                      }))}
-                    >
-                      <option value="">{t('notConfigured')}</option>
-                      {sortedConfigDraftModelGroups.map((group) => (
-                        <option key={group.id} value={group.id}>
-                          {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
-                        </option>
-                      ))}
-                      {sortedConfigDraftModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name || t('unnamedModel')}
-                        </option>
-                      ))}
-                    </Select>
-                  </Field>
-                )}
-                {globalSettingsTab === 'agentLimits' && (
-                  <AgentLimitsFields
-                    value={configDraft.agentLimitsGlobal}
-                    disabled={interactionLocked}
-                    onChange={(patch) => setConfigDraft((current) => ({
-                      ...current,
-                      agentLimitsGlobal: { ...current.agentLimitsGlobal, ...patch },
-                    }))}
-                  />
-                )}
-                {globalSettingsTab === 'command' && (
-                  <>
-                    <div className="command-execution-global-group">
-                      <h3>{t('globalCommandExecution')}</h3>
-                      <CommandExecutionEditorFields
-                        value={configDraft.commandExecutionGlobal}
-                        onChange={(next) => setConfigDraft((current) => ({
-                          ...current,
-                          commandExecutionGlobal: next,
-                        }))}
-                        modelConfigs={flatDraftModelConfigs}
-                        globalReview={configDraft.commandReviewGlobal}
-                        onOpenSyntaxHelp={openCommandRulesHelp}
-                        showReview={false}
-                      />
-                    </div>
-                    <div className="command-review-global-group">
-                      <h3>{t('globalCommandReview')}</h3>
-                      <p className="settings-description">{t('globalCommandReviewDescription')}</p>
-                      <CommandReviewEditor
-                        value={configDraft.commandReviewGlobal}
-                        modelConfigs={flatDraftModelConfigs}
-                        onOpenSyntaxHelp={openCommandRulesHelp}
-                        onChange={(next) => setConfigDraft((current) => ({
-                          ...current,
-                          commandReviewGlobal: next,
-                        }))}
-                      />
-                    </div>
-                    <div className="shell-detection-group">
-                      <h3>{t('environmentDetection')}</h3>
-                      <Button appearance="secondary" disabled={shellDetectBusy} onClick={() => void runShellDetection()}>
-                        {shellDetectBusy ? t('detectingShells') : t('runEnvironmentDetection')}
-                      </Button>
-                      {shellDetection && (
-                        <div className="shell-detection-results">
-                          {shellDetection.interpreters.map((entry) => (
-                            <p key={entry.kind} className="shell-detection-item">
-                              <span>{entry.available ? '✓' : '✗'} {interpreterLabels[entry.kind] ?? entry.kind}</span>
-                              <span className="shell-detection-detail">{entry.detail}</span>
-                            </p>
-                          ))}
-                          {shellDetection.environments.map((entry) => (
-                            <p key={entry.kind} className="shell-detection-item">
-                              <span>{entry.available ? '✓' : '✗'} {environmentLabels[entry.kind] ?? entry.kind}</span>
-                              <span className="shell-detection-detail">{entry.detail}</span>
-                            </p>
-                          ))}
-                          <Button appearance="subtle" size="small" onClick={() => void pickBashExecutable()}>
-                            {t('pickBashExecutable')}
-                          </Button>
-                          <div className="wsl2-config-group">
-                            <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void openWsl2Config()}>
-                              {t('configureWsl2')}
-                            </Button>
-                            {wsl2ConfigOpen && (
-                              <div className="wsl2-config-form">
-                                {wslDistros.length > 0 ? (
-                                  <Field label={t('wsl2Distro')}>
-                                    <Select
-                                      disabled={wsl2ConfigBusy}
-                                      value={wsl2Draft.distro}
-                                      onChange={(_, data) => setWsl2Draft((current) => ({ ...current, distro: data.value }))}
-                                    >
-                                      {wslDistros.map((distro) => (
-                                        <option key={distro} value={distro}>{distro}</option>
-                                      ))}
-                                    </Select>
-                                  </Field>
-                                ) : (
-                                  <p className="settings-warning" role="alert">{t('wsl2NoUserDistro')}</p>
-                                )}
-                                <Field label={t('wsl2SandboxUser')} hint={t('wsl2SandboxUserHint')}>
-                                  <Input
-                                    disabled={wsl2ConfigBusy || wslDistros.length === 0}
-                                    value={wsl2Draft.sandboxUser}
-                                    onChange={(_, data) => setWsl2Draft((current) => ({ ...current, sandboxUser: data.value }))}
-                                  />
-                                </Field>
-                                <div className="wsl2-config-actions">
-                                  <Button appearance="secondary" size="small" disabled={wsl2ConfigBusy || wslDistros.length === 0 || !wsl2Draft.distro || !wsl2Draft.sandboxUser.trim()} onClick={() => void saveWsl2Config()}>
-                                    {t('save')}
-                                  </Button>
-                                  <Button appearance="subtle" size="small" disabled={wsl2ConfigBusy} onClick={() => void clearWsl2Config()}>
-                                    {t('wsl2ClearConfig')}
-                                  </Button>
-                                  <Button appearance="subtle" size="small" onClick={() => setWsl2ConfigOpen(false)}>
-                                    {t('close')}
-                                  </Button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                          {shellDetection.wsl2Sandbox && (
-                            <div className="wsl2-sandbox-probe">
-                              <p className="shell-detection-item">
-                                <span>{shellDetection.wsl2Sandbox.bwrapAvailable ? '✓' : '✗'} bwrap</span>
-                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.bwrapAvailable ? t('wsl2BwrapOk') : t('wsl2BwrapMissing')}</span>
-                              </p>
-                              <p className="shell-detection-item">
-                                <span>{shellDetection.wsl2Sandbox.socatAvailable ? '✓' : '✗'} socat</span>
-                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.socatAvailable ? t('wsl2SocatOk') : t('wsl2SocatMissing')}</span>
-                              </p>
-                              <p className="shell-detection-item">
-                                <span>{shellDetection.wsl2Sandbox.interopEnabled ? '✗' : '✓'} interop</span>
-                                <span className="shell-detection-detail">{shellDetection.wsl2Sandbox.interopEnabled ? t('wsl2InteropWarning') : t('wsl2InteropOk')}</span>
-                              </p>
-                              {shellDetection.wsl2Sandbox.interopEnabled && (
-                                <p className="settings-warning" role="alert">{t('wsl2InteropHighRisk')}</p>
-                              )}
-                              {!shellDetection.wsl2Sandbox.socatAvailable && (
-                                <p className="settings-warning" role="alert">{t('wsl2SocatHighRisk')}</p>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
-                {globalSettingsTab === 'skills' && (
-                  <div className="skill-selection-list">
-                    <p className="settings-description">{t('globalSkillSelectionDescription')}</p>
-                    {installedSkills.length === 0 ? (
-                      <p className="settings-description">{t('noInstalledSkills')}</p>
-                    ) : installedSkills.map((skill) => (
-                      <label className="skill-selection-row" key={skill.id}>
-                        <Checkbox
-                          checked={configDraft.defaultSkillIds.includes(skill.id)}
-                          disabled={interactionLocked}
-                          onChange={(_, data) => setConfigDraft((current) => ({
-                            ...current,
-                            defaultSkillIds: data.checked === true
-                              ? [...new Set([...current.defaultSkillIds, skill.id])]
-                              : current.defaultSkillIds.filter((id) => id !== skill.id),
-                          }))}
-                        />
-                        <span>
-                          <strong>{skill.name}</strong>
-                          <small>{skill.description || skill.sourceUrl}</small>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                {globalSettingsTab === 'knowledgeBases' && (
-                  <div className="skill-selection-list">
-                    <p className="settings-description">{t('globalKnowledgeBaseSelectionDescription')}</p>
-                    {knowledgeBases.length === 0 ? (
-                      <p className="settings-description">{t('noKnowledgeBases')}</p>
-                    ) : knowledgeBases.map((knowledgeBase) => (
-                      <label className="skill-selection-row" key={knowledgeBase.id}>
-                        <Checkbox
-                          checked={configDraft.defaultKnowledgeBaseIds.includes(knowledgeBase.id)}
-                          disabled={interactionLocked}
-                          onChange={(_, data) => setConfigDraft((current) => ({
-                            ...current,
-                            defaultKnowledgeBaseIds: data.checked === true
-                              ? [...new Set([...current.defaultKnowledgeBaseIds, knowledgeBase.id])]
-                              : current.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBase.id),
-                          }))}
-                        />
-                        <span>
-                          <strong>{knowledgeBase.name}</strong>
-                          <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
-                          <small className={knowledgeBase.status === 'ready' ? 'resource-effective' : 'resource-unavailable'}>
-                            {t(`knowledgeBaseStatus_${knowledgeBase.status.replace('-', '_')}`)}
-                          </small>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                {globalSettingsTab === 'context' && (
-                  <ContextSettingsFields
-                    modelTargets={[
-                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
-                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
-                    ]}
-                    activeModelConfigId={configDraft.activeModelConfigId}
-                    referenceModel={resolveModelTarget(configDraft, configDraft.activeModelConfigId)}
-                    onModelConfigChange={(id) => setConfigDraft((current) => ({ ...current, activeModelConfigId: id }))}
-                    value={configDraft.contextManagement}
-                    disabled={interactionLocked}
-                    onChange={(patch) => setConfigDraft((current) => ({
-                      ...current,
-                      contextManagement: { ...current.contextManagement, ...patch },
-                    }))}
-                  />
-                )}
-              </section>
+                <GlobalSettingsPanel
+                  selectedTab={globalSettingsTab}
+                  onTabSelect={setGlobalSettingsTab}
+                  configDraft={configDraft}
+                  onConfigDraftChange={(updater) => setConfigDraft(updater)}
+                  interactionLocked={interactionLocked}
+                  sortedModelGroups={sortedConfigDraftModelGroups}
+                  sortedModels={sortedConfigDraftModels}
+                  flatModelConfigs={flatDraftModelConfigs}
+                  onOpenSyntaxHelp={openCommandRulesHelp}
+                  shellDetection={shellDetection}
+                  shellDetectBusy={shellDetectBusy}
+                  onRunShellDetection={() => void runShellDetection()}
+                  onPickBashExecutable={() => void pickBashExecutable()}
+                  wsl2ConfigOpen={wsl2ConfigOpen}
+                  onOpenWsl2Config={() => void openWsl2Config()}
+                  wslDistros={wslDistros}
+                  wsl2Draft={wsl2Draft}
+                  wsl2ConfigBusy={wsl2ConfigBusy}
+                  onWsl2DraftChange={(patch) => setWsl2Draft((current) => ({ ...current, ...patch }))}
+                  onSaveWsl2Config={() => void saveWsl2Config()}
+                  onClearWsl2Config={() => void clearWsl2Config()}
+                  onCloseWsl2Config={() => setWsl2ConfigOpen(false)}
+                  installedSkills={installedSkills}
+                  knowledgeBases={knowledgeBases}
+                  contextModelTargets={[
+                    ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
+                    ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
+                  ]}
+                  contextActiveModelConfigId={configDraft.activeModelConfigId}
+                  contextReferenceModel={resolveModelTarget(configDraft, configDraft.activeModelConfigId)}
+                  contextValue={configDraft.contextManagement}
+                  onContextModelConfigChange={(id) => setConfigDraft((current) => ({ ...current, activeModelConfigId: id }))}
+                  onContextChange={(patch) => setConfigDraft((current) => ({
+                    ...current,
+                    contextManagement: { ...current.contextManagement, ...patch },
+                  }))}
+                />
               )}
               {settingsTab === 'skills' && (
                 <section className="settings-group skill-management">
