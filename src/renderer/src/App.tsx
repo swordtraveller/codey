@@ -60,7 +60,6 @@ import {
   type Project,
   type ProviderConfig,
   type PromptSnapshot,
-  type ToolHelpSnapshot,
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
@@ -87,6 +86,8 @@ import { AppPreferencesPanel } from './components/AppPreferencesPanel'
 import { Composer } from './components/Composer'
 import { useConversationRuntime } from './hooks/useConversationRuntime'
 import { ConversationMessages } from './components/ConversationMessages'
+import { HelpDialog } from './components/HelpDialog'
+import { useHelpDialog } from './hooks/useHelpDialog'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
 
@@ -125,23 +126,6 @@ function resolveEffectiveResourceIds(
 }
 
 const isValidContextConfig = isValidContextManagementConfig
-
-/** Renders text with <mark> highlights around case-insensitive keyword matches. */
-function HighlightedText({ text, keyword }: { text: string; keyword: string }): React.JSX.Element {
-  const trimmed = keyword.trim()
-  if (!trimmed) return <>{text}</>
-  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const parts = text.split(new RegExp(`(${escaped})`, 'ig'))
-  return (
-    <>
-      {parts.map((part, index) =>
-        part.toLowerCase() === trimmed.toLowerCase()
-          ? <mark key={index}>{part}</mark>
-          : <span key={index}>{part}</span>,
-      )}
-    </>
-  )
-}
 
 export function App(): React.JSX.Element {
   const { t } = useTranslation()
@@ -215,12 +199,6 @@ export function App(): React.JSX.Element {
   const [wsl2Draft, setWsl2Draft] = useState<Wsl2ManualConfig>({ distro: '', sandboxUser: '' })
   const [wsl2ConfigBusy, setWsl2ConfigBusy] = useState(false)
   const [promptSnapshot, setPromptSnapshot] = useState<PromptSnapshot | null>(null)
-  const [helpDialogOpen, setHelpDialogOpen] = useState(false)
-  const [helpTab, setHelpTab] = useState<'tools' | 'commandRules'>('tools')
-  const [toolHelp, setToolHelp] = useState<ToolHelpSnapshot | null>(null)
-  const [toolSearch, setToolSearch] = useState('')
-  const [toolMatchIndex, setToolMatchIndex] = useState(0)
-  const toolListRef = useRef<HTMLDivElement>(null)
   const [wsl2ConfigOpen, setWsl2ConfigOpen] = useState(false)
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null)
   const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null)
@@ -272,6 +250,7 @@ export function App(): React.JSX.Element {
 
   const visibleProjects = projects.filter((project) => !project.archived)
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
+  const { dialogProps: helpDialogProps, openHelp, openCommandRulesHelp, invalidateToolHelp } = useHelpDialog(activeProject?.folders[0]?.path)
   const visibleConversations = activeProject?.conversations.filter((conversation) => !conversation.archived) ?? []
   const archivedProjects = projects.filter((project) => project.archived)
   const archivedConversations = projects
@@ -867,53 +846,6 @@ export function App(): React.JSX.Element {
     }
   }
 
-  function loadToolHelp(): void {
-    setToolHelp(null)
-    void window.codey
-      .getToolHelpSnapshot(activeProject?.folders[0]?.path)
-      .then(setToolHelp)
-      .catch(() => setToolHelp(null))
-  }
-
-  function openHelp(): void {
-    setHelpDialogOpen(true)
-    loadToolHelp()
-  }
-
-  const toolKeyword = toolSearch.trim().toLowerCase()
-  const toolMatches = useMemo(
-    () => (toolHelp && toolKeyword
-      ? toolHelp.entries.filter((entry) => `${entry.name} ${entry.description}`.toLowerCase().includes(toolKeyword))
-      : []),
-    [toolHelp, toolKeyword],
-  )
-
-  // Keyword changes reset the jump position; the effect scrolls to it.
-  useEffect(() => {
-    setToolMatchIndex(0)
-  }, [toolKeyword])
-
-  useEffect(() => {
-    if (!helpDialogOpen || toolMatches.length === 0) return
-    const container = toolListRef.current
-    if (!container) return
-    const name = toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name ?? ''
-    const target = container.querySelector<HTMLElement>(`[data-tool-name="${CSS.escape(name)}"]`)
-    if (target) {
-      target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-    }
-  }, [toolMatchIndex, toolMatches, helpDialogOpen])
-
-  function jumpToMatch(direction: 1 | -1): void {
-    if (toolMatches.length === 0) return
-    setToolMatchIndex((current) => (current + direction + toolMatches.length) % toolMatches.length)
-  }
-
-  function isCurrentMatch(name: string): boolean {
-    if (toolMatches.length === 0) return false
-    return toolMatches[Math.min(toolMatchIndex, toolMatches.length - 1)]?.name === name
-  }
-
   function openSettings(): void {
     // Keep unsaved drafts (e.g. a freshly added model configuration) across
     // dialog close/reopen; only seed once when the dialog has never been
@@ -1308,11 +1240,6 @@ export function App(): React.JSX.Element {
     if (!request) return
     setApprovalRequest(null)
     void window.codey.respondCommandReview(request.requestId, { approved, memory }).catch(() => undefined)
-  }
-
-  function openCommandRulesHelp(): void {
-    setHelpTab('commandRules')
-    setHelpDialogOpen(true)
   }
 
   useEffect(() => window.codey.onCommandReviewRequest((request) => setApprovalRequest(request)), [])
@@ -1769,7 +1696,7 @@ export function App(): React.JSX.Element {
       setConfig(saved)
       setConfigDraft(saved)
       setAppLanguage(saved.language)
-      setToolHelp(null)
+      invalidateToolHelp()
       setError('')
       setSettingsOpen(false)
     } catch {
@@ -1977,7 +1904,6 @@ export function App(): React.JSX.Element {
   const settingsDirty = configDraft !== config
   const sortedConversationModelGroups = [...config.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
   const sortedConversationModels = [...config.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
-
   const sortedConfigDraftModelGroups = [...configDraft.modelGroups].sort((a, b) => (a.name || t('unnamedModelGroup')).localeCompare(b.name || t('unnamedModelGroup')))
   const sortedConfigDraftModels = [...configDraft.models].sort((a, b) => (a.name || t('unnamedModel')).localeCompare(b.name || t('unnamedModel')))
   const invalidAppContextConfig = !isValidContextConfig(configDraft.contextManagement)
@@ -2392,175 +2318,7 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
-      <Dialog open={helpDialogOpen} onOpenChange={(_, data) => setHelpDialogOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>{t('help')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <TabList
-                selectedValue={helpTab}
-                onTabSelect={(_, data) => {
-                  const nextTab = data.value as typeof helpTab
-                  setHelpTab(nextTab)
-                  if (nextTab === 'tools' && !toolHelp) loadToolHelp()
-                }}
-              >
-                <Tab value="tools">{t('helpTools')}</Tab>
-                <Tab value="commandRules">{t('helpCommandRules')}</Tab>
-              </TabList>
-              {helpTab === 'commandRules' && (
-                <section className="settings-group command-rules-help">
-                  <p className="settings-description">{t('helpCommandRulesIntro')}</p>
-                  <p className="section-label">{t('helpCommandRulesPatterns')}</p>
-                  <ul className="command-rules-help-list">
-                    <li><code>git status</code> — {t('helpCommandRulesExact')}</li>
-                    <li><code>git *</code> — {t('helpCommandRulesStar')}</li>
-                    <li><code>pnpm run build *</code> — {t('helpCommandRulesTailStar')}</li>
-                    <li><code>npm run ?</code> — {t('helpCommandRulesQuestion')}</li>
-                    <li><code>git commit -m "fix bug"</code> — {t('helpCommandRulesQuoted')}</li>
-                  </ul>
-                  <p className="section-label">{t('helpCommandRulesSemantics')}</p>
-                  <ul className="command-rules-help-list">
-                    <li>{t('helpCommandRulesCase')}</li>
-                    <li>{t('helpCommandRulesPrecedence')}</li>
-                    <li>{t('helpCommandRulesMutex')}</li>
-                    <li>{t('helpCommandRulesDuration')}</li>
-                    <li>{t('helpCommandRulesBuiltin')}</li>
-                    <li>{t('helpCommandRulesRegex')}</li>
-                  </ul>
-                </section>
-              )}
-              {helpTab === 'tools' && (
-                <section className="settings-group tool-help-group">
-                      <p className="settings-description">
-                        {toolHelp
-                          ? toolSearch.trim()
-                            ? t('helpToolMatchCount', { count: toolMatches.length, total: toolHelp.entries.length })
-                            : t('helpToolTotalCount', { count: toolHelp.entries.length })
-                          : ''}
-                      </p>
-                      {toolHelp && <p className="settings-description">{t('helpToolToolsetNote')}</p>}
-                  <div className="tool-search-row">
-                    <div className="tool-search-field">
-                      <Field label={t('helpToolSearch')}>
-                        <Input
-                          value={toolSearch}
-                          onChange={(_, data) => setToolSearch(data.value)}
-                          placeholder={t('helpToolSearchPlaceholder')}
-                        />
-                      </Field>
-                    </div>
-                    {toolMatches.length > 1 && (
-                      <div className="tool-search-nav">
-                        <Button appearance="subtle" size="small" aria-label={t('helpToolPreviousMatch')} onClick={() => jumpToMatch(-1)}>
-                          ↑
-                        </Button>
-                        <span className="tool-match-position">{toolMatchIndex + 1} / {toolMatches.length}</span>
-                        <Button appearance="subtle" size="small" aria-label={t('helpToolNextMatch')} onClick={() => jumpToMatch(1)}>
-                          ↓
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                  <div className="tool-help-list" ref={toolListRef}>
-                    {!toolHelp && <p className="settings-description">{t('loadingPrompts')}</p>}
-                    {toolHelp && (() => {
-                      const renderEntry = (entry: typeof toolHelp.entries[number], showToolset: boolean) => (
-                        <div className={`tool-help-entry${isCurrentMatch(entry.name) ? ' current-match' : ''}`} data-tool-name={entry.name} key={entry.name}>
-                          <h3>
-                            <HighlightedText keyword={toolSearch} text={entry.name} />
-                            {showToolset && entry.toolset && (
-                              <span className="tool-help-toolset" title={t('helpToolToolsetTitle', { toolset: entry.toolset })}>
-                                {t('helpToolToolset', { toolset: entry.toolset })}
-                              </span>
-                            )}
-                          </h3>
-                          <p className="settings-description">{entry.description}</p>
-                          <details>
-                            <summary>{t('helpToolParameters')}</summary>
-                            <pre className="prompt-content">{entry.parameters}</pre>
-                          </details>
-                          <p className="tool-help-returns">{t('helpToolReturns')}: {entry.returns}</p>
-                        </div>
-                      )
-                      const groupEntries = (hidden: boolean) => {
-                        const groups = new Map<string, typeof toolHelp.entries>()
-                        for (const entry of toolHelp.entries) {
-                          if (entry.source === 'mcp' || !entry.toolset || entry.toolsetHidden !== hidden) continue
-                          const bucket = groups.get(entry.toolset) ?? []
-                          bucket.push(entry)
-                          groups.set(entry.toolset, bucket)
-                        }
-                        return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
-                      }
-                      const mcpGroups = new Map<string, typeof toolHelp.entries>()
-                      for (const entry of toolHelp.entries) {
-                        if (entry.source !== 'mcp' || !entry.toolset) continue
-                        const bucket = mcpGroups.get(entry.toolset) ?? []
-                        bucket.push(entry)
-                        mcpGroups.set(entry.toolset, bucket)
-                      }
-                      // Search keeps the flat list so match navigation stays
-                      // contiguous; the catalog view groups built-in tools by
-                      // toolset and MCP tools by the compact facade group.
-                      if (toolSearch.trim()) {
-                        return toolMatches.map((entry) => renderEntry(entry, true))
-                      }
-                      return (
-                        <>
-                          <h4 className="tool-help-group-header">{t('helpToolMetaSection')}</h4>
-                          {toolHelp.entries.filter((entry) => entry.source !== 'mcp' && !entry.toolset).map((entry) => renderEntry(entry, false))}
-                          <h4 className="tool-help-group-header">{t('helpToolsetUnlockedSection')}</h4>
-                          {groupEntries(false).map(([toolset, entries]) => (
-                            <div key={toolset}>
-                              <h5 className="tool-help-toolset-header">
-                                {toolset}
-                                <span className="tool-help-toolset-state">{t('helpToolsetUnlockedLabel')}</span>
-                              </h5>
-                              {entries.map((entry) => renderEntry(entry, false))}
-                            </div>
-                          ))}
-                          <h4 className="tool-help-group-header">{t('helpToolsetOnDemandSection')}</h4>
-                          {groupEntries(true).map(([toolset, entries]) => (
-                            <div key={toolset}>
-                              <h5 className="tool-help-toolset-header">
-                                {toolset}
-                                <span className="tool-help-toolset-state">{t('helpToolsetOnDemandLabel')}</span>
-                              </h5>
-                              {entries.map((entry) => renderEntry(entry, false))}
-                            </div>
-                          ))}
-                          {mcpGroups.size > 0 && (
-                            <>
-                              <h4 className="tool-help-group-header">{t('helpMcpSection')}</h4>
-                              {[...mcpGroups.entries()]
-                                .sort(([a], [b]) => a.localeCompare(b))
-                                .map(([toolset, entries]) => (
-                                  <div key={toolset}>
-                                    <h5 className="tool-help-toolset-header">
-                                      {toolset}
-                                      <span className="tool-help-toolset-state">{t('helpMcpRuntimeLabel')}</span>
-                                    </h5>
-                                    {entries.map((entry) => renderEntry(entry, false))}
-                                  </div>
-                                ))}
-                            </>
-                          )}
-                        </>
-                      )
-                    })()}
-                  </div>
-                </section>
-              )}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setHelpDialogOpen(false)}>
-                {t('close')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
+      <HelpDialog {...helpDialogProps} />
 
       {approvalRequest && (
         <CommandApprovalDialog
