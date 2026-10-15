@@ -2,7 +2,6 @@ import type { MessageNavigationTarget } from '../../shared/message-navigation'
 import { conversationReadState } from '../../shared/conversation-read-state'
 import {
   Button,
-  Checkbox,
   Dialog,
   DialogActions,
   DialogBody,
@@ -107,6 +106,8 @@ import {
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
 import { ModelSettingsPanel, type ModelComboOption } from './components/ModelSettingsPanel'
+import { SkillsSettingsPanel } from './components/SkillsSettingsPanel'
+import { KnowledgeBaseSettingsPanel } from './components/KnowledgeBaseSettingsPanel'
 import { useConversationRuntime, type ConversationTurn } from './hooks/useConversationRuntime'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
@@ -143,12 +144,6 @@ function resolveEffectiveResourceIds(
   for (const id of conversationSelection?.enabledIds ?? []) ids.add(id)
   for (const id of conversationSelection?.disabledIds ?? []) ids.delete(id)
   return [...ids]
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 /** Media upload menu entries (video/audio/PDF) are hidden until provider
@@ -3806,214 +3801,47 @@ export function App(): React.JSX.Element {
                 />
               )}
               {settingsTab === 'skills' && (
-                <section className="settings-group skill-management">
-                  <h2>{t('skillManagement')}</h2>
-                  <p className="settings-description">{t('skillManagementDescription')}</p>
-                  <Field label={t('skillGitHubUrl')} hint={t('skillGitHubUrlHint')}>
-                    <Input
-                      value={skillUrl}
-                      disabled={skillBusy || interactionLocked}
-                      placeholder="https://github.com/owner/repository/tree/main/path/to/skill"
-                      onChange={(_, data) => {
-                        setSkillUrl(data.value)
-                        setSkillPreview(null)
-                        setSelectedSkillCandidateIds([])
-                      }}
-                    />
-                  </Field>
-                  <div className="skill-import-actions">
-                    <Button disabled={!skillUrl.trim() || skillBusy || interactionLocked} onClick={() => void previewSkillImport()}>
-                      {skillBusy ? t('loading') : t('previewSkill')}
-                    </Button>
-                  </div>
-                  {skillPreview && (
-                    <div className="skill-preview">
-                      <h3>{skillPreview.name}</h3>
-                      {skillPreview.description && <p>{skillPreview.description}</p>}
-                      <dl className="skill-metadata">
-                        <dt>{t('skillCommit')}</dt><dd>{skillPreview.sourceCommitSha}</dd>
-                        <dt>{t('skillSourcePath')}</dt><dd>{skillPreview.sourcePath || '/'}</dd>
-                        <dt>{t('skillFiles')}</dt><dd>{skillPreview.fileCount}</dd>
-                        <dt>{t('skillPackageSize')}</dt><dd>{formatBytes(skillPreview.totalBytes)}</dd>
-                      </dl>
-                      <h4>{t('skillScriptCandidates')}</h4>
-                      {skillPreview.candidates.length === 0 ? (
-                        <p className="settings-description">{t('skillNoScriptCandidates')}</p>
-                      ) : (
-                        <div className="skill-candidate-list">
-                          {skillPreview.candidates.map((candidate) => (
-                            <label className="skill-candidate-row" key={candidate.id}>
-                              <Checkbox
-                                checked={selectedSkillCandidateIds.includes(candidate.id)}
-                                disabled={skillBusy || interactionLocked}
-                                onChange={(_, data) => setSelectedSkillCandidateIds((current) => data.checked === true
-                                  ? [...new Set([...current, candidate.id])]
-                                  : current.filter((id) => id !== candidate.id))}
-                              />
-                              <span>
-                                <strong>{candidate.name}</strong>
-                                <small>{candidate.runtime} · {candidate.entry}</small>
-                              </span>
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                      <p className="settings-warning" role="alert">{t('skillSecurityWarning')}</p>
-                      <Button appearance="primary" disabled={skillBusy || interactionLocked} onClick={() => void installPreviewedSkill()}>
-                        {installedSkillIds.has(skillPreview.skillId) ? t('overwriteSkill') : t('installSkill')}
-                      </Button>
-                    </div>
-                  )}
-                  <div className="skill-list">
-                    <h2>{t('installedSkills')}</h2>
-                    {installedSkills.length === 0 ? (
-                      <p className="settings-description">{t('noInstalledSkills')}</p>
-                    ) : installedSkills.map((skill) => (
-                      <article className="skill-card" key={skill.id}>
-                        <div className="skill-card-header">
-                          <div>
-                            <h3>{skill.name}</h3>
-                            {skill.description && <p>{skill.description}</p>}
-                          </div>
-                          <div className="skill-import-actions">
-                            <Button size="small" disabled={skillBusy || interactionLocked} onClick={() => prepareSkillUpdate(skill)}>
-                              {t('skillUpdate')}
-                            </Button>
-                            <Button size="small" disabled={skillBusy || interactionLocked} onClick={() => void removeSkill(skill)}>
-                              {t('skillRemove')}
-                            </Button>
-                          </div>
-                        </div>
-                        <dl className="skill-metadata">
-                          <dt>{t('skillSource')}</dt><dd>{skill.sourceUrl}</dd>
-                          <dt>{t('skillCommit')}</dt><dd>{skill.sourceCommitSha}</dd>
-                          <dt>{t('skillPackageSha')}</dt><dd>{skill.packageSha256}</dd>
-                          <dt>{t('skillTools')}</dt><dd>{skill.tools.length}</dd>
-                          <dt>{t('skillInstalledAt')}</dt><dd>{new Date(skill.installedAt).toLocaleString()}</dd>
-                        </dl>
-                      </article>
-                    ))}
-                  </div>
-                  {skillError && <p className="dialog-error">{skillError}</p>}
-                </section>
+                <SkillsSettingsPanel
+                  installedSkills={installedSkills}
+                  skillUrl={skillUrl}
+                  skillPreview={skillPreview}
+                  selectedSkillCandidateIds={selectedSkillCandidateIds}
+                  skillBusy={skillBusy}
+                  skillError={skillError}
+                  interactionLocked={interactionLocked}
+                  onUrlChange={(url) => {
+                    setSkillUrl(url)
+                    setSkillPreview(null)
+                    setSelectedSkillCandidateIds([])
+                  }}
+                  onCandidateSelectionChange={(id, selected) => setSelectedSkillCandidateIds((current) => selected
+                    ? [...new Set([...current, id])]
+                    : current.filter((candidateId) => candidateId !== id))}
+                  onPreview={previewSkillImport}
+                  onInstall={installPreviewedSkill}
+                  onPrepareUpdate={prepareSkillUpdate}
+                  onRemove={removeSkill}
+                />
               )}
               {settingsTab === 'knowledgeBases' && (
-                <section className="settings-group skill-management">
-                  <h2>{t('knowledgeBaseManagement')}</h2>
-                  <p className="settings-description">{t('knowledgeBaseManagementDescription')}</p>
-                  <p className="settings-description">{t('knowledgeBaseSupportedFormats')}</p>
-                  <p className="settings-description">{t('knowledgeBaseFutureFormats')}</p>
-                  <Field label={t('knowledgeBaseDirectory')}>
-                    <div className="skill-import-actions">
-                      <Input
-                        value={knowledgeBaseDirectory}
-                        disabled={knowledgeBaseBusy || interactionLocked}
-                        placeholder={t('knowledgeBaseDirectoryPlaceholder')}
-                        onChange={(_, data) => setKnowledgeBaseDirectory(data.value)}
-                      />
-                      <Button disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void chooseKnowledgeBaseDirectory()}>
-                        {t('chooseDirectory')}
-                      </Button>
-                    </div>
-                  </Field>
-                  <Field label={t('knowledgeBaseName')} hint={t('knowledgeBaseNameHint')}>
-                    <Input
-                      value={knowledgeBaseName}
-                      disabled={knowledgeBaseBusy || interactionLocked}
-                      placeholder={t('knowledgeBaseNamePlaceholder')}
-                      onChange={(_, data) => setKnowledgeBaseName(data.value)}
-                    />
-                  </Field>
-                  <Field label={t('knowledgeBaseMode')}>
-                    <Select
-                      value={knowledgeBaseMode}
-                      disabled={knowledgeBaseBusy || interactionLocked}
-                      onChange={(_, data) => setKnowledgeBaseMode(data.value as KnowledgeBaseMode)}
-                    >
-                      <option value="rg">{t('knowledgeBaseModeRg')}</option>
-                      <option value="rag">{t('knowledgeBaseModeRag')}</option>
-                    </Select>
-                  </Field>
-                  {knowledgeBaseMode === 'rag' && (
-                    <div className="skill-preview">
-                      <Field label={t('embeddingProvider')}>
-                        <Select
-                          value="local"
-                          disabled={knowledgeBaseBusy || interactionLocked}
-                        >
-                          <option value="local">{t('localEmbeddingProvider')}</option>
-                        </Select>
-                      </Field>
-                      <Field label={t('embeddingModel')}>
-                        <Select
-                          value={defaultLocalEmbeddingModelId}
-                          disabled={knowledgeBaseBusy || interactionLocked}
-                        >
-                          <option value={defaultLocalEmbeddingModelId}>{defaultLocalEmbeddingModelId}</option>
-                        </Select>
-                      </Field>
-                      <p className="settings-description">{t('ragModelDownloadNotice')}</p>
-                    </div>
-                  )}
-                  <Button
-                    appearance="primary"
-                    disabled={!knowledgeBaseDirectory.trim() || knowledgeBaseBusy || interactionLocked}
-                    onClick={() => void createLocalKnowledgeBase()}
-                  >
-                    {knowledgeBaseBusy ? t('loading') : t('createKnowledgeBase')}
-                  </Button>
-                  <div className="skill-list">
-                    <h2>{t('knowledgeBases')}</h2>
-                    {knowledgeBases.length === 0 ? (
-                      <p className="settings-description">{t('noKnowledgeBases')}</p>
-                    ) : knowledgeBases.map((knowledgeBase) => (
-                      <article className="skill-card" key={knowledgeBase.id}>
-                        <div className="skill-card-header">
-                          <div>
-                            <h3>{knowledgeBase.name}</h3>
-                            <small className={knowledgeBase.status === 'ready' ? 'resource-effective' : 'resource-unavailable'}>
-                              {t(`knowledgeBaseStatus_${knowledgeBase.status.replace('-', '_')}`)}
-                            </small>
-                          </div>
-                          <div className="skill-import-actions">
-                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void renameKnowledgeBase(knowledgeBase)}>
-                              {t('renameKnowledgeBase')}
-                            </Button>
-                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void refreshLocalKnowledgeBase(knowledgeBase)}>
-                              {t('refreshKnowledgeBase')}
-                            </Button>
-                            <Button size="small" disabled={knowledgeBaseBusy || interactionLocked} onClick={() => void removeLocalKnowledgeBase(knowledgeBase)}>
-                              {t('removeKnowledgeBase')}
-                            </Button>
-                          </div>
-                        </div>
-                        <Field label={t('knowledgeBaseMode')}>
-                          <Select
-                            value={knowledgeBase.mode}
-                            disabled={knowledgeBaseBusy || interactionLocked}
-                            onChange={(_, data) => void changeKnowledgeBaseMode(knowledgeBase, data.value as KnowledgeBaseMode)}
-                          >
-                            <option value="rg">{t('knowledgeBaseModeRg')}</option>
-                            <option value="rag">{t('knowledgeBaseModeRag')}</option>
-                          </Select>
-                        </Field>
-                        {knowledgeBase.mode === 'rag' && (
-                          <p className="settings-description">
-                            {t('embeddingProvider')}: {t('localEmbeddingProvider')} · {knowledgeBase.embeddingProvider?.modelId}
-                          </p>
-                        )}
-                        <dl className="skill-metadata">
-                          <dt>{t('knowledgeBasePath')}</dt><dd>{knowledgeBase.source.path}</dd>
-                          <dt>{t('knowledgeBaseFiles')}</dt><dd>{knowledgeBase.fileCount}</dd>
-                          <dt>{t('knowledgeBaseSize')}</dt><dd>{formatBytes(knowledgeBase.totalBytes)}</dd>
-                          <dt>{t('knowledgeBaseIndexedAt')}</dt><dd>{knowledgeBase.indexedAt ? new Date(knowledgeBase.indexedAt).toLocaleString() : t('notAvailable')}</dd>
-                        </dl>
-                        {knowledgeBase.error && <p className="dialog-error">{knowledgeBase.error}</p>}
-                      </article>
-                    ))}
-                  </div>
-                  {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
-                </section>
+                <KnowledgeBaseSettingsPanel
+                  knowledgeBases={knowledgeBases}
+                  knowledgeBaseDirectory={knowledgeBaseDirectory}
+                  knowledgeBaseName={knowledgeBaseName}
+                  knowledgeBaseMode={knowledgeBaseMode}
+                  knowledgeBaseBusy={knowledgeBaseBusy}
+                  knowledgeBaseError={knowledgeBaseError}
+                  interactionLocked={interactionLocked}
+                  onDirectoryChange={setKnowledgeBaseDirectory}
+                  onNameChange={setKnowledgeBaseName}
+                  onModeChange={setKnowledgeBaseMode}
+                  onChooseDirectory={chooseKnowledgeBaseDirectory}
+                  onCreate={createLocalKnowledgeBase}
+                  onRename={renameKnowledgeBase}
+                  onRefresh={refreshLocalKnowledgeBase}
+                  onRemove={removeLocalKnowledgeBase}
+                  onChangeMode={changeKnowledgeBaseMode}
+                />
               )}
               {settingsTab === 'mcp' && (
                 <McpSettings
