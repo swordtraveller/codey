@@ -29,6 +29,7 @@ import type { ConversationHistorySummary, ConversationMessagePage } from '../sha
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
 import { isValidCommandExecutionConfig, normalizeCommandExecutionConfig } from './command-execution-config'
 import { log } from './logger'
+import { recoverQuarantinedConversations } from './workspace-recovery'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 import { sanitizeResourceSelection } from './skills'
 import {
@@ -506,6 +507,18 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
       continue
     }
 
+    try {
+      const recoveredIds = await recoverQuarantinedConversations(dirname(conversationPath(projectId, '')), metadata.conversationIds, {
+        onSkip: (file, error) => log.warn('workspace.recovery.skipped', { projectId, file, error: error instanceof Error ? error.message : String(error) }),
+      })
+      if (recoveredIds.length) {
+        await writeJson(metadataPath + '.before-history-recovery-' + randomUUID(), metadata)
+        metadata.conversationIds.push(...recoveredIds)
+        await writeJson(metadataPath, metadata)
+        log.warn('workspace.conversations.recovered', { projectId, count: recoveredIds.length })
+      }
+    } catch (error) { throw new WorkspaceMigrationError('Conversation history recovery failed; original files preserved', { cause: error }) }
+
     const conversations: Conversation[] = []
     for (const conversationId of metadata.conversationIds) {
       if (typeof conversationId !== 'string') {
@@ -517,9 +530,15 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
       try {
         const parsed = JSON.parse(await readFile(storedPath, 'utf8')) as unknown
         if (!isRecord(parsed)) throw new Error('Invalid conversation data')
+        if (parsed.storageVersion !== undefined && parsed.storageVersion !== 3) {
+          throw new WorkspaceMigrationError(`Unsupported conversation storage version ${String(parsed.storageVersion)}; please use a newer Codey version`)
+        }
         if (parsed.storageVersion === 3) {
           const stored = parsed as PagedConversation
           if (!isMessageStoreIndex(stored.messageIndex) || !stored.history) throw new Error('Invalid conversation index')
+          if (stored.messageIndex.readStateVersion !== undefined && stored.messageIndex.readStateVersion !== 2) {
+            throw new WorkspaceMigrationError(`Unsupported conversation read index version ${String(stored.messageIndex.readStateVersion)}; please use a newer Codey version`)
+          }
           if (stored.messageIndex.readStateVersion !== 2) {
             // Upgrade only the small index; preserve the original bodies and model context.
             try {
@@ -610,6 +629,8 @@ async function loadProjects(): Promise<Project[]> {
         const loaded = await loadShardedProjects(stored)
         projects = loaded.projects
         if (loaded.repaired) await persistManifest(projects)
+      } else if (isRecord(stored) && stored.version !== undefined && stored.version !== 2) {
+        throw new WorkspaceMigrationError(`Unsupported workspace storage version ${String(stored.version)}; please use a newer Codey version`)
       } else {
         throw new Error('Invalid workspace manifest')
       }

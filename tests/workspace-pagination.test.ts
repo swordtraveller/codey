@@ -10,7 +10,7 @@ vi.mock('node:fs/promises', async (original) => {
   return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename) }
 })
 import { BridgeHandoverService } from '../src/main/bridge'
-import { addMessage, createProject, getConversationNavigation, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
+import { addMessage, createConversation, createProject, getConversationNavigation, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
 
 const headerPath = (projectId: string, conversationId: string): string => join(electronState.userData, 'workspace-data', 'projects', Buffer.from(projectId).toString('base64url'), 'conversations', `${Buffer.from(conversationId).toString('base64url')}.json`)
 async function reload(): Promise<void> {
@@ -203,4 +203,78 @@ describe('conversation navigation', () => {
     expect((await getProjectsForRenderer())[0].conversations[0].messages).toEqual([])
     expect(vi.mocked(open).mock.calls).toHaveLength(1)
   })
+
+  async function isolateHistory() {
+    const ids = await seed(2)
+    const project = await createConversation(ids.projectId)
+    const newId = project.conversations.at(-1)!.id
+    await addMessage(ids.projectId, newId, 'user', 'new history survives')
+    const path = headerPath(ids.projectId, ids.conversationId)
+    const source = path + '.corrupt-1792065462000-12345678'
+    await rename(path, source)
+    const metadataPath = join(path, '..', '..', 'project.json')
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+    metadata.conversationIds = [newId]
+    await writeFile(metadataPath, JSON.stringify(metadata))
+    await reload()
+    return { ...ids, newId, path, source, metadataPath }
+  }
+
+  it('recovers isolated paged history and context alongside new conversations, preserving the source and later edits', async () => {
+    const { projectId, conversationId, newId, path, source } = await isolateHistory()
+    const sourceBytes = await readFile(source, 'utf8')
+    const projects = await getProjectsForRenderer()
+    expect(projects[0].conversations.map((item) => item.id)).toEqual([newId, conversationId])
+    const recovered = await getProject(projectId, conversationId)
+    expect(recovered.conversations.find((item) => item.id === conversationId)?.messages).toHaveLength(4)
+    expect(recovered.conversations.find((item) => item.id === conversationId)?.agentMessages).toEqual([expect.objectContaining({ content: 'Full model context' })])
+    expect((await getConversationMessagePage(projectId, newId)).messages[0].content).toBe('new history survives')
+    await addMessage(projectId, conversationId, 'user', 'after recovery')
+    const current = await readFile(path, 'utf8')
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations).toHaveLength(2)
+    expect(await readFile(path, 'utf8')).toBe(current)
+    expect(await readFile(source, 'utf8')).toBe(sourceBytes)
+  })
+
+  it.each(['hash', 'missing context', 'id mismatch', 'invalid JSON'])('leaves damaged isolated data quarantined: %s', async (damage) => {
+    const { path, source } = await isolateHistory()
+    const header = JSON.parse(await readFile(source, 'utf8'))
+    if (damage === 'hash') header.messageIndex.messages[0].hash = '0'.repeat(64)
+    if (damage === 'missing context') header.messageIndex.context.hash = '0'.repeat(64)
+    if (damage === 'id mismatch') header.id = 'different-id'
+    const bytes = damage === 'invalid JSON' ? '{broken' : JSON.stringify(header)
+    await writeFile(source, bytes)
+    expect((await getProjectsForRenderer())[0].conversations).toHaveLength(1)
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(source, 'utf8')).toBe(bytes)
+  })
+
+  it('reconnects a published header after metadata write failure without quarantining project data', async () => {
+    const { path, metadataPath } = await isolateHistory()
+    const original = await readFile(metadataPath, 'utf8')
+    vi.mocked(rename).mockRejectedValueOnce(new Error('disk unavailable'))
+    await expect(getProjectsForRenderer()).rejects.toThrow('recovery failed')
+    expect(await readFile(metadataPath, 'utf8')).toBe(original)
+    expect(JSON.parse(await readFile(path, 'utf8')).storageVersion).toBe(3)
+    expect((await getProjectsForRenderer())[0].conversations).toHaveLength(2)
+  })
+
+  it.each(['conversation', 'workspace', 'read index'])('preserves unknown %s storage versions without quarantine or rewrite', async (kind) => {
+    const { projectId, conversationId } = await seed(1)
+    const path = kind !== 'workspace' ? headerPath(projectId, conversationId) : join(electronState.userData, 'workspace.json')
+    const data = JSON.parse(await readFile(path, 'utf8'))
+    if (kind === 'conversation') data.storageVersion = 99
+    else if (kind === 'read index') data.messageIndex.readStateVersion = 99
+    else data.version = 99
+    const bytes = JSON.stringify(data)
+    await writeFile(path, bytes)
+    const manifest = await readFile(join(electronState.userData, 'workspace.json'), 'utf8')
+    await reload()
+    await expect(getProjectsForRenderer()).rejects.toThrow('Unsupported')
+    expect(await readFile(path, 'utf8')).toBe(bytes)
+    expect(await readFile(join(electronState.userData, 'workspace.json'), 'utf8')).toBe(manifest)
+    expect((await readdir(join(path, '..'))).some((name) => name.includes('.corrupt-'))).toBe(false)
+  })
+
 })
