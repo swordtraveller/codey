@@ -106,6 +106,7 @@ import {
   isValidAgentLimits,
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
+import { ModelSettingsPanel, type ModelComboOption } from './components/ModelSettingsPanel'
 import { useConversationRuntime, type ConversationTurn } from './hooks/useConversationRuntime'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
@@ -1271,15 +1272,7 @@ export function App(): React.JSX.Element {
   const [groupMemberProviderFilter, setGroupMemberProviderFilter] = useState('')
   const [groupMemberModelFilter, setGroupMemberModelFilter] = useState('')
   const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<string[]>([])
-  const [modelCombos, setModelCombos] = useState<Array<{
-    key: string
-    providerId: string
-    definitionId: string
-    providerName: string
-    modelName: string
-    name: string
-    selected: boolean
-  }> | null>(null)
+  const [modelCombos, setModelCombos] = useState<ModelComboOption[] | null>(null)
   const [comboBusy, setComboBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [contextDialogOpen, setContextDialogOpen] = useState(false)
@@ -3053,25 +3046,12 @@ export function App(): React.JSX.Element {
     : activeProject.folders.length === 0
       ? t('folderDescription')
       : t('conversationDescription')
-  const sortedProviderOptions = [...configDraft.providers].sort((a, b) => (a.name || a.baseUrl).localeCompare(b.name || b.baseUrl))
-  const sortedDefinitionOptions = [...configDraft.modelDefinitions].sort((a, b) => a.modelName.localeCompare(b.modelName))
   const duplicateProviderNames = new Set(configDraft.providers.map((provider) => provider.name.trim().toLowerCase())).size !== configDraft.providers.length
   const duplicateDefinitionModelNames = new Set(configDraft.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== configDraft.modelDefinitions.length
   const selectedProviderDraft = configDraft.providers.find((provider) => provider.id === selectedProviderId) ?? configDraft.providers[0]
   const selectedDefinitionDraft = configDraft.modelDefinitions.find((definition) => definition.id === selectedDefinitionId) ?? configDraft.modelDefinitions[0]
   const selectedModelLinkDraft = configDraft.models.find((model) => model.id === selectedLinkId) ?? configDraft.models[0]
   const selectedGroupDraft = configDraft.modelGroups.find((group) => group.id === selectedGroupId) ?? configDraft.modelGroups[0]
-  const availableGroupMembers = selectedGroupDraft
-    ? configDraft.models.filter((model) => {
-      if (selectedGroupDraft.modelIds.includes(model.id)) return false
-      const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
-      const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
-      const providerName = (provider?.name || provider?.baseUrl || '').toLowerCase()
-      const modelName = (definition?.modelName || model.name || '').toLowerCase()
-      return providerName.includes(groupMemberProviderFilter.trim().toLowerCase())
-        && modelName.includes(groupMemberModelFilter.trim().toLowerCase())
-    })
-    : []
   const invalidModelConfig = (() => {
     if (configDraft.providers.length === 0 || configDraft.models.length === 0) return true
     if (configDraft.providers.some((provider) => !provider.name.trim() || !provider.baseUrl.trim() || !provider.apiKey.trim())) return true
@@ -3724,348 +3704,67 @@ export function App(): React.JSX.Element {
               </TabList>
               <div className="settings-panel" key={settingsTab}>
               {settingsTab === 'models' && (
-              <section className="settings-group">
-                <p className="model-config-status-line" role="status">
-                  <span className={`model-config-save-state${settingsDirty ? ' dirty' : ''}`}>
-                    {settingsDirty ? t('settingsUnsaved') : t('settingsSaved')}
-                  </span>
-                  {connectivityStatus && (
-                    <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
-                  )}
-                </p>
-
-                <h4 className="settings-section-title">{t('providersSection')}</h4>
-                <div className="layer-config-toolbar">
-                  <Select
-                    aria-label={t('providersSection')}
-                    value={selectedProviderDraft?.id ?? ''}
-                    onChange={(_, data) => setSelectedProviderId(data.value)}
-                  >
-                    {sortedProviderOptions.map((provider) => (
-                      <option key={provider.id} value={provider.id}>
-                        {provider.name || provider.baseUrl || t('unnamedProvider')}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button appearance="secondary" onClick={addProviderDraft}>{t('addProvider')}</Button>
-                  <Button appearance="secondary" disabled={!selectedProviderDraft} onClick={deleteSelectedProviderDraft}>
-                    {t('deleteProvider')}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedProviderDraft?.baseUrl.trim() || !selectedProviderDraft?.apiKey.trim() || connectivityBusy}
-                    onClick={() => void testSelectedProviderConnectivity()}
-                  >
-                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
-                  </Button>
-                </div>
-                <Field label={t('providerName')} required>
-                  <Input
-                    value={selectedProviderDraft?.name ?? ''}
-                    onChange={(_, data) => updateSelectedProvider({ name: data.value })}
-                  />
-                </Field>
-                <Field label={t('baseUrl')} required>
-                  <Input
-                    value={selectedProviderDraft?.baseUrl ?? ''}
-                    onChange={(_, data) => updateSelectedProvider({ baseUrl: data.value })}
-                    placeholder="https://api.example.com/v1"
-                  />
-                </Field>
-                <Field label={t('apiKey')} required>
-                  <Input
-                    type="password"
-                    value={selectedProviderDraft?.apiKey ?? ''}
-                    onChange={(_, data) => updateSelectedProvider({ apiKey: data.value })}
-                  />
-                </Field>
-
-                {duplicateProviderNames && <p className="settings-warning" role="alert">{t('duplicateProviderName')}</p>}
-
-                <h4 className="settings-section-title">{t('definitionsSection')}</h4>
-                <div className="layer-config-toolbar">
-                  <Select
-                    aria-label={t('definitionsSection')}
-                    value={selectedDefinitionDraft?.id ?? ''}
-                    onChange={(_, data) => setSelectedDefinitionId(data.value)}
-                  >
-                    {sortedDefinitionOptions.map((definition) => (
-                      <option key={definition.id} value={definition.id}>
-                        {definition.modelName || t('unnamedModel')}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button appearance="secondary" onClick={addDefinitionDraft}>{t('addDefinition')}</Button>
-                  <Button appearance="secondary" disabled={!selectedDefinitionDraft} onClick={deleteSelectedDefinitionDraft}>
-                    {t('deleteDefinition')}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedDefinitionDraft?.modelName.trim() || capabilitiesBusy}
-                    onClick={() => void fetchModelCapabilitiesForSelected()}
-                  >
-                    {capabilitiesBusy ? t('fetchingModelCapabilities') : t('fetchModelCapabilities')}
-                  </Button>
-                </div>
-                <Field label={t('modelName')} required>
-                  <Input
-                    value={selectedDefinitionDraft?.modelName ?? ''}
-                    onChange={(_, data) => updateSelectedDefinition({ modelName: data.value })}
-                    placeholder="model-name"
-                  />
-                </Field>
-                <Field label={t('maximumContextTokens')} required>
-                  <Input
-                    min={1000}
-                    step={1000}
-                    type="number"
-                    value={String(selectedDefinitionDraft?.modelMaxContext ?? '')}
-                    onChange={(_, data) => updateSelectedDefinition({ modelMaxContext: Number(data.value) })}
-                  />
-                </Field>
-                <Field label={t('maximumOutputTokens')} hint={t('maximumOutputTokensHint')}>
-                  <Input
-                    min={1}
-                    step={1000}
-                    type="number"
-                    value={selectedDefinitionDraft?.modelMaxOutputTokens === undefined ? '' : String(selectedDefinitionDraft.modelMaxOutputTokens)}
-                    onChange={(_, data) => updateSelectedDefinition({
-                      modelMaxOutputTokens: data.value === '' || !Number.isFinite(Number(data.value))
-                        ? undefined
-                        : Number(data.value),
-                    })}
-                  />
-                </Field>
-                <div className="multimodal-group">
-                  <p className="section-label">{t('multimodalCapabilities')}</p>
-                  <div className="multimodal-switches">
-                    <Switch
-                      checked={selectedDefinitionDraft?.supportsImageInput ?? false}
-                      label={t('modalityImage')}
-                      onChange={(_, data) => updateSelectedDefinition({ supportsImageInput: data.checked })}
-                    />
-                    <Switch
-                      checked={selectedDefinitionDraft?.supportsPdfInput ?? false}
-                      label={t('modalityPdf')}
-                      onChange={(_, data) => updateSelectedDefinition({ supportsPdfInput: data.checked })}
-                    />
-                    <Switch
-                      checked={selectedDefinitionDraft?.supportsVideoInput ?? false}
-                      label={t('modalityVideo')}
-                      onChange={(_, data) => updateSelectedDefinition({ supportsVideoInput: data.checked })}
-                    />
-                    <Switch
-                      checked={selectedDefinitionDraft?.supportsAudioInput ?? false}
-                      label={t('modalityAudio')}
-                      onChange={(_, data) => updateSelectedDefinition({ supportsAudioInput: data.checked })}
-                    />
-                  </div>
-                </div>
-
-                {duplicateDefinitionModelNames && <p className="settings-warning" role="alert">{t('duplicateDefinitionModelName')}</p>}
-
-                <h4 className="settings-section-title">{t('modelsSection')}</h4>
-                <div className="layer-config-toolbar">
-                  <Select
-                    aria-label={t('modelsSection')}
-                    value={selectedModelLinkDraft?.id ?? ''}
-                    onChange={(_, data) => setSelectedLinkId(data.value)}
-                  >
-                    {configDraft.models.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name || t('unnamedModel')}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button
-                    appearance="secondary"
-                    disabled={comboBusy || configDraft.providers.length === 0 || configDraft.modelDefinitions.length === 0}
-                    onClick={() => void queryModelCombos()}
-                  >
-                    {comboBusy ? t('modelComboBusy') : t('modelComboButton')}
-                  </Button>
-                  <Button appearance="secondary" onClick={addModelLinkDraft}>{t('addModelConfig')}</Button>
-                  <Button appearance="secondary" disabled={!selectedModelLinkDraft} onClick={deleteSelectedModelLinkDraft}>
-                    {t('deleteModelConfig')}
-                  </Button>
-                  <Button
-                    appearance="secondary"
-                    disabled={!selectedModelLinkDraft || !flattenModelLink(configDraft, selectedModelLinkDraft)?.modelName.trim() || connectivityBusy}
-                    onClick={() => void testSelectedModelConnectivity()}
-                  >
-                    {connectivityBusy ? t('testingConnectivity') : t('testConnectivity')}
-                  </Button>
-                </div>
-                {modelCombos !== null && (
-                  <div className="model-combo-panel">
-                    <p className="section-label">{t('modelComboTitle')}</p>
-                    {modelCombos.length === 0 && (
-                      <p className="settings-description">{t('modelComboEmpty')}</p>
-                    )}
-                    {modelCombos.map((combo) => (
-                      <div className="model-combo-row" key={combo.key}>
-                        <input
-                          aria-label={t('modelComboSelect')}
-                          type="checkbox"
-                          checked={combo.selected}
-                          onChange={(event) => toggleModelCombo(combo.key, event.target.checked)}
-                        />
-                        <span className="model-combo-provider">{combo.providerName}</span>
-                        <span className="model-combo-model">{combo.modelName}</span>
-                        <Input
-                          aria-label={t('modelComboName')}
-                          value={combo.name}
-                          onChange={(_, data) => renameModelCombo(combo.key, data.value)}
-                        />
-                      </div>
-                    ))}
-                    <div className="model-combo-actions">
-                      <Button appearance="secondary" onClick={() => setModelCombos(null)}>{t('cancel')}</Button>
-                      <Button
-                        appearance="primary"
-                        disabled={modelCombos.every((combo) => !combo.selected)}
-                        onClick={applyModelCombos}
-                      >
-                        {t('modelComboAdd')}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                <Field label={t('modelConfigName')} required>
-                  <Input
-                    value={selectedModelLinkDraft?.name ?? ''}
-                    onChange={(_, data) => updateSelectedLink({ name: data.value })}
-                  />
-                </Field>
-                <Field label={t('providerLabel')} required>
-                  <Select
-                    value={selectedModelLinkDraft?.providerId ?? ''}
-                    onChange={(_, data) => updateSelectedLink({ providerId: data.value })}
-                  >
-                    {sortedProviderOptions.map((provider) => (
-                      <option key={provider.id} value={provider.id}>
-                        {provider.name || provider.baseUrl || t('unnamedProvider')}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label={t('modelDefinitionLabel')} required>
-                  <Select
-                    value={selectedModelLinkDraft?.definitionId ?? ''}
-                    onChange={(_, data) => updateSelectedLink({ definitionId: data.value })}
-                  >
-                    {sortedDefinitionOptions.map((definition) => (
-                      <option key={definition.id} value={definition.id}>
-                        {definition.modelName || t('unnamedModel')}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-
-                <h4 className="settings-section-title">{t('groupsSection')}</h4>
-                <div className="layer-config-toolbar">
-                  <Select
-                    aria-label={t('groupsSection')}
-                    value={selectedGroupDraft?.id ?? ''}
-                    onChange={(_, data) => {
-                      setSelectedGroupId(data.value)
+                <ModelSettingsPanel
+                  configDraft={configDraft}
+                  settingsDirty={settingsDirty}
+                  connectivityBusy={connectivityBusy}
+                  connectivityStatus={connectivityStatus}
+                  providers={{
+                    selected: selectedProviderDraft,
+                    duplicateNames: duplicateProviderNames,
+                    onSelect: setSelectedProviderId,
+                    onAdd: addProviderDraft,
+                    onDelete: deleteSelectedProviderDraft,
+                    onChange: updateSelectedProvider,
+                    onTestConnectivity: testSelectedProviderConnectivity,
+                  }}
+                  definitions={{
+                    selected: selectedDefinitionDraft,
+                    duplicateNames: duplicateDefinitionModelNames,
+                    capabilitiesBusy,
+                    onSelect: setSelectedDefinitionId,
+                    onAdd: addDefinitionDraft,
+                    onDelete: deleteSelectedDefinitionDraft,
+                    onChange: updateSelectedDefinition,
+                    onFetchCapabilities: fetchModelCapabilitiesForSelected,
+                  }}
+                  models={{
+                    selected: selectedModelLinkDraft,
+                    combos: modelCombos,
+                    comboBusy,
+                    onSelect: setSelectedLinkId,
+                    onAdd: addModelLinkDraft,
+                    onDelete: deleteSelectedModelLinkDraft,
+                    onChange: updateSelectedLink,
+                    onTestConnectivity: testSelectedModelConnectivity,
+                    onQueryCombos: queryModelCombos,
+                    onComboSelectionChange: toggleModelCombo,
+                    onComboNameChange: renameModelCombo,
+                    onApplyCombos: applyModelCombos,
+                    onDismissCombos: () => setModelCombos(null),
+                  }}
+                  groups={{
+                    selected: selectedGroupDraft,
+                    providerFilter: groupMemberProviderFilter,
+                    modelFilter: groupMemberModelFilter,
+                    selectedMemberIds: selectedGroupMemberIds,
+                    onSelect: (id) => {
+                      setSelectedGroupId(id)
                       setSelectedGroupMemberIds([])
-                    }}
-                  >
-                    {configDraft.modelGroups.map((group) => (
-                      <option key={group.id} value={group.id}>
-                        {group.name || t('unnamedModelGroup')}
-                      </option>
-                    ))}
-                  </Select>
-                  <Button appearance="secondary" onClick={addGroupDraft}>{t('addGroup')}</Button>
-                  <Button appearance="secondary" disabled={!selectedGroupDraft} onClick={deleteSelectedGroupDraft}>
-                    {t('deleteGroup')}
-                  </Button>
-                </div>
-                {selectedGroupDraft && (
-                  <>
-                    <Field label={t('groupName')} required>
-                      <Input
-                        value={selectedGroupDraft.name}
-                        onChange={(_, data) => updateSelectedGroup({ name: data.value })}
-                      />
-                    </Field>
-                    <Field label={t('retriesPerModel')} hint={t('retriesPerModelHint')}>
-                      <Input
-                        min={1}
-                        max={10}
-                        type="number"
-                        value={String(selectedGroupDraft.retriesPerModel)}
-                        onChange={(_, data) => updateSelectedGroup({
-                          retriesPerModel: Math.min(10, Math.max(1, Math.floor(Number(data.value) || 1))),
-                        })}
-                      />
-                    </Field>
-                    <p className="section-label">{t('groupMembers')}</p>
-                    <div className="group-member-list">
-                      {selectedGroupDraft.modelIds.map((modelId, index) => {
-                        const member = configDraft.models.find((model) => model.id === modelId)
-                        return (
-                          <div className="group-member-row" key={modelId}>
-                            <span className="group-member-index">{index + 1}</span>
-                            <span className="group-member-name">{member?.name || t('unnamedModel')}</span>
-                            <Button appearance="subtle" size="small" disabled={index === 0} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, -1)}>↑</Button>
-                            <Button appearance="subtle" size="small" disabled={index === selectedGroupDraft.modelIds.length - 1} onClick={() => moveGroupMember(selectedGroupDraft.id, modelId, 1)}>↓</Button>
-                            <Button appearance="subtle" size="small" onClick={() => removeGroupMember(selectedGroupDraft.id, modelId)}>{t('reviewRuleDelete')}</Button>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    <Field label={t('addGroupMember')}>
-                      <div className="group-member-filters">
-                        <Input
-                          aria-label={t('groupMemberProviderFilter')}
-                          placeholder={t('groupMemberProviderFilter')}
-                          value={groupMemberProviderFilter}
-                          onChange={(_, data) => setGroupMemberProviderFilter(data.value)}
-                        />
-                        <Input
-                          aria-label={t('groupMemberModelFilter')}
-                          placeholder={t('groupMemberModelFilter')}
-                          value={groupMemberModelFilter}
-                          onChange={(_, data) => setGroupMemberModelFilter(data.value)}
-                        />
-                      </div>
-                      <div className="group-member-picker" role="listbox" aria-label={t('addGroupMember')}>
-                        {availableGroupMembers.length === 0 && (
-                          <p className="settings-description">{t('groupMemberNoMatches')}</p>
-                        )}
-                        {availableGroupMembers.map((model) => {
-                          const provider = configDraft.providers.find((entry) => entry.id === model.providerId)
-                          const definition = configDraft.modelDefinitions.find((entry) => entry.id === model.definitionId)
-                          const checked = selectedGroupMemberIds.includes(model.id)
-                          return (
-                            <label className="group-member-option" key={model.id}>
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => setSelectedGroupMemberIds((current) => checked ? current.filter((id) => id !== model.id) : [...current, model.id])}
-                              />
-                              <span>{provider?.name || provider?.baseUrl || t('unnamedProvider')}</span>
-                              <span>{definition?.modelName || model.name || t('unnamedModel')}</span>
-                            </label>
-                          )
-                        })}
-                      </div>
-                      <Button
-                        appearance="secondary"
-                        disabled={selectedGroupMemberIds.length === 0}
-                        onClick={() => addSelectedGroupMembers(selectedGroupDraft.id)}
-                      >
-                        {t('addSelectedGroupMembers')}
-                      </Button>
-                    </Field>
-                     <p className="settings-description">{t('groupEnvelopeNote')}</p>
-                   </>
-                 )}
-               </section>
-               )}
+                    },
+                    onAdd: addGroupDraft,
+                    onDelete: deleteSelectedGroupDraft,
+                    onChange: updateSelectedGroup,
+                    onProviderFilterChange: setGroupMemberProviderFilter,
+                    onModelFilterChange: setGroupMemberModelFilter,
+                    onMemberSelectionChange: (id, selected) => setSelectedGroupMemberIds((current) =>
+                      selected ? [...current, id] : current.filter((memberId) => memberId !== id)),
+                    onMoveMember: moveGroupMember,
+                    onRemoveMember: removeGroupMember,
+                    onAddSelectedMembers: addSelectedGroupMembers,
+                  }}
+                />
+              )}
               {settingsTab === 'global' && (
                 <GlobalSettingsPanel
                   selectedTab={globalSettingsTab}
