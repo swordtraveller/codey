@@ -26,7 +26,6 @@ import { isContextConfigValidForModel, isValidContextManagementConfig } from '..
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import { defaultLocalEmbeddingModelId } from '../../shared/types'
 import type {
-  AppLanguage,
   AssistantMessageBlock,
   ChatMessage,
   ContextCompressionNotice,
@@ -108,6 +107,7 @@ import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/Global
 import { ModelSettingsPanel, type ModelComboOption } from './components/ModelSettingsPanel'
 import { SkillsSettingsPanel } from './components/SkillsSettingsPanel'
 import { KnowledgeBaseSettingsPanel } from './components/KnowledgeBaseSettingsPanel'
+import { AppPreferencesPanel } from './components/AppPreferencesPanel'
 import { useConversationRuntime, type ConversationTurn } from './hooks/useConversationRuntime'
 
 type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
@@ -3851,78 +3851,12 @@ export function App(): React.JSX.Element {
                   projectRoot={activeProject?.folders[0]?.path}
                 />
               )}
-              {settingsTab === 'language' && (
-              <section className="settings-group">
-                <Field label={t('language')}>
-                  <Select
-                    value={configDraft.language}
-                    onChange={(_, data) => setConfigDraft((current) => ({
-                      ...current,
-                      language: data.value as AppLanguage,
-                    }))}
-                  >
-                    <option value="system">{t('followSystem')}</option>
-                    <option value="en">{t('english')}</option>
-                    <option value="zh-CN">{t('simplifiedChinese')}</option>
-                  </Select>
-                 </Field>
-               </section>
-              )}
-              {settingsTab === 'power' && (
-               <section className="settings-group">
-                 <Switch
-                   checked={configDraft.keepAwakeEnabled}
-                  label={t('keepAwakeComputer')}
-                  onChange={(_, data) => setConfigDraft((current) => ({
-                    ...current,
-                    keepAwakeEnabled: data.checked,
-                  }))}
+              {(settingsTab === 'language' || settingsTab === 'power' || settingsTab === 'notifications') && (
+                <AppPreferencesPanel
+                  selectedTab={settingsTab}
+                  configDraft={configDraft}
+                  onConfigDraftChange={setConfigDraft}
                 />
-                {configDraft.keepAwakeEnabled && (
-                  <p className="settings-warning" role="alert">{t('keepAwakeWarning')}</p>
-                )}
-                <Switch
-                  checked={configDraft.keepAwakeOnlyWhileWorking}
-                  className="nested-setting"
-                  disabled={!configDraft.keepAwakeEnabled}
-                  label={t('keepAwakeOnlyWhileWorking')}
-                  onChange={(_, data) => setConfigDraft((current) => ({
-                    ...current,
-                    keepAwakeOnlyWhileWorking: data.checked,
-                  }))}
-                 />
-               </section>
-              )}
-              {settingsTab === 'notifications' && (
-                <section className="settings-group">
-                  <Switch
-                    checked={configDraft.notificationSettings.enabled}
-                    label={t('notificationsEnabled')}
-                    onChange={(_, data) => setConfigDraft((current) => ({
-                      ...current,
-                      notificationSettings: { ...current.notificationSettings, enabled: data.checked },
-                    }))}
-                  />
-                  {([
-                    ['onlyWhenUnfocused', 'notificationsOnlyWhenUnfocused'],
-                    ['taskComplete', 'notificationsTaskComplete'],
-                    ['taskFailed', 'notificationsTaskFailed'],
-                    ['needsConfirmation', 'notificationsNeedsConfirmation'],
-                    ['connectionError', 'notificationsConnectionError'],
-                    ['modelError', 'notificationsModelError'],
-                  ] as const).map(([key, label]) => (
-                    <Switch
-                      key={key}
-                      checked={configDraft.notificationSettings[key]}
-                      disabled={!configDraft.notificationSettings.enabled}
-                      label={t(label)}
-                      onChange={(_, data) => setConfigDraft((current) => ({
-                        ...current,
-                        notificationSettings: { ...current.notificationSettings, [key]: data.checked },
-                      }))}
-                    />
-                  ))}
-                </section>
               )}
               {settingsTab === 'archive' && (
                <section className="settings-group">
