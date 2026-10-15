@@ -9,7 +9,6 @@ import {
   DialogSurface,
   DialogTitle,
   Field,
-  Select,
   Switch,
   FluentProvider,
   Input,
@@ -26,7 +25,6 @@ import { isContextConfigValidForModel, isValidContextManagementConfig } from '..
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import { defaultLocalEmbeddingModelId } from '../../shared/types'
 import type {
-  ContextManagementConfig,
   ImageAttachment,
   MediaAttachment,
   KnowledgeBase,
@@ -34,21 +32,14 @@ import type {
   PerformanceTraceFile,
   PerformanceTraceStatus,
   InstalledSkill,
-  ResourceSelectionOverride,
   SkillImportPreview,
 } from '../../shared/types'
 import { useConversationMessages } from './useConversationMessages'
 import {
-  defaultAgentLimitsConfig,
   defaultAppConfig,
   defaultCommandExecutionConfig,
-  defaultCommandReviewConfig,
-  defaultContextManagementConfig,
-  commandExecutionSupported,
   type CommandApprovalMemory,
   type CommandApprovalRequest,
-  type CommandExecutionConfig,
-  type CommandReviewConfig,
   type ModelConfig,
   type Project,
   type PromptSnapshot,
@@ -60,15 +51,10 @@ import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
 import { validateCommandReviewConfig } from '../../shared/command-rules'
-import { ContextSettingsFields } from './components/ContextSettingsFields'
 import {
-  AgentLimitsFields,
   CommandApprovalDialog,
-  CommandExecutionEditorFields,
-  CommandReviewEditor,
-  environmentLabels,
-  interpreterLabels,
   isValidAgentLimits,
+  isValidCommandExecutionDraft,
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
 import { ModelSettingsPanel } from './components/ModelSettingsPanel'
@@ -80,43 +66,12 @@ import { useConversationRuntime } from './hooks/useConversationRuntime'
 import { ConversationMessages } from './components/ConversationMessages'
 import { HelpDialog } from './components/HelpDialog'
 import { useHelpDialog } from './hooks/useHelpDialog'
+import { resolveEffectiveResourceIds } from './resource-selection'
+import { ProjectSettingsDialog } from './components/ProjectSettingsDialog'
+import { ConversationSettingsDialogs } from './components/ConversationSettingsDialogs'
+import { useProjectSettings } from './hooks/useProjectSettings'
+import { useConversationSettings } from './hooks/useConversationSettings'
 import { useModelSettings } from './hooks/useModelSettings'
-
-type ResourceSelectionMode = 'inherit' | 'enabled' | 'disabled'
-
-function resourceSelectionMode(
-  selection: ResourceSelectionOverride,
-  id: string,
-): ResourceSelectionMode {
-  if (selection.enabledIds.includes(id)) return 'enabled'
-  if (selection.disabledIds.includes(id)) return 'disabled'
-  return 'inherit'
-}
-
-function updateResourceSelection(
-  selection: ResourceSelectionOverride,
-  id: string,
-  mode: ResourceSelectionMode,
-): ResourceSelectionOverride {
-  const enabledIds = selection.enabledIds.filter((entry) => entry !== id)
-  const disabledIds = selection.disabledIds.filter((entry) => entry !== id)
-  if (mode === 'enabled') enabledIds.push(id)
-  if (mode === 'disabled') disabledIds.push(id)
-  return { enabledIds, disabledIds }
-}
-
-function resolveEffectiveResourceIds(
-  globalIds: string[],
-  projectSelection?: ResourceSelectionOverride,
-  conversationSelection?: ResourceSelectionOverride,
-): string[] {
-  const ids = new Set(globalIds)
-  for (const id of projectSelection?.enabledIds ?? []) ids.add(id)
-  for (const id of projectSelection?.disabledIds ?? []) ids.delete(id)
-  for (const id of conversationSelection?.enabledIds ?? []) ids.add(id)
-  for (const id of conversationSelection?.disabledIds ?? []) ids.delete(id)
-  return [...ids]
-}
 
 const isValidContextConfig = isValidContextManagementConfig
 
@@ -133,49 +88,18 @@ export function App(): React.JSX.Element {
   const [selectedSkillCandidateIds, setSelectedSkillCandidateIds] = useState<string[]>([])
   const [skillBusy, setSkillBusy] = useState(false)
   const [skillError, setSkillError] = useState('')
-  const [conversationSkillsOpen, setConversationSkillsOpen] = useState(false)
-  const [conversationSkillDraft, setConversationSkillDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [knowledgeBaseDirectory, setKnowledgeBaseDirectory] = useState('')
   const [knowledgeBaseName, setKnowledgeBaseName] = useState('')
   const [knowledgeBaseMode, setKnowledgeBaseMode] = useState<KnowledgeBaseMode>('rg')
   const [knowledgeBaseBusy, setKnowledgeBaseBusy] = useState(false)
   const [knowledgeBaseError, setKnowledgeBaseError] = useState('')
-  const [conversationKnowledgeBasesOpen, setConversationKnowledgeBasesOpen] = useState(false)
-  const [conversationKnowledgeBaseDraft, setConversationKnowledgeBaseDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [contextDialogOpen, setContextDialogOpen] = useState(false)
-  const [contextScope, setContextScope] = useState<'project' | 'conversation'>('conversation')
-  const [contextProjectId, setContextProjectId] = useState('')
-  const [contextOverrideEnabled, setContextOverrideEnabled] = useState(false)
-  const [contextDraft, setContextDraft] = useState(defaultContextManagementConfig)
   const [bridgeDialogOpen, setBridgeDialogOpen] = useState(false)
   const [bridgeUrl, setBridgeUrl] = useState('http://127.0.0.1:8787')
   const [bridgeChannels, setBridgeChannels] = useState<BridgeChannelStatus[]>([])
   const [bridgeError, setBridgeError] = useState('')
   const [bridgeBusy, setBridgeBusy] = useState(false)
-  const [agentLimitsDialogOpen, setAgentLimitsDialogOpen] = useState(false)
-  const [agentLimitsProjectId, setAgentLimitsProjectId] = useState('')
-  const [agentLimitsConversationId, setAgentLimitsConversationId] = useState('')
-  const [agentLimitsDraft, setAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
-  const [agentLimitsOverride, setAgentLimitsOverride] = useState(false)
-  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false)
-  const [projectSettingsProjectId, setProjectSettingsProjectId] = useState('')
-  const [projectSettingsTab, setProjectSettingsTab] = useState<'model' | 'agentLimits' | 'command' | 'context' | 'skills' | 'knowledgeBases'>('model')
-  const [projectSettingsModelConfigId, setProjectSettingsModelConfigId] = useState('')
-  const [projectAgentLimitsOverride, setProjectAgentLimitsOverride] = useState(false)
-  const [projectAgentLimitsDraft, setProjectAgentLimitsDraft] = useState(defaultAgentLimitsConfig)
-  const [projectCommandOverride, setProjectCommandOverride] = useState(false)
-  const [projectCommandDraft, setProjectCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
-  const [projectContextOverride, setProjectContextOverride] = useState(false)
-  const [projectContextDraft, setProjectContextDraft] = useState(defaultContextManagementConfig)
-  const [projectSkillDraft, setProjectSkillDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
-  const [projectKnowledgeBaseDraft, setProjectKnowledgeBaseDraft] = useState<ResourceSelectionOverride>({ enabledIds: [], disabledIds: [] })
-  const [commandDialogOpen, setCommandDialogOpen] = useState(false)
-  const [commandProjectId, setCommandProjectId] = useState('')
-  const [commandConversationId, setCommandConversationId] = useState('')
-  const [commandOverride, setCommandOverride] = useState(false)
-  const [commandDraft, setCommandDraft] = useState<CommandExecutionConfig>(defaultCommandExecutionConfig)
   const [approvalRequest, setApprovalRequest] = useState<CommandApprovalRequest | null>(null)
   const [shellDetection, setShellDetection] = useState<ShellDetectionResult | null>(null)
   const [shellDetectBusy, setShellDetectBusy] = useState(false)
@@ -341,6 +265,45 @@ export function App(): React.JSX.Element {
     ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
   const interactionLocked = activeConversationState !== 'idle'
+
+  const projectSettings = useProjectSettings({
+    config,
+    projects,
+    interactionLocked,
+    replaceProject,
+    setSaving,
+    setSettingsError,
+    setOpenProjectMenuId,
+    setShellDetection,
+    runShellDetection,
+  })
+  const { openProjectSettings } = projectSettings
+
+  const conversationSettings = useConversationSettings({
+    config,
+    projects,
+    interactionLocked,
+    replaceProject,
+    setSaving,
+    setSettingsError,
+    setOpenProjectMenuId,
+    setShellDetection,
+    runShellDetection,
+    activeProject,
+    activeConversation,
+    skillBusy,
+    knowledgeBaseBusy,
+    setSkillBusy,
+    setSkillError,
+    setKnowledgeBaseBusy,
+    setKnowledgeBaseError,
+    changeConversationModelConfig,
+    changeProjectModelConfig,
+  })
+  const {
+    openConversationSkills, openConversationKnowledgeBases, openContextSettings,
+    openAgentLimitsSettings, openCommandSettings,
+  } = conversationSettings
   const conversationWorking = activeConversationState === 'running'
   const stopping = activeConversationKey ? stoppingConversations[activeConversationKey] === true : false
   const conversationTurn = activeConversationKey ? conversationTurns[activeConversationKey] : undefined
@@ -571,35 +534,6 @@ export function App(): React.JSX.Element {
     setSkillError('')
   }
 
-  function openConversationSkills(): void {
-    if (!activeProject || !activeConversation || interactionLocked) return
-    setConversationSkillDraft({
-      enabledIds: [...activeConversation.skillSelection.enabledIds],
-      disabledIds: [...activeConversation.skillSelection.disabledIds],
-    })
-    setSkillError('')
-    setConversationSkillsOpen(true)
-  }
-
-  async function saveConversationSkills(): Promise<void> {
-    if (!activeProject || !activeConversation || interactionLocked || skillBusy) return
-    setSkillBusy(true)
-    setSkillError('')
-    try {
-      const updated = await window.codey.setConversationSkillSelection(
-        activeProject.id,
-        activeConversation.id,
-        conversationSkillDraft,
-      )
-      replaceProject(updated)
-      setConversationSkillsOpen(false)
-    } catch (reason) {
-      setSkillError(reason instanceof Error ? reason.message : t('unableChangeSkills'))
-    } finally {
-      setSkillBusy(false)
-    }
-  }
-
   async function refreshKnowledgeBases(): Promise<void> {
     setKnowledgeBases(await window.codey.listKnowledgeBases())
   }
@@ -711,35 +645,6 @@ export function App(): React.JSX.Element {
       }))
     } catch (reason) {
       setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableRemoveKnowledgeBase'))
-    } finally {
-      setKnowledgeBaseBusy(false)
-    }
-  }
-
-  function openConversationKnowledgeBases(): void {
-    if (!activeProject || !activeConversation || interactionLocked) return
-    setConversationKnowledgeBaseDraft({
-      enabledIds: [...activeConversation.knowledgeBaseSelection.enabledIds],
-      disabledIds: [...activeConversation.knowledgeBaseSelection.disabledIds],
-    })
-    setKnowledgeBaseError('')
-    setConversationKnowledgeBasesOpen(true)
-  }
-
-  async function saveConversationKnowledgeBases(): Promise<void> {
-    if (!activeProject || !activeConversation || interactionLocked || knowledgeBaseBusy) return
-    setKnowledgeBaseBusy(true)
-    setKnowledgeBaseError('')
-    try {
-      const updated = await window.codey.setConversationKnowledgeBaseSelection(
-        activeProject.id,
-        activeConversation.id,
-        conversationKnowledgeBaseDraft,
-      )
-      replaceProject(updated)
-      setConversationKnowledgeBasesOpen(false)
-    } catch (reason) {
-      setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableChangeKnowledgeBases'))
     } finally {
       setKnowledgeBaseBusy(false)
     }
@@ -971,229 +876,6 @@ export function App(): React.JSX.Element {
     } finally {
       setBridgeBusy(false)
     }
-  }
-
-  function updateContextDraft(patch: Partial<ContextManagementConfig>): void {
-    setContextDraft((current) => ({ ...current, ...patch }))
-  }
-
-  async function changeContextModelConfig(modelConfigId: string): Promise<void> {
-    if (interactionLocked) {
-      return
-    }
-    if (contextScope === 'conversation') {
-      await changeConversationModelConfig(modelConfigId)
-      return
-    }
-    if (contextProjectId) {
-      await changeProjectModelConfig(contextProjectId, modelConfigId)
-    }
-  }
-
-  function openContextSettings(scope: 'project' | 'conversation', project = activeProject): void {
-    if (!project || interactionLocked) {
-      return
-    }
-    const override = scope === 'project'
-      ? project.contextConfigOverride
-      : activeConversation?.contextConfigOverride
-    const inherited = scope === 'project'
-      ? config.contextManagement
-      : project.contextConfigOverride ?? config.contextManagement
-    setContextScope(scope)
-    setContextProjectId(project.id)
-    setContextOverrideEnabled(Boolean(override))
-    setContextDraft({ ...(override ?? inherited) })
-    setSettingsError('')
-    setContextDialogOpen(true)
-    setOpenProjectMenuId(null)
-  }
-
-  async function saveContextSettings(): Promise<void> {
-    const targetProject = projects.find((project) => project.id === contextProjectId)
-    if (!targetProject || interactionLocked) {
-      return
-    }
-    setSaving(true)
-    setSettingsError('')
-    try {
-      const value = contextOverrideEnabled ? contextDraft : null
-      const updated = contextScope === 'project'
-        ? await window.codey.setProjectContextConfig(targetProject.id, value)
-        : activeConversation
-          ? await window.codey.setConversationContextConfig(targetProject.id, activeConversation.id, value)
-          : null
-      if (updated) {
-        replaceProject(updated)
-      }
-      setContextDialogOpen(false)
-    } catch {
-      setSettingsError(t('unableChangeContextConfig'))
-    } finally {
-      setSaving(false)
-    }
-  }
-  function openAgentLimitsSettings(): void {
-    if (!activeProject || !activeConversation || interactionLocked) {
-      return
-    }
-    setAgentLimitsProjectId(activeProject.id)
-    setAgentLimitsConversationId(activeConversation.id)
-    // Three-level inheritance: conversation ?? project default ?? global.
-    const effective = activeConversation.agentLimits ?? activeProject.agentLimitsDefault ?? config.agentLimitsGlobal
-    setAgentLimitsOverride(activeConversation.agentLimits !== null)
-    setAgentLimitsDraft({ ...effective })
-    setSettingsError('')
-    setAgentLimitsDialogOpen(true)
-  }
-
-  async function saveAgentLimitsSettings(): Promise<void> {
-    if (interactionLocked || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))) {
-      return
-    }
-    setSaving(true)
-    setSettingsError('')
-    try {
-      const updated = await window.codey.setConversationAgentLimits(
-        agentLimitsProjectId,
-        agentLimitsConversationId,
-        agentLimitsOverride ? agentLimitsDraft : null,
-      )
-      replaceProject(updated)
-      setAgentLimitsDialogOpen(false)
-    } catch {
-      setSettingsError(t('unableChangeAgentLimits'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  function openProjectSettings(project: Project): void {
-    if (interactionLocked) {
-      return
-    }
-    setProjectSettingsProjectId(project.id)
-    setProjectSettingsTab('model')
-    setProjectSettingsModelConfigId(project.defaultModelConfigId ?? '')
-    setProjectAgentLimitsOverride(project.agentLimitsDefault !== null)
-    setProjectAgentLimitsDraft({ ...(project.agentLimitsDefault ?? config.agentLimitsGlobal) })
-    setProjectCommandOverride(project.commandExecutionDefault !== null)
-    setProjectCommandDraft(project.commandExecutionDefault
-      ? structuredClone(project.commandExecutionDefault)
-      : { ...structuredClone(config.commandExecutionGlobal), review: structuredClone(config.commandReviewGlobal) })
-    setProjectContextOverride(project.contextConfigOverride !== null)
-    setProjectContextDraft({ ...(project.contextConfigOverride ?? config.contextManagement) })
-    setProjectSkillDraft({
-      enabledIds: [...project.skillSelection.enabledIds],
-      disabledIds: [...project.skillSelection.disabledIds],
-    })
-    setProjectKnowledgeBaseDraft({
-      enabledIds: [...project.knowledgeBaseSelection.enabledIds],
-      disabledIds: [...project.knowledgeBaseSelection.disabledIds],
-    })
-    setSettingsError('')
-    setProjectSettingsOpen(true)
-    setOpenProjectMenuId(null)
-    // Availability checks need a detection; run one if none is cached so the
-    // first save does not fail with "run environment detection".
-    void window.codey.getCachedShellDetection().then((cached) => {
-      if (cached) {
-        setShellDetection(cached)
-        return
-      }
-      return runShellDetection()
-    }).catch(() => undefined)
-  }
-
-  async function saveProjectSettings(): Promise<void> {
-    const project = projects.find((entry) => entry.id === projectSettingsProjectId)
-    if (!project || interactionLocked) {
-      return
-    }
-    if (projectAgentLimitsOverride && !isValidAgentLimits(projectAgentLimitsDraft)) return
-    if (projectCommandOverride && !isValidCommandExecutionDraft(projectCommandDraft)) return
-    if (projectContextOverride && !isValidContextConfig(projectContextDraft)) return
-    setSaving(true)
-    setSettingsError('')
-    try {
-      await window.codey.setProjectModelConfig(project.id, projectSettingsModelConfigId || null)
-      await window.codey.setProjectAgentLimitsDefault(project.id, projectAgentLimitsOverride ? projectAgentLimitsDraft : null)
-      const updated = await window.codey.setProjectCommandExecutionDefault(project.id, projectCommandOverride ? projectCommandDraft : null)
-      await window.codey.setProjectContextConfig(project.id, projectContextOverride ? projectContextDraft : null)
-      await window.codey.setProjectSkillSelection(project.id, projectSkillDraft)
-      const finalProject = await window.codey.setProjectKnowledgeBaseSelection(project.id, projectKnowledgeBaseDraft)
-      replaceProject(finalProject ?? updated)
-      setProjectSettingsOpen(false)
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : t('unableChangeProjectSettings'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  /** Materializes the effective config for a conversation: its own override,
-   *  else the project default, else the global execution default — with
-   *  review falling back to the global review config. */
-  function effectiveConversationCommandConfig(): CommandExecutionConfig {
-    const base = activeConversation?.commandExecution ?? activeProject?.commandExecutionDefault ?? config.commandExecutionGlobal
-    return { ...structuredClone(base), review: base.review ?? structuredClone(config.commandReviewGlobal) }
-  }
-
-  function openCommandSettings(): void {
-    if (!activeProject || !activeConversation || interactionLocked) return
-    setCommandProjectId(activeProject.id)
-    setCommandConversationId(activeConversation.id)
-    setCommandOverride(activeConversation.commandExecution !== null)
-    setCommandDraft(activeConversation.commandExecution
-      ? structuredClone(activeConversation.commandExecution)
-      : effectiveConversationCommandConfig())
-    setSettingsError('')
-    setCommandDialogOpen(true)
-    // Availability checks need a detection; run one if none is cached so the
-    // first save does not fail with "run environment detection".
-    void window.codey.getCachedShellDetection().then((cached) => {
-      if (cached) {
-        setShellDetection(cached)
-        return
-      }
-      return runShellDetection()
-    }).catch(() => undefined)
-  }
-
-  async function saveCommandExecutionSettings(): Promise<void> {
-    if (interactionLocked || (commandOverride && !isValidCommandExecutionDraft(commandDraft))) {
-      return
-    }
-    setSaving(true)
-    setSettingsError('')
-    try {
-      const updated = await window.codey.setConversationCommandExecution(
-        commandProjectId,
-        commandConversationId,
-        commandOverride ? commandDraft : null,
-      )
-      replaceProject(updated)
-      setCommandDialogOpen(false)
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : t('unableChangeCommandExecution'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  function isValidCommandExecutionDraft(draft: CommandExecutionConfig | null): boolean {
-    if (draft === null) return true
-    if (!commandExecutionSupported(draft.interpreter, draft.environment)) return false
-    // The session default combo must be within the enabled combos.
-    if (!(draft.enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) return false
-    // Every enabled combo must be supported.
-    for (const [interpreter, environments] of Object.entries(draft.enabledEnvironments)) {
-      for (const environment of environments) {
-        if (!commandExecutionSupported(interpreter as CommandExecutionConfig['interpreter'], environment)) return false
-      }
-    }
-    if (draft.review !== null && !validateCommandReviewConfig(draft.review)) return false
-    return true
   }
 
   function respondCommandApproval(approved: boolean, memory?: CommandApprovalMemory): void {
@@ -1493,20 +1175,6 @@ export function App(): React.JSX.Element {
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
   const invalidGlobalCommandExecution = !isValidCommandExecutionDraft(configDraft.commandExecutionGlobal)
-  const invalidContextOverride = contextOverrideEnabled && !isValidContextConfig(contextDraft)
-  const projectSettingsTarget = projects.find((entry) => entry.id === projectSettingsProjectId)
-  const applicationDefaultTargetLabel = (() => {
-    const target = config.activeModelConfigId
-    if (!target) return t('notConfigured')
-    const model = config.models.find((entry) => entry.id === target)
-    if (model) return model.name || t('unnamedModel')
-    const group = config.modelGroups.find((entry) => entry.id === target)
-    return group ? t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) : t('notConfigured')
-  })()
-  const projectSettingsValid = Boolean(projectSettingsTarget) &&
-    (!projectAgentLimitsOverride || isValidAgentLimits(projectAgentLimitsDraft)) &&
-    (!projectCommandOverride || isValidCommandExecutionDraft(projectCommandDraft)) &&
-    (!projectContextOverride || isValidContextConfig(projectContextDraft))
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -2240,438 +1908,38 @@ export function App(): React.JSX.Element {
         </DialogSurface>
       </Dialog>
 
-      <Dialog
-        open={conversationSkillsOpen}
-        onOpenChange={(_, data) => setConversationSkillsOpen(data.open)}
-      >
-        <DialogSurface className="skill-selection-dialog">
-          <DialogBody>
-            <DialogTitle>{t('skillSelection')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <p className="settings-description">{t('conversationSkillSelectionDescription')}</p>
-              <section className="skill-selection-list">
-                {installedSkills.length === 0 ? (
-                  <p className="status">{t('noInstalledSkills')}</p>
-                ) : installedSkills.map((skill) => {
-                  const effective = resolveEffectiveResourceIds(
-                    config.defaultSkillIds,
-                    activeProject?.skillSelection,
-                    conversationSkillDraft,
-                  ).includes(skill.id)
-                  return (
-                    <div className="skill-selection-row" key={skill.id}>
-                      <div>
-                        <strong>{skill.name}</strong>
-                        <small>{skill.description || skill.id}</small>
-                        <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
-                          {t(effective ? 'skillEffective' : 'skillNotEffective')}
-                        </small>
-                      </div>
-                      <Select
-                        aria-label={t('skillSelection')}
-                        disabled={interactionLocked || skillBusy}
-                        value={resourceSelectionMode(conversationSkillDraft, skill.id)}
-                        onChange={(_, data) => setConversationSkillDraft((current) => updateResourceSelection(
-                          current,
-                          skill.id,
-                          data.value as ResourceSelectionMode,
-                        ))}
-                      >
-                        <option value="inherit">{t('skillSelectionInherit')}</option>
-                        <option value="enabled">{t('skillSelectionEnabled')}</option>
-                        <option value="disabled">{t('skillSelectionDisabled')}</option>
-                      </Select>
-                    </div>
-                  )
-                })}
-              </section>
-              {skillError && <p className="dialog-error">{skillError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" disabled={skillBusy} onClick={() => setConversationSkillsOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || skillBusy}
-                onClick={() => void saveConversationSkills()}
-              >
-                {skillBusy ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
+      <ProjectSettingsDialog
+        settings={projectSettings}
+        config={config}
+        installedSkills={installedSkills}
+        knowledgeBases={knowledgeBases}
+        flatModelConfigs={flatModelConfigs}
+        effectiveModelConfig={effectiveModelConfig}
+        interactionLocked={interactionLocked}
+        saving={saving}
+        settingsError={settingsError}
+        openCommandRulesHelp={openCommandRulesHelp}
+      />
 
-      <Dialog
-        open={conversationKnowledgeBasesOpen}
-        onOpenChange={(_, data) => setConversationKnowledgeBasesOpen(data.open)}
-      >
-        <DialogSurface className="skill-selection-dialog">
-          <DialogBody>
-            <DialogTitle>{t('knowledgeBaseSelection')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <p className="settings-description">{t('conversationKnowledgeBaseSelectionDescription')}</p>
-              <section className="skill-selection-list">
-                {knowledgeBases.length === 0 ? (
-                  <p className="status">{t('noKnowledgeBases')}</p>
-                ) : knowledgeBases.map((knowledgeBase) => {
-                  const effective = resolveEffectiveResourceIds(
-                    config.defaultKnowledgeBaseIds,
-                    activeProject?.knowledgeBaseSelection,
-                    conversationKnowledgeBaseDraft,
-                  ).includes(knowledgeBase.id)
-                  return (
-                    <div className="skill-selection-row" key={knowledgeBase.id}>
-                      <div>
-                        <strong>{knowledgeBase.name}</strong>
-                        <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
-                        <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
-                          {t(effective ? 'knowledgeBaseEffective' : 'knowledgeBaseNotEffective')}
-                        </small>
-                      </div>
-                      <Select
-                        aria-label={t('knowledgeBaseSelection')}
-                        disabled={interactionLocked || knowledgeBaseBusy}
-                        value={resourceSelectionMode(conversationKnowledgeBaseDraft, knowledgeBase.id)}
-                        onChange={(_, data) => setConversationKnowledgeBaseDraft((current) => updateResourceSelection(
-                          current,
-                          knowledgeBase.id,
-                          data.value as ResourceSelectionMode,
-                        ))}
-                      >
-                        <option value="inherit">{t('knowledgeBaseSelectionInherit')}</option>
-                        <option value="enabled">{t('knowledgeBaseSelectionEnabled')}</option>
-                        <option value="disabled">{t('knowledgeBaseSelectionDisabled')}</option>
-                      </Select>
-                    </div>
-                  )
-                })}
-              </section>
-              {knowledgeBaseError && <p className="dialog-error">{knowledgeBaseError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" disabled={knowledgeBaseBusy} onClick={() => setConversationKnowledgeBasesOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || knowledgeBaseBusy}
-                onClick={() => void saveConversationKnowledgeBases()}
-              >
-                {knowledgeBaseBusy ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      <Dialog open={projectSettingsOpen} onOpenChange={(_, data) => setProjectSettingsOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>{t('projectSettings')}{projectSettingsTarget ? ` · ${projectSettingsTarget.name}` : ''}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <TabList
-                selectedValue={projectSettingsTab}
-                onTabSelect={(_, data) => setProjectSettingsTab(data.value as typeof projectSettingsTab)}
-              >
-                <Tab value="model">{t('globalTabModel')}</Tab>
-                <Tab value="agentLimits">{t('globalTabAgentLimits')}</Tab>
-                <Tab value="command">{t('globalTabCommand')}</Tab>
-                <Tab value="context">{t('globalTabContext')}</Tab>
-                <Tab value="skills">{t('skills')}</Tab>
-                <Tab value="knowledgeBases">{t('knowledgeBases')}</Tab>
-              </TabList>
-              {projectSettingsTab === 'model' && (
-                <>
-                  <Field label={t('projectDefaultModel')}>
-                    <Select
-                      disabled={interactionLocked || config.models.length === 0}
-                      value={projectSettingsModelConfigId}
-                      onChange={(_, data) => setProjectSettingsModelConfigId(data.value)}
-                    >
-                      <option value="">{t('applicationDefault')}</option>
-                      {sortedConversationModelGroups.map((group) => (
-                        <option key={group.id} value={group.id}>{t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}</option>
-                      ))}
-                      {sortedConversationModels.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name || t('unnamedModel')}</option>
-                      ))}
-                    </Select>
-                  </Field>
-                  {projectSettingsModelConfigId === '' && (
-                    <p className="settings-description">{t('applicationDefault')} · {applicationDefaultTargetLabel}</p>
-                  )}
-                </>
-              )}
-              {projectSettingsTab === 'agentLimits' && (
-                <>
-                  <Switch
-                    checked={projectAgentLimitsOverride}
-                    disabled={interactionLocked}
-                    label={t('agentLimitsOverrideGlobal')}
-                    onChange={(_, data) => setProjectAgentLimitsOverride(data.checked)}
-                  />
-                  <AgentLimitsFields
-                    value={projectAgentLimitsDraft}
-                    disabled={interactionLocked || !projectAgentLimitsOverride}
-                    onChange={(patch) => setProjectAgentLimitsDraft((current) => ({ ...current, ...patch }))}
-                  />
-                </>
-              )}
-              {projectSettingsTab === 'command' && (
-                <>
-                  <Switch
-                    checked={projectCommandOverride}
-                    disabled={interactionLocked}
-                    label={t('commandOverrideDefault')}
-                    onChange={(_, data) => setProjectCommandOverride(data.checked)}
-                  />
-                  <CommandExecutionEditorFields
-                    value={projectCommandDraft}
-                    onChange={setProjectCommandDraft}
-                    disabled={interactionLocked || !projectCommandOverride}
-                    modelConfigs={flatModelConfigs}
-                    sessionModel={effectiveModelConfig}
-                    globalReview={config.commandReviewGlobal}
-                    onOpenSyntaxHelp={openCommandRulesHelp}
-                  />
-                </>
-              )}
-              {projectSettingsTab === 'context' && (
-                <>
-                  <Switch
-                    checked={projectContextOverride}
-                    disabled={interactionLocked}
-                    label={t('overrideApplicationContext')}
-                    onChange={(_, data) => {
-                      setProjectContextOverride(data.checked)
-                      if (data.checked) {
-                        setProjectContextDraft({ ...(projectSettingsTarget?.contextConfigOverride ?? config.contextManagement) })
-                      }
-                    }}
-                  />
-                  <ContextSettingsFields
-                    disabled={interactionLocked || !projectContextOverride}
-                    modelDisabled={interactionLocked}
-                    modelTargets={[
-                      ...sortedConversationModelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
-                      ...sortedConversationModels.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
-                    ]}
-                    referenceModel={resolveModelTarget(config, projectSettingsModelConfigId || config.activeModelConfigId)}
-                    activeModelConfigId={projectSettingsModelConfigId}
-                    emptyModelOptionLabel={t('applicationDefault')}
-                    onModelConfigChange={(modelConfigId) => setProjectSettingsModelConfigId(modelConfigId)}
-                    value={projectContextDraft}
-                    onChange={(patch) => setProjectContextDraft((current) => ({ ...current, ...patch }))}
-                  />
-                </>
-              )}
-              {projectSettingsTab === 'skills' && (
-                <section className="skill-selection-list">
-                  <p className="settings-description">{t('projectSkillSelectionDescription')}</p>
-                  {installedSkills.length === 0 ? (
-                    <p className="status">{t('noInstalledSkills')}</p>
-                  ) : installedSkills.map((skill) => {
-                    const effective = resolveEffectiveResourceIds(config.defaultSkillIds, projectSkillDraft).includes(skill.id)
-                    return (
-                      <div className="skill-selection-row" key={skill.id}>
-                        <div>
-                          <strong>{skill.name}</strong>
-                          <small>{skill.description || skill.id}</small>
-                          <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
-                            {t(effective ? 'skillEffective' : 'skillNotEffective')}
-                          </small>
-                        </div>
-                        <Select
-                          aria-label={t('skillSelection')}
-                          disabled={interactionLocked}
-                          value={resourceSelectionMode(projectSkillDraft, skill.id)}
-                          onChange={(_, data) => setProjectSkillDraft((current) => updateResourceSelection(
-                            current,
-                            skill.id,
-                            data.value as ResourceSelectionMode,
-                          ))}
-                        >
-                          <option value="inherit">{t('skillSelectionInherit')}</option>
-                          <option value="enabled">{t('skillSelectionEnabled')}</option>
-                          <option value="disabled">{t('skillSelectionDisabled')}</option>
-                        </Select>
-                      </div>
-                    )
-                  })}
-                </section>
-              )}
-              {projectSettingsTab === 'knowledgeBases' && (
-                <section className="skill-selection-list">
-                  <p className="settings-description">{t('projectKnowledgeBaseSelectionDescription')}</p>
-                  {knowledgeBases.length === 0 ? (
-                    <p className="status">{t('noKnowledgeBases')}</p>
-                  ) : knowledgeBases.map((knowledgeBase) => {
-                    const effective = resolveEffectiveResourceIds(config.defaultKnowledgeBaseIds, projectKnowledgeBaseDraft).includes(knowledgeBase.id)
-                    return (
-                      <div className="skill-selection-row" key={knowledgeBase.id}>
-                        <div>
-                          <strong>{knowledgeBase.name}</strong>
-                          <small>{t(knowledgeBase.mode === 'rg' ? 'knowledgeBaseModeRg' : 'knowledgeBaseModeRag')} · {knowledgeBase.source.path}</small>
-                          <small className={effective ? 'resource-effective' : 'resource-unavailable'}>
-                            {t(effective ? 'knowledgeBaseEffective' : 'knowledgeBaseNotEffective')}
-                          </small>
-                        </div>
-                        <Select
-                          aria-label={t('knowledgeBaseSelection')}
-                          disabled={interactionLocked}
-                          value={resourceSelectionMode(projectKnowledgeBaseDraft, knowledgeBase.id)}
-                          onChange={(_, data) => setProjectKnowledgeBaseDraft((current) => updateResourceSelection(
-                            current,
-                            knowledgeBase.id,
-                            data.value as ResourceSelectionMode,
-                          ))}
-                        >
-                          <option value="inherit">{t('knowledgeBaseSelectionInherit')}</option>
-                          <option value="enabled">{t('knowledgeBaseSelectionEnabled')}</option>
-                          <option value="disabled">{t('knowledgeBaseSelectionDisabled')}</option>
-                        </Select>
-                      </div>
-                    )
-                  })}
-                </section>
-              )}
-              {settingsError && <p className="dialog-error">{settingsError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setProjectSettingsOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || saving || !projectSettingsValid}
-                onClick={() => void saveProjectSettings()}
-              >
-                {saving ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      <Dialog open={agentLimitsDialogOpen} onOpenChange={(_, data) => setAgentLimitsDialogOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>{t('conversationAgentLimits')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <Switch
-                checked={agentLimitsOverride}
-                disabled={interactionLocked}
-                label={t('agentLimitsOverrideProject')}
-                onChange={(_, data) => setAgentLimitsOverride(data.checked)}
-              />
-              <AgentLimitsFields
-                value={agentLimitsDraft}
-                disabled={interactionLocked || !agentLimitsOverride}
-                onChange={(patch) => setAgentLimitsDraft((current) => ({ ...current, ...patch }))}
-              />
-              {settingsError && <p className="dialog-error">{settingsError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setAgentLimitsDialogOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || saving || (agentLimitsOverride && !isValidAgentLimits(agentLimitsDraft))}
-                onClick={() => void saveAgentLimitsSettings()}
-              >
-                {saving ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      <Dialog open={commandDialogOpen} onOpenChange={(_, data) => setCommandDialogOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>{t('commandAndReviewSettings')}</DialogTitle>
-            <DialogContent className="dialog-fields">
-              <Switch
-                checked={commandOverride}
-                disabled={interactionLocked}
-                label={t('commandOverrideProject')}
-                onChange={(_, data) => setCommandOverride(data.checked)}
-              />
-              <CommandExecutionEditorFields
-                value={commandDraft}
-                onChange={setCommandDraft}
-                disabled={interactionLocked || !commandOverride}
-                modelConfigs={flatModelConfigs}
-                sessionModel={effectiveModelConfig}
-                globalReview={config.commandReviewGlobal}
-                onOpenSyntaxHelp={openCommandRulesHelp}
-              />
-              {settingsError && <p className="dialog-error">{settingsError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setCommandDialogOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button
-                appearance="primary"
-                disabled={interactionLocked || saving || !isValidCommandExecutionDraft(commandDraft)}
-                onClick={() => void saveCommandExecutionSettings()}
-              >
-                {saving ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
-
-      <Dialog open={contextDialogOpen} onOpenChange={(_, data) => setContextDialogOpen(data.open)}>
-        <DialogSurface>
-          <DialogBody>
-            <DialogTitle>
-              {contextScope === 'project' ? t('projectContextSettings') : t('conversationContextSettings')}
-            </DialogTitle>
-            <DialogContent className="dialog-fields">
-              <Switch
-                checked={contextOverrideEnabled}
-                disabled={interactionLocked}
-                label={contextScope === 'project' ? t('overrideApplicationContext') : t('overrideProjectContext')}
-                onChange={(_, data) => setContextOverrideEnabled(data.checked)}
-              />
-              <ContextSettingsFields
-                disabled={interactionLocked || !contextOverrideEnabled}
-                modelDisabled={interactionLocked}
-                showCustomStrategy={config.developerMode && contextScope === 'conversation' && contextOverrideEnabled}
-                modelTargets={[
-                  ...config.models.map((model) => ({ id: model.id, label: model.name || t('unnamedModel') })),
-                  ...config.modelGroups.map((group) => ({ id: group.id, label: t('modelGroupOption', { name: group.name || t('unnamedModelGroup') }) })),
-                ]}
-                referenceModel={resolveModelTarget(config, contextScope === 'conversation'
-                  ? (activeConversation?.modelConfigId ?? activeProject?.defaultModelConfigId ?? config.activeModelConfigId)
-                  : (projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? config.activeModelConfigId))}
-                activeModelConfigId={contextScope === 'conversation'
-                  ? activeConversation?.modelConfigId ?? ''
-                  : projects.find((project) => project.id === contextProjectId)?.defaultModelConfigId ?? ''}
-                emptyModelOptionLabel={t(contextScope === 'conversation' ? 'followProjectDefault' : 'applicationDefault')}
-                onModelConfigChange={(modelConfigId) => void changeContextModelConfig(modelConfigId)}
-                value={contextDraft}
-                onChange={updateContextDraft}
-              />
-              {settingsError && <p className="dialog-error">{settingsError}</p>}
-            </DialogContent>
-            <DialogActions>
-              <Button appearance="secondary" onClick={() => setContextDialogOpen(false)}>
-                {t('cancel')}
-              </Button>
-              <Button appearance="primary" disabled={interactionLocked || saving || invalidContextOverride} onClick={() => void saveContextSettings()}>
-                {saving ? t('saving') : t('save')}
-              </Button>
-            </DialogActions>
-          </DialogBody>
-        </DialogSurface>
-      </Dialog>
+      <ConversationSettingsDialogs
+        settings={conversationSettings}
+        config={config}
+        installedSkills={installedSkills}
+        knowledgeBases={knowledgeBases}
+        flatModelConfigs={flatModelConfigs}
+        effectiveModelConfig={effectiveModelConfig}
+        interactionLocked={interactionLocked}
+        saving={saving}
+        settingsError={settingsError}
+        openCommandRulesHelp={openCommandRulesHelp}
+        projects={projects}
+        activeProject={activeProject}
+        activeConversation={activeConversation}
+        skillBusy={skillBusy}
+        skillError={skillError}
+        knowledgeBaseBusy={knowledgeBaseBusy}
+        knowledgeBaseError={knowledgeBaseError}
+      />
 
       {toast && createPortal(
         <div className={`app-toast app-toast-${toast.tone}`} role="status">

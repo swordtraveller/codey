@@ -22,8 +22,8 @@ import type {
   CommandReviewRule,
   ModelConfig,
 } from '../../../shared/types'
-import { findConflictingRule, isValidGlobPattern } from '../../../shared/command-rules'
-import { maximumAgentLimit } from '../../../shared/types'
+import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../../shared/command-rules'
+import { commandExecutionSupported, maximumAgentLimit } from '../../../shared/types'
 
 export const interpreterLabels: Record<string, string> = {
   bash: 'bash',
@@ -63,6 +63,21 @@ export function isValidAgentLimits(value: AgentLimitsConfig): boolean {
     value.modelRequestsPerRound >= 1 && value.modelRequestsPerRound <= maximumAgentLimit &&
     Number.isInteger(value.toolCallsPerRequest) &&
     value.toolCallsPerRequest >= 1 && value.toolCallsPerRequest <= maximumAgentLimit
+}
+
+export function isValidCommandExecutionDraft(draft: CommandExecutionConfig | null): boolean {
+  if (draft === null) return true
+  if (!commandExecutionSupported(draft.interpreter, draft.environment)) return false
+  // The session default combo must be within the enabled combos.
+  if (!(draft.enabledEnvironments[draft.interpreter] ?? []).includes(draft.environment)) return false
+  // Every enabled combo must be supported.
+  for (const [interpreter, environments] of Object.entries(draft.enabledEnvironments)) {
+    for (const environment of environments) {
+      if (!commandExecutionSupported(interpreter as CommandExecutionConfig['interpreter'], environment)) return false
+    }
+  }
+  if (draft.review !== null && !validateCommandReviewConfig(draft.review)) return false
+  return true
 }
 
 /** Shared Agent-limits fields for the three settings surfaces (global,
