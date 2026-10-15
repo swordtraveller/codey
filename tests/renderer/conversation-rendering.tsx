@@ -13,6 +13,7 @@ const blocks = Array.from({ length: 2000 }, (_, index) => ({ type: 'content' as 
 const user = (id: string): ChatMessage => ({ id, role: 'user', content: id })
 let bodyRenders = 0
 let maxMounted = 0
+let renderId = 0
 const root = createRoot(document.getElementById('root')!)
 const pause = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 200))
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message) }
@@ -26,10 +27,10 @@ function Row({ row }: { row: ConversationRenderRow }): React.JSX.Element {
     </LazyDetails> : <div className="message-card" style={{ minHeight: 40 + (row.messageIndex % 3) * 35 }} data-text>{block?.type === 'content' ? block.content : row.kind === 'message' ? row.message.content : 'notice'}</div>}
   </div>
 }
-function Fixture({ messages, progress = emptyProgress, follow = true, pagination }: Snapshot): React.JSX.Element {
+function Fixture({ messages, progress = emptyProgress, follow = true, pagination, renderId }: Snapshot & { renderId?: number }): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
   const rows = useMemo(() => mergeConversationRows(conversationHistoryRows(messages), conversationLiveRows(progress, messages)), [messages, progress])
-  return <div id="scroll" ref={ref} style={{ height: 480, width: 720, overflow: 'auto', overflowAnchor: 'none' }}>
+  return <div id="scroll" data-render-id={renderId} ref={ref} style={{ height: 480, width: 720, overflow: 'auto', overflowAnchor: 'none' }}>
     <div className="messages">
       <ConversationHistory messages={messages} rows={rows} scrollContainerRef={ref} shouldStickToBottom={follow} pagination={pagination}
         renderRow={(row) => <Row row={row} />} renderLoadOlder={(load) => <button id="older" onClick={load}>older</button>} />
@@ -37,9 +38,9 @@ function Fixture({ messages, progress = emptyProgress, follow = true, pagination
     </div>
   </div>
 }
-function PagedFixture({ loader }: { loader: ConversationPageLoader }): React.JSX.Element {
+function PagedFixture({ loader, renderId }: { loader: ConversationPageLoader; renderId: number }): React.JSX.Element {
   const state = useSyncExternalStore(loader.subscribe, loader.getSnapshot, loader.getSnapshot)
-  return <Fixture messages={state.messages} pagination={{ hasOlder: Boolean(state.before), loading: state.loadingOlder, loadOlder: loader.loadOlder }} />
+  return <Fixture renderId={renderId} messages={state.messages} pagination={{ hasOlder: Boolean(state.before), loading: state.loadingOlder, loadOlder: loader.loadOlder }} />
 }
 const rows = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('[data-message-id]')]
 const scroller = (): HTMLElement => document.getElementById('scroll')!
@@ -66,16 +67,32 @@ function bounded(): void {
   assert(rows().length > 0 && rows().length < 45, `mounted ${rows().length} rows`)
   assert(visible().length > 0, `blank viewport: ${JSON.stringify({ top: scroller().scrollTop, height: scroller().scrollHeight, viewport: scroller().getBoundingClientRect().toJSON(), mounted: rows().map((row) => ({ id: row.dataset.messageId, rect: row.getBoundingClientRect().toJSON() })) })}`)
 }
+// React commits and the virtual list's first animation frame can take longer
+// than 200ms in a hidden Electron window. Wait for observable completion while
+// retaining a deadline: a permanently blank viewport must still fail.
+async function waitFor(check: () => void, operation: string): Promise<void> {
+  const deadline = performance.now() + 5000
+  for (;;) {
+    try { check(); return } catch (error) {
+      if (performance.now() >= deadline) throw new Error(operation + ': ' + String(error), { cause: error })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
 async function render(snapshot: Snapshot): Promise<void> {
-  root.render(<StrictMode><Fixture key={snapshot.session ?? 'default'} {...snapshot} /></StrictMode>)
-  await pause()
-  bounded()
+  const previous = document.getElementById('scroll')
+  const id = ++renderId
+  root.render(<StrictMode><Fixture key={snapshot.session ?? 'default'} {...snapshot} renderId={id} /></StrictMode>)
+  await waitFor(() => {
+    assert(scroller()?.dataset.renderId === String(id), 'React has not committed the requested snapshot')
+    bounded()
+    if (scroller() !== previous && snapshot.follow !== false) assert(atBottom(), 'initial mount should follow bottom')
+  }, 'render ' + (snapshot.session ?? 'default'))
 }
 async function scroll(top: number): Promise<void> {
   scroller().scrollTop = top
   scroller().dispatchEvent(new Event('scroll'))
-  await pause()
-  bounded()
+  await waitFor(bounded, 'scroll to ' + top)
 }
 function atBottom(): boolean { const c = scroller(); return c.scrollHeight - c.clientHeight - c.scrollTop < 3 }
 
@@ -173,10 +190,12 @@ async function runTests(): Promise<unknown> {
     return new Promise((resolve) => { pendingOlder = () => resolve({ messages: pagedMessages.slice(start, end), before: start ? pagedMessages[start].id : null, revision: '1' }) })
   })
   await loader.refresh()
-  root.render(<StrictMode><PagedFixture key="paged" loader={loader} /></StrictMode>)
-  await pause()
-  bounded()
-  assert(atBottom(), 'paged initial mount should follow bottom')
+  const pagedRenderId = ++renderId
+  root.render(<StrictMode><PagedFixture key="paged" loader={loader} renderId={pagedRenderId} /></StrictMode>)
+  await waitFor(() => {
+    bounded()
+    assert(atBottom(), 'paged initial mount should follow bottom')
+  }, 'paged initial render')
   await scroll(0)
   const pagedAnchor = anchor()
   scroller().dispatchEvent(new WheelEvent('wheel', { deltaY: -50 }))
