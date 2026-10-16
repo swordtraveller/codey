@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 vi.mock('electron', () => ({
   app: {
     isPackaged: false,
-    getPath: () => '.',
+    getPath: (name: string) => name === 'logs' ? '.agent_tmp/test-logs/command-execution' : '.',
   },
 }))
 import {

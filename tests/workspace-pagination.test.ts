@@ -9,8 +9,9 @@ vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
   return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename) }
 })
+import { defaultCommandExecutionConfig, defaultContextManagementConfig } from '../src/shared/types'
 import { BridgeHandoverService } from '../src/main/bridge'
-import { addMessage, createConversation, createProject, getConversationNavigation, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
+import { addMessage, createConversation, createProject, getConversationNavigation, getConversationMessagePage, getProject, getProjectsForRenderer, saveConversationContext, setProjectModelConfig, setProjectAgentLimitsDefault, setProjectCommandExecutionDefault, setProjectContextConfig, setProjectSkillSelection, setProjectKnowledgeBaseSelection, setConversationModelConfig, setConversationAgentLimits, setConversationCommandExecution, setConversationContextConfig, setConversationSkillSelection, setConversationKnowledgeBaseSelection, setConversationReadState, updateConversationTurn, updateConversationHotLongTermContent } from '../src/main/workspace'
 
 const headerPath = (projectId: string, conversationId: string): string => join(electronState.userData, 'workspace-data', 'projects', Buffer.from(projectId).toString('base64url'), 'conversations', `${Buffer.from(conversationId).toString('base64url')}.json`)
 async function reload(): Promise<void> {
@@ -84,6 +85,82 @@ describe('disk-backed conversation pagination', () => {
     expect(full.conversations[0].messages).toHaveLength(24)
     expect(full.conversations[0].agentMessages).toHaveLength(1)
     expect(full.conversations[0].hotLongTermContent).toBe('Preferences')
+  })
+
+  it('retains unloaded history and context across all settings saves and a restart', async () => {
+    const { projectId, conversationId } = await seed()
+    const sibling = await createConversation(projectId)
+    const siblingId = sibling.conversations.at(-1)!.id
+    await addMessage(projectId, siblingId, 'user', 'Keep sibling history')
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations.every((item) => item.messages.length === 0)).toBe(true)
+    const recordsBefore = await readFile(headerPath(projectId, conversationId) + '.records')
+    const projectLimits = { modelRequestsPerRound: 9, toolCallsPerRequest: 3 }
+    const conversationLimits = { modelRequestsPerRound: 6, toolCallsPerRequest: 2 }
+    const execution = structuredClone(defaultCommandExecutionConfig)
+    const projectContext = { ...defaultContextManagementConfig, recentKeepRounds: 3 }
+    const conversationContext = { ...defaultContextManagementConfig, recentKeepRounds: 4 }
+    const projectSelection = { enabledIds: ['project-resource'], disabledIds: [] }
+    const conversationSelection = { enabledIds: ['local-resource'], disabledIds: ['project-resource'] }
+
+    await setProjectModelConfig(projectId, 'project-model')
+    await setProjectAgentLimitsDefault(projectId, projectLimits)
+    await setProjectCommandExecutionDefault(projectId, execution)
+    await setProjectContextConfig(projectId, projectContext)
+    await setProjectSkillSelection(projectId, projectSelection)
+    await setProjectKnowledgeBaseSelection(projectId, projectSelection)
+    await setConversationModelConfig(projectId, conversationId, 'local-model')
+    await setConversationAgentLimits(projectId, conversationId, conversationLimits)
+    await setConversationCommandExecution(projectId, conversationId, execution)
+    await setConversationContextConfig(projectId, conversationId, conversationContext)
+    await setConversationSkillSelection(projectId, conversationId, conversationSelection)
+    await setConversationKnowledgeBaseSelection(projectId, conversationId, conversationSelection)
+    expect(open).not.toHaveBeenCalled()
+    expect(await readFile(headerPath(projectId, conversationId) + '.records')).toEqual(recordsBefore)
+
+    await reload()
+    const summary = (await getProjectsForRenderer())[0]
+    expect(summary).toMatchObject({ defaultModelConfigId: 'project-model', agentLimitsDefault: projectLimits,
+      commandExecutionDefault: execution, contextConfigOverride: projectContext,
+      skillSelection: projectSelection, knowledgeBaseSelection: projectSelection })
+    expect(summary.conversations.find((item) => item.id === conversationId)).toMatchObject({
+      modelConfigId: 'local-model', agentLimits: conversationLimits, commandExecution: execution,
+      contextConfigOverride: conversationContext, skillSelection: conversationSelection,
+      knowledgeBaseSelection: conversationSelection, messages: [], agentMessages: [],
+      history: { messageCount: 24, turnCount: 12, lastMessageId: 'a11' },
+    })
+    expect(summary.conversations.find((item) => item.id === siblingId)).toMatchObject({
+      modelConfigId: null, agentLimits: null, commandExecution: null, contextConfigOverride: null,
+      skillSelection: { enabledIds: [], disabledIds: [] }, knowledgeBaseSelection: { enabledIds: [], disabledIds: [] },
+      history: { messageCount: 1 },
+    })
+    const full = await getProject(projectId, conversationId)
+    const restored = full.conversations.find((item) => item.id === conversationId)!
+    expect(restored.messages.map((message) => message.id)).toEqual(Array.from({ length: 12 }, (_, i) => [`u${i}`, `a${i}`]).flat())
+    expect(restored.agentMessages).toEqual([expect.objectContaining({ role: 'user', content: 'Full model context' })])
+    expect((await getConversationMessagePage(projectId, siblingId)).messages[0].content).toBe('Keep sibling history')
+  })
+
+  it('preserves disk history when a settings write fails and can retry after restart', async () => {
+    const { projectId, conversationId } = await seed(2)
+    await reload()
+    await getProjectsForRenderer()
+    const path = headerPath(projectId, conversationId)
+    const originalHeader = await readFile(path, 'utf8')
+    const originalRecords = await readFile(path + '.records')
+    const limits = { modelRequestsPerRound: 5, toolCallsPerRequest: 2 }
+    vi.mocked(rename).mockRejectedValueOnce(new Error('disk unavailable'))
+    await expect(setConversationAgentLimits(projectId, conversationId, limits)).rejects.toThrow('disk unavailable')
+    expect(await readFile(path, 'utf8')).toBe(originalHeader)
+    expect(await readFile(path + '.records')).toEqual(originalRecords)
+    await reload()
+    expect((await getProjectsForRenderer())[0].conversations[0].agentLimits).toBeNull()
+    await setConversationAgentLimits(projectId, conversationId, limits)
+    await reload()
+    const restored = (await getProject(projectId, conversationId)).conversations[0]
+    expect(restored.agentLimits).toEqual(limits)
+    expect(restored.messages.map((message) => message.id)).toEqual(['u0', 'a0', 'u1', 'a1'])
+    expect(restored.agentMessages[0].content).toBe('Full model context')
   })
 
   it('does not read an old body when opening the newest page; corrupt requested records fail explicitly', async () => {

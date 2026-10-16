@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({
   app: {
     isPackaged: true,
-    getPath: () => '.',
+    getPath: (name: string) => name === 'logs' ? '.agent_tmp/test-logs/model-failover' : '.',
   },
 }))
 import type { ModelChainMember, RuntimeModelConfig } from '../src/shared/types'

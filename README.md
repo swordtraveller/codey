@@ -49,6 +49,10 @@ pnpm install
 pnpm dev
 ```
 
+## Testing
+
+Run `pnpm test:regression` for key user flows, including settings, history persistence, Agent execution, conversation rendering, and diagram navigation. See [tests/README.md](tests/README.md) for coverage and individual commands.
+
 ## Build
 
 ```bash
