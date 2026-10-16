@@ -1,7 +1,8 @@
+import { localDateKey } from '../../../src/shared/usage-calendar'
 import { aggregateUsageEvents, type UsageAnalytics, type UsageAnalyticsQuery } from '../../../src/shared/usage-analytics'
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { FluentProvider, webLightTheme } from '@fluentui/react-components'
+import { FluentProvider, webLightTheme, webDarkTheme } from '@fluentui/react-components'
 import i18n from '../../../src/renderer/src/i18n'
 import { AnalyticsDialog } from '../../../src/renderer/src/components/AnalyticsDialog'
 import { aggregateModelCallEvents, type PerformanceAnalytics, type PerformanceAnalyticsQuery, type PerformanceDimension } from '../../../src/shared/analytics'
@@ -28,9 +29,10 @@ let usageQuery: (value: UsageAnalyticsQuery) => Promise<UsageAnalytics> = async 
 let requests: PerformanceAnalyticsQuery[] = []
 let query: (value: PerformanceAnalyticsQuery) => Promise<PerformanceAnalytics> = async (value) => result(value.dimension)
 Object.assign(window, { codey: { getUsageAnalytics: (value: UsageAnalyticsQuery) => { usageRequests.push(value); return usageQuery(value) }, getPerformanceAnalytics: (value: PerformanceAnalyticsQuery) => { requests.push(value); return query(value) } } })
+let theme = webLightTheme
 const root = createRoot(document.getElementById('root')!)
 async function render(open = true): Promise<void> {
-  await act(async () => { root.render(<FluentProvider theme={webLightTheme}><AnalyticsDialog open={open} onOpenChange={() => { void render(false) }} /></FluentProvider>) })
+  await act(async () => { root.render(<FluentProvider theme={theme}><AnalyticsDialog open={open} onOpenChange={() => { void render(false) }} /></FluentProvider>) })
 }
 async function click(text: string): Promise<void> {
   const button = [...document.querySelectorAll<HTMLButtonElement>('button, [role="tab"]')].find((entry) => entry.textContent?.trim() === text
@@ -66,6 +68,7 @@ async function runTests(): Promise<object> {
   }
   await click('性能追踪')
   await runUsageTests()
+  await runCalendarTests()
   query = async () => { throw new Error('IPC failed') }
   await click('刷新')
   assert(document.querySelector('[role="alert"]')?.textContent === '无法读取性能统计数据', 'read failure is visible')
@@ -107,9 +110,11 @@ async function runTests(): Promise<object> {
   await render(false)
   await render()
   assert(requests.length === count + 1, 'reopening refreshes saved data')
-  return { passed: 24, checks: ['usage period', 'usage dimensions', 'usage coverage', 'usage unknown values', 'usage errors', 'usage race', 'usage empty state', 'usage localization', 'usage refresh', 'quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
+  return { passed: 24 + calendarChecks.length, checks: [...calendarChecks, 'usage period', 'usage dimensions', 'usage coverage', 'usage unknown values', 'usage errors', 'usage race', 'usage empty state', 'usage localization', 'usage refresh', 'quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
 }
 async function runLayoutTests(): Promise<object> {
+  // Keep layout checks independent of the screenshot preview's sample data.
+  usageQuery = async (value) => aggregateUsageEvents(usageEvents, value)
   const surface = document.querySelector<HTMLElement>('.analytics-dialog-surface')!
   const viewport = document.querySelector<HTMLElement>('.analytics-table-wrap')!
   const rect = surface.getBoundingClientRect()
@@ -122,13 +127,20 @@ async function runLayoutTests(): Promise<object> {
   const performanceWidth = viewport.scrollWidth
   await click('成本统计')
   const usageTable = document.querySelector<HTMLElement>('.usage-panel .analytics-table-wrap')!
+  assert(usageTable, 'usage table is present for today')
   assert(usageTable.scrollWidth > usageTable.clientWidth, 'usage table overflows narrow window')
   usageTable.scrollLeft = 150
   assert(usageTable.scrollLeft > 0, 'usage table scrolls horizontally')
   usageTable.scrollLeft = 0
-  return { width: window.innerWidth, dialogWidth: rect.width, tableViewport: performanceViewport, tableWidth: performanceWidth, usageViewport: usageTable.clientWidth, usageWidth: usageTable.scrollWidth }
+  await toggleCalendar()
+  const calendarViewport = document.querySelector<HTMLElement>('.usage-calendar-scroll')!
+  assert(calendarViewport.scrollWidth > calendarViewport.clientWidth, 'calendar overflows narrow window')
+  calendarViewport.scrollLeft = 120
+  assert(calendarViewport.scrollLeft > 0, 'calendar scrolls horizontally')
+  calendarViewport.scrollLeft = 0
+  return { calendarViewport: calendarViewport.clientWidth, calendarWidth: calendarViewport.scrollWidth, width: window.innerWidth, dialogWidth: rect.width, tableViewport: performanceViewport, tableWidth: performanceWidth, usageViewport: usageTable.clientWidth, usageWidth: usageTable.scrollWidth }
 }
-Object.assign(window, { runTests, runLayoutTests, showUsage: () => click('成本统计'), showPerformance: () => click('性能追踪') })
+Object.assign(window, { runTests, runLayoutTests, showCalendarPreview, showCalendar: () => toggleCalendar(), showUsage: () => click('成本统计'), showPerformance: () => click('性能追踪') })
 
 async function chooseUsage(label: string, value: string): Promise<void> {
   const select = document.querySelector<HTMLSelectElement>('.usage-panel select[aria-label="' + label + '"]')!
@@ -141,7 +153,7 @@ async function runUsageTests(): Promise<void> {
   assert(text().includes('调用 4 次') && text().includes('输入输出均已报告 2 次') && text().includes('部分用量 1 次')
     && text().includes('用量未知 1 次') && text().includes('覆盖率 50.0%'), 'usage coverage explains missing reports')
   assert(text().includes('输入：200') && text().includes('总计：247'), 'known totals include reported failed usage')
-  assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 30, 'default daily window includes 30 days')
+  assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 1, 'default daily window includes today only')
   await chooseUsage('时间范围', '1')
   assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 1, 'today shows one date')
   await chooseUsage('统计维度', 'modelName')
@@ -170,4 +182,103 @@ async function runUsageTests(): Promise<void> {
   usageQuery = async (value) => aggregateUsageEvents(usageEvents, value)
   await act(async () => { await i18n.changeLanguage('zh-CN') })
   await click('性能追踪')
+}
+
+const calendarChecks = ['calendar lazy load', 'calendar completed cache', 'calendar pending reuse', 'calendar refresh invalidation',
+  'calendar year and stale replies', 'calendar date drilldown', 'calendar errors and retry', 'calendar missing usage styles',
+  'calendar keyboard navigation', 'calendar localization', 'calendar closed panel ignores replies', 'calendar collapsed on reopen']
+async function toggleCalendar(): Promise<void> {
+  const button = document.querySelector<HTMLButtonElement>('.usage-calendar-toggle')!
+  assert(button, 'calendar toggle exists')
+  await act(async () => { button.click() })
+}
+async function chooseCalendar(value: string): Promise<void> {
+  await chooseUsage(i18n.t('usageCalendarPeriod'), value)
+}
+async function runCalendarTests(): Promise<void> {
+  const today = localDateKey(new Date())
+  const year = new Date().getFullYear()
+  const oldDate = `${year - 1}-01-02`
+  const oldEvent = { ...usageEvents[0]!, id: 'old-calendar', callId: 'old-calendar', at: new Date(year - 1, 0, 2).toISOString() }
+  const sample = [...usageEvents, oldEvent]
+  const calendarCount = () => usageRequests.filter((request) => request.calendar !== undefined).length
+  usageQuery = async (value) => aggregateUsageEvents(sample, value)
+  await click('成本统计')
+  const before = calendarCount()
+  assert(document.querySelector('.usage-calendar-toggle')?.getAttribute('aria-expanded') === 'false', 'calendar initially collapsed')
+  assert(!document.querySelector('.usage-calendar-grid') && before === 0, 'collapsed calendar does not compute or request')
+  await click('刷新')
+  assert(calendarCount() === before, 'collapsed refresh does not request calendar')
+  await toggleCalendar()
+  assert(calendarCount() === before + 1 && document.querySelectorAll('.usage-calendar-cell').length >= 365, 'expand requests a year once')
+  assert(usageRequests.at(-1)?.calendar === 'recent', 'calendar has an independent recent year query')
+  assert(document.querySelector('.usage-panel select[aria-label="时间范围"]')?.getAttribute('aria-label') === '时间范围'
+    && (document.querySelector('.usage-panel select[aria-label="时间范围"]') as HTMLSelectElement).value === '1', 'expanding calendar preserves today details')
+  const todayCell = document.querySelector<HTMLButtonElement>(`[data-date="${today}"]`)!
+  assert(todayCell.dataset.state === 'partial' && todayCell.title.includes('50.0%'), 'partial usage has an explicit state and coverage')
+  await act(async () => { todayCell.focus(); todayCell.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
+  const previousWeek = new Date(); previousWeek.setDate(previousWeek.getDate() - 7)
+  assert((document.activeElement as HTMLElement).dataset.date === localDateKey(previousWeek), 'left arrow navigates one week')
+  await toggleCalendar(); await toggleCalendar()
+  assert(calendarCount() === before + 1, 'collapse and reopen reuse completed request')
+  await chooseCalendar(String(year - 1))
+  assert(document.querySelector(`[data-date="${oldDate}"]`), 'historical year renders')
+  await act(async () => { document.querySelector<HTMLButtonElement>(`[data-date="${oldDate}"]`)!.click() })
+  assert(usageRequests.at(-1)?.date === oldDate && document.querySelectorAll('.usage-breakdown-table tbody tr').length === 1, 'click selects exact local day and loads breakdown')
+  await chooseUsage('统计维度', 'specificModel')
+  assert(usageRequests.at(-1)?.date === oldDate && usageRequests.at(-1)?.dimension === 'specificModel', 'dimension preserves selected day')
+  await chooseUsage('时间范围', '1')
+  assert(usageRequests.at(-1)?.days === 1 && usageRequests.at(-1)?.date === undefined, 'ordinary range exits selected day')
+  const requested = calendarCount()
+  await toggleCalendar(); await click('刷新')
+  assert(calendarCount() === requested, 'refresh invalidates without loading collapsed calendar')
+  await toggleCalendar()
+  assert(calendarCount() === requested + 1, 'next expand refreshes invalidated cache')
+  let resolveOld!: (value: UsageAnalytics) => void
+  usageQuery = (value) => value.calendar !== undefined ? new Promise((resolve) => { resolveOld = resolve }) : Promise.resolve(aggregateUsageEvents(sample, value))
+  await click('刷新日历')
+  const pendingCount = calendarCount()
+  await toggleCalendar(); await toggleCalendar()
+  assert(calendarCount() === pendingCount, 'reopen pending calendar reuses in-flight request')
+  usageQuery = async (value) => aggregateUsageEvents(sample, value)
+  await chooseCalendar(String(year))
+  await act(async () => { resolveOld(aggregateUsageEvents([], { calendar: year - 1 })) })
+  assert(document.querySelector(`[data-date="${year}-01-01"]`) && !document.querySelector(`[data-date="${oldDate}"]`), 'old year reply cannot overwrite active year')
+  usageQuery = async (value) => { if (value.calendar !== undefined) throw new Error('calendar read failed'); return aggregateUsageEvents(sample, value) }
+  await click('刷新日历')
+  assert(text().includes('无法读取用量日历') && document.querySelector('.usage-breakdown-table'), 'calendar error does not break details')
+  usageQuery = async (value) => ({ ...aggregateUsageEvents(sample, value), skippedJournals: 1 })
+  await click('刷新日历')
+  assert(document.querySelector('.usage-calendar-grid') && document.querySelector('.usage-calendar')?.textContent?.includes('当前统计不完整'), 'calendar retry and corruption notice')
+  await act(async () => { await i18n.changeLanguage('en') })
+  assert(text().includes('Token usage calendar') && text().includes('Refresh calendar') && text().includes('Incomplete usage'), 'calendar English strings')
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  usageQuery = (value) => value.calendar !== undefined ? new Promise((resolve) => { resolveOld = resolve }) : Promise.resolve(aggregateUsageEvents(sample, value))
+  await click('刷新日历')
+  const closingCount = calendarCount()
+  await render(false)
+  await act(async () => { resolveOld(aggregateUsageEvents(sample, { calendar: year })) })
+  await render()
+  usageQuery = async (value) => aggregateUsageEvents(usageEvents, value)
+  await click('成本统计')
+  assert(calendarCount() === closingCount && document.querySelector('.usage-calendar-toggle')?.getAttribute('aria-expanded') === 'false'
+    && !document.querySelector('.usage-calendar-grid'), 'reopening panel stays collapsed and ignores closed request')
+  await click('性能追踪')
+}
+
+async function showCalendarPreview(dark = false): Promise<void> {
+  theme = dark ? webDarkTheme : webLightTheme
+  await render()
+  await click('成本统计')
+  const previewEvents = Array.from({ length: 365 }, (_, index) => {
+    const date = new Date(); date.setDate(date.getDate() - index); date.setHours(0, 0, 0, 0)
+    return { ...usageEvents[0]!, id: 'preview-' + index, callId: 'preview-' + index, at: date.toISOString(),
+      usage: index % 17 === 0 ? undefined : index % 19 === 0 ? { source: 'provider' as const, inputTokens: 0, outputTokens: 0 }
+        : index % 13 === 0 ? { source: 'provider' as const, totalTokens: 150 }
+          : { source: 'provider' as const, inputTokens: (index % 11 + 1) * 450, outputTokens: (index % 7) * 100 } }
+  }).filter((_, index) => index % 5 !== 0)
+  usageQuery = async (value) => aggregateUsageEvents(previewEvents, value)
+  if (document.querySelector('.usage-calendar-toggle')?.getAttribute('aria-expanded') === 'true') await click('刷新日历')
+  else await toggleCalendar()
+  document.querySelector('.usage-calendar')?.scrollIntoView({ block: 'start' })
 }

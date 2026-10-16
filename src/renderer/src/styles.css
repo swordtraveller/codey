@@ -2691,3 +2691,27 @@ h1 {
 
 .usage-heading { margin: 16px 0 8px; font-size: 14px; }
 .usage-panel .analytics-table-wrap { max-height: 360px; overflow: auto; }
+
+/* The calendar is independent of the daily detail query and horizontally scrolls. */
+.usage-calendar { margin: 12px 0 18px; padding: 12px; min-width: 0; border: 1px solid var(--colorNeutralStroke2); border-radius: 8px; background: var(--colorNeutralBackground1); }
+.usage-calendar-toggle { margin-bottom: 8px; }
+.usage-calendar-scroll { max-width: 100%; overflow-x: auto; padding: 4px 2px 10px; }
+.usage-calendar-grid { display: grid; grid-template-rows: 22px repeat(7, 14px); gap: 4px; width: max-content; }
+.usage-calendar-month, .usage-calendar-weekday { font-size: 11px; color: var(--colorNeutralForeground2); white-space: nowrap; align-self: center; }
+.usage-calendar-cell, .usage-calendar-swatch { background: var(--usage-cell-color, var(--colorNeutralBackground4)); border: 1px solid var(--colorNeutralStroke2); border-radius: 3px; }
+.usage-calendar-cell { width: 14px; height: 14px; padding: 0; cursor: pointer; }
+.usage-calendar-cell:focus-visible, .usage-calendar-cell[aria-pressed="true"] { outline: 2px solid var(--colorNeutralForeground1); outline-offset: 1px; }
+.usage-calendar-cell:hover { outline: 1px solid var(--colorNeutralForeground1); }
+.usage-level-0 { --usage-cell-color: var(--colorNeutralBackground4); }
+.usage-level-1 { --usage-cell-color: var(--colorPaletteGreenBackground1, #dff6dd); }
+.usage-level-2 { --usage-cell-color: color-mix(in srgb, var(--colorPaletteGreenBackground1, #dff6dd) 60%, var(--colorPaletteGreenBackground3, #107c10)); }
+.usage-level-3 { --usage-cell-color: color-mix(in srgb, var(--colorPaletteGreenBackground1, #dff6dd) 30%, var(--colorPaletteGreenBackground3, #107c10)); }
+.usage-level-4 { --usage-cell-color: var(--colorPaletteGreenBackground3, #107c10); }
+.usage-state-zero { box-shadow: inset 0 0 0 2px var(--colorNeutralBackground1); background: var(--colorNeutralForeground3); }
+.usage-state-unknown { background: repeating-linear-gradient(135deg, var(--colorNeutralBackground3) 0 3px, var(--colorNeutralForeground3) 3px 4px); }
+.usage-state-partial { border: 1px dashed var(--colorNeutralForeground1); }
+.usage-state-future { opacity: 0.25; cursor: default; }
+.usage-calendar-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--colorNeutralForeground2); margin: 8px 0; }
+.usage-calendar-band { display: inline-flex; align-items: center; gap: 4px; }
+.usage-calendar-swatch { display: inline-block; flex-shrink: 0; width: 12px; height: 12px; }
+.usage-calendar-detail { margin: 8px 0 0; font-size: 12px; min-height: 36px; overflow-wrap: anywhere; color: var(--colorNeutralForeground2); }

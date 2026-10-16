@@ -1,3 +1,4 @@
+import { UsageCalendar } from './UsageCalendar'
 import { Button, Field, Select } from '@fluentui/react-components'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -18,7 +19,8 @@ function UsageCells({ value }: { value: UsageTotals }): React.JSX.Element {
 export function UsageAnalyticsPanel(): React.JSX.Element {
   const { t } = useTranslation()
   const [dimension, setDimension] = useState<PerformanceDimension>('provider')
-  const [days, setDays] = useState<NonNullable<UsageAnalyticsQuery['days']>>(30)
+  const [days, setDays] = useState<NonNullable<UsageAnalyticsQuery['days']>>(1)
+  const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [revision, setRevision] = useState(0)
   const [data, setData] = useState<UsageAnalytics | null>(null)
   const [loading, setLoading] = useState(true)
@@ -26,19 +28,20 @@ export function UsageAnalyticsPanel(): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
     setLoading(true); setFailed(false); setData(null)
-    void window.codey.getUsageAnalytics({ dimension, days }).then((result) => {
+    void window.codey.getUsageAnalytics({ dimension, ...(selectedDate ? { date: selectedDate } : { days }) }).then((result) => {
       if (!cancelled) setData(result)
     }).catch(() => { if (!cancelled) setFailed(true) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [dimension, days, revision])
+  }, [dimension, days, selectedDate, revision])
   const headings = <><th scope="col" className="analytics-number">{t('usageCalls')}</th>
     <th scope="col" className="analytics-number">{t('usageCoverage')}</th>
     {tokenLabels.map((key) => <th key={key} scope="col" className="analytics-number">{t(key)}</th>)}
   </>
   return <section className="analytics-panel usage-panel" aria-label={t('analyticsCost')} aria-busy={loading}>
     <div className="analytics-toolbar">
-      <Field label={t('usagePeriod')}><Select aria-label={t('usagePeriod')} value={String(days)} onChange={(_, state) => setDays(state.value === 'all' ? 'all' : Number(state.value) as 1 | 7 | 30)}>
+      <Field label={t('usagePeriod')}><Select aria-label={t('usagePeriod')} value={selectedDate ? 'date' : String(days)} onChange={(_, state) => { setSelectedDate(undefined); setDays(state.value === 'all' ? 'all' : Number(state.value) as 1 | 7 | 30) }}>
+        {selectedDate && <option value="date" disabled>{selectedDate}</option>}
         <option value="1">{t('usageToday')}</option><option value="7">{t('usageWeek')}</option>
         <option value="30">{t('usageMonth')}</option><option value="all">{t('usageAll')}</option>
       </Select></Field>
@@ -49,13 +52,16 @@ export function UsageAnalyticsPanel(): React.JSX.Element {
       <Button appearance="subtle" size="small" disabled={loading} onClick={() => setRevision((value) => value + 1)}>{loading ? t('loading') : t('refresh')}</Button>
     </div>
     <p className="analytics-summary">{t('usageDescription')}</p>
-    {failed ? <p className="dialog-error" role="alert">{t('usageLoadError')}</p>
-      : loading ? <p className="analytics-empty" role="status">{t('loading')}</p> : data && <>
+    {data && !loading && !failed && <>
         <p className="analytics-summary">{t('usageSummary', { calls: data.totals.calls, complete: data.totals.completeCalls,
           partial: data.totals.partialCalls, unknown: data.totals.unknownCalls, coverage: coverage(data.totals) })}</p>
         <p className="analytics-summary">{t('usageTotals', { input: format(data.totals.inputTokens), output: format(data.totals.outputTokens), total: format(data.totals.totalTokens) })}</p>
         <p className="analytics-summary">{t('usageTiming', { zone: data.timeZone })}</p>
         <p className="analytics-summary">{t('usageCoverageDescription')}</p>
+    </>}
+    <UsageCalendar revision={revision} selectedDate={selectedDate} onSelectDate={setSelectedDate} />
+    {failed ? <p className="dialog-error" role="alert">{t('usageLoadError')}</p>
+      : loading ? <p className="analytics-empty" role="status">{t('loading')}</p> : data && <>
         {data.skippedJournals > 0 && <p className="dialog-error" role="status">{t('analyticsSkippedJournals', { count: data.skippedJournals })}</p>}
         {data.totals.calls === 0 ? <p className="analytics-empty">{t('usageNoData')}</p> : <>
           <h3 className="usage-heading">{t('usageDaily')}</h3>
