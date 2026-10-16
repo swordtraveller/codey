@@ -93,6 +93,8 @@ import { listProviderModels, testModelConnectivity, testProviderConnectivity } f
 import { buildAuditPromptTemplate } from './command-executor'
 import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
 import { buildRunCommandTool, createAgentTools } from './tools'
+import { getPerformanceAnalytics } from './analytics'
+import type { PerformanceAnalyticsQuery } from '../shared/analytics'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -1292,6 +1294,7 @@ app.whenReady().then(() => {
   ipcMain.handle('updates:check', () => checkForUpdates(app.getVersion()))
   ipcMain.handle('updates:open-latest-release-page', () => shell.openExternal(latestReleasePageUrl))
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('analytics:performance', (_event, query?: PerformanceAnalyticsQuery) => getPerformanceAnalytics(query))
   ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
   ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
   ipcMain.handle('performance:open-file', async (_event, fileName: string) => {

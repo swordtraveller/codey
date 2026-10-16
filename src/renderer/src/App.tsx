@@ -72,6 +72,7 @@ import { ConversationSettingsDialogs } from './components/ConversationSettingsDi
 import { useProjectSettings } from './hooks/useProjectSettings'
 import { useConversationSettings } from './hooks/useConversationSettings'
 import { useModelSettings } from './hooks/useModelSettings'
+import { AnalyticsDialog } from './components/AnalyticsDialog'
 
 const isValidContextConfig = isValidContextManagementConfig
 
@@ -130,6 +131,7 @@ export function App(): React.JSX.Element {
   const [performanceStatus, setPerformanceStatus] = useState<PerformanceTraceStatus | null>(null)
   const [performanceFiles, setPerformanceFiles] = useState<PerformanceTraceFile[]>([])
   const [performanceError, setPerformanceError] = useState('')
+  const [analyticsDialogOpen, setAnalyticsDialogOpen] = useState(false)
   const [projectError, setProjectError] = useState('')
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null)
@@ -745,7 +747,7 @@ export function App(): React.JSX.Element {
       setPerformanceStatus(status)
       setPerformanceFiles(files)
     } catch {
-      setPerformanceError(t('unableLoadPerformanceTrace'))
+      setPerformanceError(t('unableLoadPerformanceDiagnostics'))
     }
   }
 
@@ -755,7 +757,7 @@ export function App(): React.JSX.Element {
       setPerformanceStatus(await window.codey.setPerformanceTracingEnabled(enabled))
       setPerformanceFiles(await window.codey.listPerformanceTraceFiles())
     } catch {
-      setPerformanceError(t('unableUpdatePerformanceTrace'))
+      setPerformanceError(t('unableUpdatePerformanceDiagnostics'))
     }
   }
 
@@ -773,11 +775,11 @@ export function App(): React.JSX.Element {
     try {
       const path = await window.codey.exportPerformanceTraces()
       if (path) {
-        setPerformanceError(t('performanceTraceExported'))
+        setPerformanceError(t('performanceDiagnosticsExported'))
         setPerformanceStatus(await window.codey.getPerformanceTraceStatus())
       }
     } catch {
-      setPerformanceError(t('unableExportPerformanceTrace'))
+      setPerformanceError(t('unableExportPerformanceDiagnostics'))
     }
   }
 
@@ -786,7 +788,7 @@ export function App(): React.JSX.Element {
     try {
       await window.codey.revealPerformanceTraces()
     } catch {
-      setPerformanceError(t('unableRevealPerformanceTrace'))
+      setPerformanceError(t('unableRevealPerformanceDiagnostics'))
     }
   }
 
@@ -1300,19 +1302,22 @@ export function App(): React.JSX.Element {
           </Button>
           <div className="performance-nav-row">
             <Button appearance="subtle" disabled={!config.developerMode} onClick={() => void openPerformanceTracing()}>
-              {t('performanceTracing')}
+              {t('performanceDiagnostics')}
             </Button>
             <Button
               appearance="subtle"
               className="performance-toggle-button"
-              aria-label={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
-              title={performanceStatus?.enabled ? t('stopPerformanceTracing') : t('startPerformanceTracing')}
+              aria-label={performanceStatus?.enabled ? t('stopPerformanceDiagnostics') : t('startPerformanceDiagnostics')}
+              title={performanceStatus?.enabled ? t('stopPerformanceDiagnostics') : t('startPerformanceDiagnostics')}
               disabled={!config.developerMode || !performanceStatus}
               onClick={() => void togglePerformanceTracing(!performanceStatus?.enabled)}
             >
               <span aria-hidden="true" className={performanceStatus?.enabled ? 'performance-toggle-icon stop' : 'performance-toggle-icon play'} />
             </Button>
           </div>
+          <Button appearance="subtle" onClick={() => setAnalyticsDialogOpen(true)}>
+            {t('analytics')}
+          </Button>
           <Button appearance="subtle" onClick={() => void openBridgeDialog()}>
             {t('handover')}
           </Button>
@@ -1627,13 +1632,13 @@ export function App(): React.JSX.Element {
       <Dialog open={performanceDialogOpen} onOpenChange={(_, data) => setPerformanceDialogOpen(data.open)}>
         <DialogSurface>
           <DialogBody>
-            <DialogTitle>{t('performanceTracing')}</DialogTitle>
+            <DialogTitle>{t('performanceDiagnostics')}</DialogTitle>
             <DialogContent className="dialog-fields">
-              <p className="settings-description">{t('performanceTracingDescription')}</p>
-              {!config.developerMode && <p className="settings-warning">{t('performanceTracingRequiresDeveloperMode')}</p>}
+              <p className="settings-description">{t('performanceDiagnosticsDescription')}</p>
+              {!config.developerMode && <p className="settings-warning">{t('performanceDiagnosticsRequiresDeveloperMode')}</p>}
               {performanceStatus && (
                 <>
-                  <p className="status">{performanceStatus.enabled ? t('performanceTracingEnabled') : t('performanceTracingDisabled')}</p>
+                  <p className="status">{performanceStatus.enabled ? t('performanceDiagnosticsEnabled') : t('performanceDiagnosticsDisabled')}</p>
                   <p className="status">{t('performanceTracePath')}: {performanceStatus.path}</p>
                   <p className="status">{t('performanceTraceSize')}: {performanceStatus.sizeBytes.toLocaleString()} B</p>
                 </>
@@ -1650,13 +1655,15 @@ export function App(): React.JSX.Element {
               {performanceError && <p className="dialog-error">{performanceError}</p>}
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceTraces')}</Button>
-              <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceTraces')}</Button>
+              <Button appearance="secondary" onClick={() => void revealPerformanceTracing()} disabled={!performanceStatus}>{t('revealPerformanceDiagnostics')}</Button>
+              <Button appearance="secondary" onClick={() => void exportPerformanceTracing()} disabled={!performanceStatus || performanceStatus.sizeBytes === 0}>{t('exportPerformanceDiagnostics')}</Button>
               <Button appearance="secondary" onClick={() => setPerformanceDialogOpen(false)}>{t('close')}</Button>
             </DialogActions>
           </DialogBody>
         </DialogSurface>
       </Dialog>
+
+      <AnalyticsDialog open={analyticsDialogOpen} onOpenChange={setAnalyticsDialogOpen} />
 
       <HelpDialog {...helpDialogProps} />
 

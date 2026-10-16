@@ -1,5 +1,6 @@
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../../shared/message-navigation'
 import type { CodeReadViewerData } from '../../shared/code-reading'
+import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../../shared/analytics'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import type {
@@ -58,6 +59,7 @@ declare global {
       checkForUpdates(): Promise<UpdateCheckResult>
       openLatestReleasePage(): Promise<void>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      getPerformanceAnalytics(query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics>
       listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
       readPerformanceTraceFile(fileName: string): Promise<string>
       openPerformanceTraceFile(fileName: string): Promise<void>

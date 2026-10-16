@@ -6,7 +6,26 @@ export type TaskRunStatus = 'running' | 'normal' | 'failed' | 'stopped'
 export type RunEventPayload =
   | { type: 'run-started'; userMessageId: string; taskId: string; continuedFromRunId?: string }
   | { type: 'run-finished'; status: Exclude<TaskRunStatus, 'running'>; error?: string }
-  | { type: 'model-call'; callId: string; phase: 'started' | 'finished' | 'failed'; model: string; provider?: string; requestIndex: number; attempt?: number; reason?: string }
+  | {
+    type: 'model-call'
+    callId: string
+    phase: 'started' | 'finished' | 'failed'
+    /** Actual provider model identifier; retained for compatibility with v1 journals. */
+    model: string
+    /** ModelDefinition model name, independent of provider. */
+    modelName?: string
+    /** Display name of the configured provider-specific model link. */
+    modelLabel?: string
+    /** Stable configured ModelLink identifier. */
+    modelId?: string
+    provider?: string
+    providerId?: string
+    requestIndex: number
+    attempt?: number
+    reason?: string
+    durationMs?: number
+    firstTokenMs?: number
+  }
   | { type: 'tool-call'; toolCallId: string; name: string; phase: 'started' | 'finished'; failed?: boolean; cancelled?: boolean }
   | { type: 'approval'; toolCallId: string; stage: string; outcome: string; detail?: string }
   | { type: 'validation'; toolCallId: string; status: string }
@@ -34,7 +53,10 @@ export function isTaskRunEvent(value: unknown): value is TaskRunEvent {
     case 'run-finished': return ['normal', 'failed', 'stopped'].includes(String(event.status)) && optionalText('error')
     case 'model-call': return text('callId') && text('model') && Number.isInteger(event.requestIndex)
       && ['started', 'finished', 'failed'].includes(String(event.phase)) && optionalText('reason') && optionalText('provider')
+      && optionalText('modelName') && optionalText('modelLabel') && optionalText('modelId') && optionalText('providerId')
       && (event.attempt === undefined || (Number.isInteger(event.attempt) && Number(event.attempt) > 0))
+      && (event.durationMs === undefined || (typeof event.durationMs === 'number' && Number.isFinite(event.durationMs) && event.durationMs >= 0))
+      && (event.firstTokenMs === undefined || (typeof event.firstTokenMs === 'number' && Number.isFinite(event.firstTokenMs) && event.firstTokenMs >= 0))
     case 'tool-call': return text('toolCallId') && text('name') && ['started', 'finished'].includes(String(event.phase))
       && (event.failed === undefined || typeof event.failed === 'boolean')
       && (event.cancelled === undefined || typeof event.cancelled === 'boolean')

@@ -287,7 +287,7 @@ async function requestCompletionAttempt(
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
   runtime?: { traceId?: string; projectId?: string; conversationId?: string },
-  onModelChange?: (providerName: string, modelName: string) => void,
+  timing?: { onRequestStart: () => void; onFirstResponse: () => void },
 ): Promise<ChatResponse> {
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
@@ -326,6 +326,7 @@ async function requestCompletionAttempt(
   let chunkCount = 0
   let updateCount = 0
   let receivedDone = false
+  let firstResponseSeen = false
   const requestStartedAt = performance.now()
   const currentMessage = (): ResponseMessage => ({
     content: content || null,
@@ -354,6 +355,7 @@ async function requestCompletionAttempt(
 
   try {
     recordPerformanceTrace({ traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'fetch-start', projectId: runtime?.projectId, conversationId: runtime?.conversationId })
+    timing?.onRequestStart()
     const response = await fetch(config.baseUrl + '/chat/completions', {
       method: 'POST',
       headers: {
@@ -394,6 +396,7 @@ async function requestCompletionAttempt(
         throw new Error('The model returned an empty response')
       }
       log.debug('model.response', modelResponseSummary(response.status, message, false))
+      timing?.onFirstResponse()
       onUpdate?.(message)
       recordPerformanceTrace({
         traceId: runtime?.traceId ?? 'unknown', scope: 'agent', phase: 'request-total',
@@ -438,6 +441,10 @@ async function requestCompletionAttempt(
         toolCall.function.name += deltaToolCall.function?.name ?? ''
         toolCall.function.arguments += deltaToolCall.function?.arguments ?? ''
         toolCalls[index] = toolCall
+      }
+      if (!firstResponseSeen && (content || toolCalls.length)) {
+        firstResponseSeen = true
+        timing?.onFirstResponse()
       }
       schedulePublish()
     }
@@ -535,7 +542,17 @@ export async function requestCompletion(
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal)
       const modelCallId = randomUUID()
-      const modelEvent = { callId: modelCallId, model: member.modelName, provider: member.providerName, requestIndex: runtime?.requestIndex ?? 0, attempt }
+      const modelEvent = {
+        callId: modelCallId,
+        model: member.modelName,
+        modelName: member.modelName,
+        modelLabel: member.label,
+        modelId: member.modelId,
+        provider: member.providerName,
+        providerId: member.providerId,
+        requestIndex: runtime?.requestIndex ?? 0,
+        attempt,
+      }
       await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'started' })
       const controller = new AbortController()
       const abort = (): void => controller.abort()
@@ -545,6 +562,8 @@ export async function requestCompletion(
         timedOut = true
         controller.abort()
       }, modelRequestTimeoutMs)
+      let modelCallStartedAt = performance.now()
+      let firstTokenMs: number | undefined
       const update = (message: ResponseMessage): void => {
         const isMoreComplete = responseSize(message) >= responseSize(latestPartial)
         if (isMoreComplete) {
@@ -557,7 +576,12 @@ export async function requestCompletion(
 
       let response: ChatResponse
       try {
-        response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime)
+        response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime, {
+          onRequestStart: () => { modelCallStartedAt = performance.now() },
+          onFirstResponse: () => {
+            if (firstTokenMs === undefined) firstTokenMs = Math.max(0, performance.now() - modelCallStartedAt)
+          },
+        })
         throwIfAborted(signal)
       } catch (error) {
         const details = errorDetails(error)
@@ -575,7 +599,10 @@ export async function requestCompletion(
         )
         failure.status = (error as CompletionError | null | undefined)?.status
         lastFailure = failure
-        await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'failed', reason: failure.message })
+        await runtime?.onRunEvent?.({
+          type: 'model-call', ...modelEvent, phase: 'failed', reason: failure.message,
+          durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs,
+        })
         if (signal?.aborted) throw failure
         onRequestEvent?.({
           kind: 'failure',
@@ -629,7 +656,10 @@ export async function requestCompletion(
         clearTimeout(timeout)
         signal?.removeEventListener('abort', abort)
       }
-      await runtime?.onRunEvent?.({ type: 'model-call', ...modelEvent, phase: 'finished' })
+      await runtime?.onRunEvent?.({
+        type: 'model-call', ...modelEvent, phase: 'finished',
+        durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs,
+      })
       return response
     }
   }

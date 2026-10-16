@@ -9,6 +9,8 @@ const suites = [
   'tests/workspace-pagination.test.ts',
   'tests/conversation-store.test.ts',
   'tests/task-run-agent.test.ts',
+  'src/shared/analytics.test.ts',
+  'src/main/analytics.test.ts',
   'src/main/todo-tool.test.ts',
   'src/main/dag-tool.test.ts',
   'tests/agent-limits.test.ts',
@@ -26,6 +28,7 @@ const suites = [
 const steps = [
   ['Renderer fixture typecheck', ['node_modules/typescript/bin/tsc', '-p', 'tests/renderer/tsconfig.json', '--pretty', 'false']],
   ['Main-process regressions', ['node_modules/vitest/vitest.mjs', 'run', ...suites]],
+  ['Analytics in Chromium', ['scripts/test-analytics.mjs']],
   ['Settings in Chromium', ['scripts/test-settings.mjs']],
   ['Conversation rendering in Chromium', ['scripts/test-conversation-rendering.mjs']],
   ['Architecture navigation in Chromium', ['scripts/test-architecture-rendering.mjs']],

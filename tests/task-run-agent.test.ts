@@ -20,7 +20,7 @@ const project: Project = {
 const model = {
   ...defaultModelConfig, id: 'model', baseUrl: 'https://model.example/v1', apiKey: 'key', modelName: 'model',
   chain: [{
-    modelId: 'model', label: 'model', baseUrl: 'https://model.example/v1', apiKey: 'key', modelName: 'model',
+    modelId: 'model', label: 'Friendly model', providerId: 'provider', providerName: 'Provider', baseUrl: 'https://model.example/v1', apiKey: 'key', modelName: 'model',
   }], retriesPerModel: 1,
 }
 const contextConfig = { ...defaultContextManagementConfig, layeredEnabled: true, hotTokenBudget: 64_000 }
@@ -60,6 +60,19 @@ describe('TaskRun agent event integration', () => {
     ])
     expect(new Set(calls.map((event) => event.callId)).size).toBe(3)
     for (let i = 0; i < calls.length; i += 2) expect(calls[i].callId).toBe(calls[i + 1].callId)
+    expect(calls[0]).toMatchObject({ modelName: 'model', modelLabel: 'Friendly model', modelId: 'model', providerId: 'provider', provider: 'Provider' })
+    for (const call of calls) {
+      if (call.phase === 'started') expect(call.durationMs).toBeUndefined()
+      else {
+        expect(call.durationMs).toBeGreaterThanOrEqual(0)
+        expect(Number.isFinite(call.durationMs)).toBe(true)
+      }
+    }
+    const success = calls.at(-1)!
+    expect(success.firstTokenMs).toBeGreaterThanOrEqual(0)
+    expect(success.firstTokenMs).toBeLessThanOrEqual(success.durationMs!)
+    expect(calls[1].firstTokenMs).toBeUndefined()
+
   })
 
   it('does not retry a successful model request when recording its end fails', async () => {

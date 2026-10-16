@@ -105,6 +105,7 @@ export type ModelGroupConfig = {
 export type ModelChainMember = {
   modelId: string
   label: string
+  providerId?: string
   providerName?: string
   baseUrl: string
   apiKey: string
