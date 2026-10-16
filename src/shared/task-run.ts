@@ -1,3 +1,4 @@
+import { isModelUsage, type ModelUsage } from './model-usage'
 import { isDagSnapshot, type DagSnapshot } from './dag'
 import { isTodoSnapshot, type TodoSnapshot } from './todo'
 
@@ -25,6 +26,7 @@ export type RunEventPayload =
     reason?: string
     durationMs?: number
     firstTokenMs?: number
+    usage?: ModelUsage
   }
   | { type: 'tool-call'; toolCallId: string; name: string; phase: 'started' | 'finished'; failed?: boolean; cancelled?: boolean }
   | { type: 'approval'; toolCallId: string; stage: string; outcome: string; detail?: string }
@@ -54,6 +56,7 @@ export function isTaskRunEvent(value: unknown): value is TaskRunEvent {
     case 'model-call': return text('callId') && text('model') && Number.isInteger(event.requestIndex)
       && ['started', 'finished', 'failed'].includes(String(event.phase)) && optionalText('reason') && optionalText('provider')
       && optionalText('modelName') && optionalText('modelLabel') && optionalText('modelId') && optionalText('providerId')
+      && (event.usage === undefined || isModelUsage(event.usage))
       && (event.attempt === undefined || (Number.isInteger(event.attempt) && Number(event.attempt) > 0))
       && (event.durationMs === undefined || (typeof event.durationMs === 'number' && Number.isFinite(event.durationMs) && event.durationMs >= 0))
       && (event.firstTokenMs === undefined || (typeof event.firstTokenMs === 'number' && Number.isFinite(event.firstTokenMs) && event.firstTokenMs >= 0))

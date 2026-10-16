@@ -1,3 +1,4 @@
+import { aggregateUsageEvents, type UsageAnalytics, type UsageAnalyticsQuery } from '../../../src/shared/usage-analytics'
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
@@ -19,9 +20,14 @@ const events: TaskRunEvent[] = [0, 1, 2].map((index) => ({
 events.push({ ...events[0], id: 'quota-event', sequence: 4, type: 'model-call', phase: 'failed', callId: 'quota-call',
   requestIndex: 4, model: 'shared-model', reason: '用户额度不足, 剩余额度: ＄-1.093766', durationMs: 10 })
 const result = (dimension: PerformanceDimension = 'provider') => aggregateModelCallEvents(events, { dimension })
+const usageEvents: TaskRunEvent[] = events.map((event, index) => ({ ...event, at: new Date().toISOString(),
+  usage: index < 2 ? { source: 'provider' as const, inputTokens: 100, outputTokens: 20 } : index === 3 ? { source: 'provider' as const, totalTokens: 7 } : undefined,
+}))
+let usageRequests: UsageAnalyticsQuery[] = []
+let usageQuery: (value: UsageAnalyticsQuery) => Promise<UsageAnalytics> = async (value) => aggregateUsageEvents(usageEvents, value)
 let requests: PerformanceAnalyticsQuery[] = []
 let query: (value: PerformanceAnalyticsQuery) => Promise<PerformanceAnalytics> = async (value) => result(value.dimension)
-Object.assign(window, { codey: { getPerformanceAnalytics: (value: PerformanceAnalyticsQuery) => { requests.push(value); return query(value) } } })
+Object.assign(window, { codey: { getUsageAnalytics: (value: UsageAnalyticsQuery) => { usageRequests.push(value); return usageQuery(value) }, getPerformanceAnalytics: (value: PerformanceAnalyticsQuery) => { requests.push(value); return query(value) } } })
 const root = createRoot(document.getElementById('root')!)
 async function render(open = true): Promise<void> {
   await act(async () => { root.render(<FluentProvider theme={webLightTheme}><AnalyticsDialog open={open} onOpenChange={() => { void render(false) }} /></FluentProvider>) })
@@ -53,12 +59,13 @@ async function runTests(): Promise<object> {
   assert(!rows()[0].textContent?.includes('Provider A'), 'model name dimension does not split providers')
   await dimension('specificModel')
   assert(rows().length === 2 && text().includes('Fast B') && text().includes('Provider B'), 'specific models retain provider and nickname')
-  for (const name of ['质量监控', '行为分析', '成本统计']) {
+  for (const name of ['质量监控', '行为分析']) {
     await click(name)
     assert(document.querySelector('.analytics-empty-panel')?.textContent === '开发中', `${name} shows development placeholder`)
     assert(!document.querySelector('table'), 'no performance table in unimplemented tabs')
   }
   await click('性能追踪')
+  await runUsageTests()
   query = async () => { throw new Error('IPC failed') }
   await click('刷新')
   assert(document.querySelector('[role="alert"]')?.textContent === '无法读取性能统计数据', 'read failure is visible')
@@ -84,7 +91,7 @@ async function runTests(): Promise<object> {
   assert(text().includes('Statistics & analytics') && text().includes('Model name'), 'English analytics translations work')
   assert(text().includes('Effective model calls: 3') && text().includes('Calls excluded due to insufficient billing quota: 1'), 'English quota notice')
   assert(i18n.t('performanceDiagnostics') === 'Performance diagnostics', 'diagnostics rename in English')
-  for (const name of ['Quality monitoring', 'Behavior analysis', 'Cost statistics']) {
+  for (const name of ['Quality monitoring', 'Behavior analysis']) {
     await click(name)
     assert(document.querySelector('.analytics-empty-panel')?.textContent === 'Under development', `${name} shows English development placeholder`)
   }
@@ -100,9 +107,9 @@ async function runTests(): Promise<object> {
   await render(false)
   await render()
   assert(requests.length === count + 1, 'reopening refreshes saved data')
-  return { passed: 15, checks: ['quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
+  return { passed: 24, checks: ['usage period', 'usage dimensions', 'usage coverage', 'usage unknown values', 'usage errors', 'usage race', 'usage empty state', 'usage localization', 'usage refresh', 'quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
 }
-function runLayoutTests(): object {
+async function runLayoutTests(): Promise<object> {
   const surface = document.querySelector<HTMLElement>('.analytics-dialog-surface')!
   const viewport = document.querySelector<HTMLElement>('.analytics-table-wrap')!
   const rect = surface.getBoundingClientRect()
@@ -111,6 +118,56 @@ function runLayoutTests(): object {
   viewport.scrollLeft = 150
   assert(viewport.scrollLeft > 0, 'table can actually scroll horizontally')
   viewport.scrollLeft = 0
-  return { width: window.innerWidth, dialogWidth: rect.width, tableViewport: viewport.clientWidth, tableWidth: viewport.scrollWidth }
+  const performanceViewport = viewport.clientWidth
+  const performanceWidth = viewport.scrollWidth
+  await click('成本统计')
+  const usageTable = document.querySelector<HTMLElement>('.usage-panel .analytics-table-wrap')!
+  assert(usageTable.scrollWidth > usageTable.clientWidth, 'usage table overflows narrow window')
+  usageTable.scrollLeft = 150
+  assert(usageTable.scrollLeft > 0, 'usage table scrolls horizontally')
+  usageTable.scrollLeft = 0
+  return { width: window.innerWidth, dialogWidth: rect.width, tableViewport: performanceViewport, tableWidth: performanceWidth, usageViewport: usageTable.clientWidth, usageWidth: usageTable.scrollWidth }
 }
-Object.assign(window, { runTests, runLayoutTests })
+Object.assign(window, { runTests, runLayoutTests, showUsage: () => click('成本统计'), showPerformance: () => click('性能追踪') })
+
+async function chooseUsage(label: string, value: string): Promise<void> {
+  const select = document.querySelector<HTMLSelectElement>('.usage-panel select[aria-label="' + label + '"]')!
+  assert(select, 'usage select: ' + label)
+  await act(async () => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) })
+}
+async function runUsageTests(): Promise<void> {
+  assert(usageRequests.length === 0, 'usage loads only when cost tab opens')
+  await click('成本统计')
+  assert(text().includes('调用 4 次') && text().includes('输入输出均已报告 2 次') && text().includes('部分用量 1 次')
+    && text().includes('用量未知 1 次') && text().includes('覆盖率 50.0%'), 'usage coverage explains missing reports')
+  assert(text().includes('输入：200') && text().includes('总计：247'), 'known totals include reported failed usage')
+  assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 30, 'default daily window includes 30 days')
+  await chooseUsage('时间范围', '1')
+  assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 1, 'today shows one date')
+  await chooseUsage('统计维度', 'modelName')
+  assert(document.querySelectorAll('.usage-breakdown-table tbody tr').length === 1, 'usage model names merge')
+  await chooseUsage('统计维度', 'specificModel')
+  assert(document.querySelectorAll('.usage-breakdown-table tbody tr').length === 2 && text().includes('Fast B'), 'usage specific models split')
+  usageQuery = async (value) => aggregateUsageEvents(usageEvents.map((event) => ({ ...event, usage: undefined })), value)
+  await click('刷新')
+  assert(text().includes('用量未知 4 次') && text().includes('输入：—'), 'unknown historical usage is not zero')
+  usageQuery = async () => { throw new Error('read failed') }
+  await click('刷新')
+  assert(document.querySelector('[role="alert"]')?.textContent === '无法读取 token 用量统计', 'usage read errors shown')
+  usageQuery = async (value) => aggregateUsageEvents([], value)
+  await click('刷新')
+  assert(text().includes('该时间范围内暂无已记录的模型调用'), 'usage empty state')
+  let resolveOld!: (value: UsageAnalytics) => void
+  usageQuery = () => new Promise((resolve) => { resolveOld = resolve })
+  await chooseUsage('时间范围', '7')
+  usageQuery = async (value) => ({ ...aggregateUsageEvents(usageEvents, value), skippedJournals: 1 })
+  await chooseUsage('时间范围', '30')
+  await act(async () => { resolveOld(aggregateUsageEvents([], { days: 7 })) })
+  assert(document.querySelectorAll('.usage-daily-table tbody tr').length === 30, 'late usage response cannot overwrite latest query')
+  assert(text().includes('当前统计不完整'), 'usage skipped journal notice')
+  await act(async () => { await i18n.changeLanguage('en') })
+  assert(text().includes('Daily token usage') && text().includes('Unknown: 1') && text().includes('Coverage: 50.0%'), 'usage English translations')
+  usageQuery = async (value) => aggregateUsageEvents(usageEvents, value)
+  await act(async () => { await i18n.changeLanguage('zh-CN') })
+  await click('性能追踪')
+}

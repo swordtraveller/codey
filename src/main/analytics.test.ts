@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ projects: vi.fn(), path: vi.fn(), warn: vi.fn() }))
 vi.mock('./workspace', () => ({ getProjectsForRenderer: mocks.projects, taskRunJournalPath: mocks.path }))
 vi.mock('./logger', () => ({ log: { warn: mocks.warn } }))
-import { getPerformanceAnalytics } from './analytics'
+import { getPerformanceAnalytics, getUsageAnalytics } from './analytics'
 import { TaskRunJournal } from './task-run-journal'
 
 let directory: string
@@ -43,6 +43,26 @@ describe('performance analytics journal reader', () => {
   })
   it('rejects invalid IPC filters before reading history', async () => {
     await expect(getPerformanceAnalytics({ dimension: 'bad' as never })).rejects.toThrow('dimension')
+    expect(mocks.projects).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('usage analytics journal reader', () => {
+  it('reads reported usage after reopening journals without changing stored errors', async () => {
+    const path = join(directory, 'valid.jsonl')
+    const journal = await TaskRunJournal.open(path)
+    await journal.append('run', { type: 'model-call', phase: 'failed', callId: 'paid-failure', requestIndex: 1,
+      model: 'example', reason: '用户额度不足', usage: { source: 'provider', inputTokens: 12, outputTokens: 3 } })
+    await journal.append('run', { type: 'model-call', phase: 'finished', callId: 'legacy', requestIndex: 2, model: 'example' })
+    await writeFile(join(directory, 'broken.jsonl'), '{broken', 'utf8')
+    const before = await readFile(path, 'utf8')
+    const result = await getUsageAnalytics({ days: 'all' })
+    expect(result).toMatchObject({ skippedJournals: 1, totals: { calls: 2, completeCalls: 1, unknownCalls: 1, totalTokens: 15 } })
+    expect(await readFile(path, 'utf8')).toBe(before)
+  })
+  it('validates IPC queries before reading journals', async () => {
+    await expect(getUsageAnalytics({ days: 2 as never })).rejects.toThrow('days')
     expect(mocks.projects).not.toHaveBeenCalled()
   })
 })

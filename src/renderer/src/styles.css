@@ -2688,3 +2688,6 @@ h1 {
 .architecture-relations { margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; }
 .architecture-relations summary { cursor: pointer; color: #506274; }
 .architecture-error, .architecture-invalid > p { color: #a4262c; overflow-wrap: anywhere; }
+
+.usage-heading { margin: 16px 0 8px; font-size: 14px; }
+.usage-panel .analytics-table-wrap { max-height: 360px; overflow: auto; }

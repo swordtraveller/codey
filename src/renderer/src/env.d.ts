@@ -1,3 +1,4 @@
+import type { UsageAnalytics, UsageAnalyticsQuery } from '../../shared/usage-analytics'
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../../shared/message-navigation'
 import type { CodeReadViewerData } from '../../shared/code-reading'
 import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../../shared/analytics'
@@ -59,6 +60,7 @@ declare global {
       checkForUpdates(): Promise<UpdateCheckResult>
       openLatestReleasePage(): Promise<void>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      getUsageAnalytics(query?: UsageAnalyticsQuery): Promise<UsageAnalytics>
       getPerformanceAnalytics(query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics>
       listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
       readPerformanceTraceFile(fileName: string): Promise<string>

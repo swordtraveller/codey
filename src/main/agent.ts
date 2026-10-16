@@ -1,3 +1,4 @@
+import { parseModelUsage, type ModelUsage } from '../shared/model-usage'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { architecturePrompt } from '../shared/architecture'
@@ -42,11 +43,13 @@ type ResponseMessage = {
 type ProviderError = { message?: string; code?: string | number; type?: string }
 
 type ChatResponse = {
+  usage?: unknown
   choices?: Array<{ message?: ResponseMessage }>
   error?: ProviderError
 }
 
 type ChatChunk = {
+  usage?: unknown
   choices?: Array<{
     delta?: {
       content?: string | null
@@ -287,7 +290,8 @@ async function requestCompletionAttempt(
   signal: AbortSignal,
   onUpdate?: (message: ResponseMessage) => void,
   runtime?: { traceId?: string; projectId?: string; conversationId?: string },
-  timing?: { onRequestStart: () => void; onFirstResponse: () => void },
+  timing?: { onRequestStart: () => void; onFirstResponse: () => void; onUsage: (usage: ModelUsage) => void },
+  requestUsage = true,
 ): Promise<ChatResponse> {
   if (!config.baseUrl || !config.apiKey || !config.modelName) {
     throw new Error('Configure a model before sending a message')
@@ -307,6 +311,7 @@ async function requestCompletionAttempt(
     tools,
     tool_choice: 'auto',
     stream: true,
+    ...(requestUsage ? { stream_options: { include_usage: true } } : {}),
   }
   const serializeStartedAt = performance.now()
   const requestBodyJson = JSON.stringify(requestBody)
@@ -318,6 +323,10 @@ async function requestCompletionAttempt(
   })
   log.debug('model.request', modelRequestSummary(config, messages, tools))
 
+  const reportUsage = (raw: unknown): void => {
+    const usage = parseModelUsage(raw)
+    if (usage) timing?.onUsage(usage)
+  }
   let content = ''
   const toolCalls: ToolCall[] = []
   let buffer = ''
@@ -379,6 +388,7 @@ async function requestCompletionAttempt(
       } catch {
         // The status error below is more useful than a JSON parsing error.
       }
+      reportUsage(data.usage)
       const message =
         data.error?.message || body.slice(0, 200) || 'Request failed with status ' + response.status
       log.error('model.response.failed', { status: response.status, message })
@@ -390,6 +400,7 @@ async function requestCompletionAttempt(
     if (!response.headers.get('content-type')?.includes('text/event-stream')) {
       const body = await response.text()
       const data = JSON.parse(body) as ChatResponse
+      reportUsage(data.usage)
       if (data.error) throw providerCompletionError(data.error)
       const message = data.choices?.[0]?.message
       if (!message || typeof message !== 'object' || !hasResponseData(message)) {
@@ -422,6 +433,7 @@ async function requestCompletionAttempt(
         return
       }
       const chunk = JSON.parse(data) as ChatChunk
+      reportUsage(chunk.usage)
       if (chunk.error) throw providerCompletionError(chunk.error)
       const delta = chunk.choices?.[0]?.delta
       if (!delta) {
@@ -537,7 +549,8 @@ export async function requestCompletion(
       modelName: member.modelName,
     }
     // The configured count is retries after the initial request.
-    const maxAttempts = target.retriesPerModel + 1
+    let maxAttempts = target.retriesPerModel + 1
+    let requestUsage = true
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfAborted(signal)
@@ -564,6 +577,7 @@ export async function requestCompletion(
       }, modelRequestTimeoutMs)
       let modelCallStartedAt = performance.now()
       let firstTokenMs: number | undefined
+      let usage: ModelUsage | undefined
       const update = (message: ResponseMessage): void => {
         const isMoreComplete = responseSize(message) >= responseSize(latestPartial)
         if (isMoreComplete) {
@@ -577,11 +591,12 @@ export async function requestCompletion(
       let response: ChatResponse
       try {
         response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime, {
+          onUsage: (reported) => { usage = { ...usage, ...reported } },
           onRequestStart: () => { modelCallStartedAt = performance.now() },
           onFirstResponse: () => {
             if (firstTokenMs === undefined) firstTokenMs = Math.max(0, performance.now() - modelCallStartedAt)
           },
-        })
+        }, requestUsage)
         throwIfAborted(signal)
       } catch (error) {
         const details = errorDetails(error)
@@ -601,7 +616,7 @@ export async function requestCompletion(
         lastFailure = failure
         await runtime?.onRunEvent?.({
           type: 'model-call', ...modelEvent, phase: 'failed', reason: failure.message,
-          durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs,
+          durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs, usage,
         })
         if (signal?.aborted) throw failure
         onRequestEvent?.({
@@ -620,6 +635,18 @@ export async function requestCompletion(
           hasPartialResponse: hasResponseData(failure.partial),
           hasImageInput,
         })
+
+        // Retry once without the optional usage parameter only after an explicit rejection.
+        // Each HTTP request still has its own event/call ID; never retry a partial generation here.
+        if (requestUsage && !hasResponseData(errorPartial) && [400, 422].includes(failure.status ?? 0)
+          && /stream_options|include_usage/i.test(failure.message)
+          && /unsupported|not supported|unknown|unrecognized|unexpected|not (?:allowed|permitted)|不支持|未知参数/i.test(failure.message)) {
+          requestUsage = false
+          maxAttempts += 1
+          latestPartial = undefined
+          onRequestEvent?.({ kind: 'retry', model: member.label, reason: failure.message, attempt: attempt + 1 })
+          continue
+        }
 
         // A partial stream is transient UI state. It is discarded before the
         // next attempt, so retrying cannot duplicate visible output or tools.
@@ -658,7 +685,7 @@ export async function requestCompletion(
       }
       await runtime?.onRunEvent?.({
         type: 'model-call', ...modelEvent, phase: 'finished',
-        durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs,
+        durationMs: Math.max(0, performance.now() - modelCallStartedAt), firstTokenMs, usage,
       })
       return response
     }

@@ -1,3 +1,4 @@
+import { UsageAnalyticsPanel } from './UsageAnalyticsPanel'
 import {
   Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle,
   Field, Select, Tab, TabList,
@@ -106,7 +107,7 @@ export function AnalyticsDialog({ open, onOpenChange }: Props): React.JSX.Elemen
                     </>
                   )}
               </section>
-            ) : <section className="analytics-panel analytics-empty-panel" aria-label={t(`analytics${tab === 'quality' ? 'Quality' : tab === 'behavior' ? 'Behavior' : 'Cost'}`)}><p className="analytics-empty">{t('analyticsUnderDevelopment')}</p></section>}
+            ) : tab === 'cost' ? <UsageAnalyticsPanel /> : <section className="analytics-panel analytics-empty-panel" aria-label={t(`analytics${tab === 'quality' ? 'Quality' : tab === 'behavior' ? 'Behavior' : 'Cost'}`)}><p className="analytics-empty">{t('analyticsUnderDevelopment')}</p></section>}
           </DialogContent>
           <DialogActions><Button appearance="secondary" onClick={() => onOpenChange(false)}>{t('close')}</Button></DialogActions>
         </DialogBody>

@@ -183,3 +183,73 @@ describe('TaskRun agent event integration', () => {
     expect(result.agentMessages?.at(-1)).toMatchObject({ role: 'assistant', content: 'Explained the failure' })
   })
 })
+
+describe('provider usage capture', () => {
+  const usage = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+    prompt_tokens_details: { cached_tokens: 40 }, completion_tokens_details: { reasoning_tokens: 5 } }
+  const expected = { source: 'provider', inputTokens: 100, outputTokens: 20, totalTokens: 120, cachedInputTokens: 40, reasoningOutputTokens: 5 }
+  const sse = (chunks: object[], done = true): Response => new Response(
+    chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') + (done ? 'data: [DONE]\n\n' : ''),
+    { headers: { 'content-type': 'text/event-stream' } },
+  )
+  const completed = { choices: [{ delta: { content: 'Done' } }] }
+  async function capture(fetchMock: ReturnType<typeof vi.fn>, config = { ...model, retriesPerModel: 0 }): Promise<RunEventPayload[]> {
+    vi.stubGlobal('fetch', fetchMock)
+    const events: RunEventPayload[] = []
+    await requestCompletion(config, history, [], undefined, undefined, {
+      onRunEvent: async (event) => { events.push(event) },
+    }).catch(() => undefined)
+    return events.filter((event) => event.type === 'model-call' && event.phase !== 'started')
+  }
+  it('requests usage and captures usage-only SSE trailers without adding repeated cumulative counters', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(sse([
+      { ...completed, usage: { prompt_tokens: 100, completion_tokens: 2 } },
+      { choices: [], usage }, { choices: [], usage },
+    ]))
+    const events = await capture(fetchMock)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).stream_options).toEqual({ include_usage: true })
+    expect(events).toMatchObject([{ phase: 'finished', usage: expected }])
+  })
+  it('captures JSON response usage and genuine zeros', async () => {
+    const events = await capture(vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: 'Done' } }], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    }))))
+    expect(events).toMatchObject([{ phase: 'finished', usage: { source: 'provider', inputTokens: 0, outputTokens: 0, totalTokens: 0 } }])
+  })
+  it('preserves usage on interrupted streams and resets it before retry', async () => {
+    const events = await capture(vi.fn().mockResolvedValueOnce(sse([{ ...completed, usage }], false))
+      .mockResolvedValueOnce(sse([completed])), { ...model, retriesPerModel: 1 })
+    expect(events).toMatchObject([{ phase: 'failed', usage: expected }, { phase: 'finished', usage: undefined }])
+  })
+  it.each(['http', 'json', 'sse'] as const)('preserves usage on %s provider errors', async (mode) => {
+    const body = { error: { message: 'Request rejected' }, usage }
+    const response = mode === 'sse' ? sse([body], false) : new Response(JSON.stringify(body), { status: mode === 'http' ? 403 : 200 })
+    expect(await capture(vi.fn().mockResolvedValueOnce(response))).toMatchObject([{ phase: 'failed', usage: expected }])
+  })
+  it('retains reported usage when the user cancels after a response arrives', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(sse([{ ...completed, usage }])))
+    const events: RunEventPayload[] = []
+    await expect(requestCompletion({ ...model, retriesPerModel: 0 }, history, [], () => controller.abort(), controller.signal,
+      { onRunEvent: async (event) => { events.push(event) } })).rejects.toThrow('Operation stopped')
+    expect(events.at(-1)).toMatchObject({ phase: 'failed', usage: expected })
+  })
+  it('handles absent and malformed usage as unknown without failing the conversation', async () => {
+    expect(await capture(vi.fn().mockResolvedValueOnce(sse([{ ...completed, usage: { prompt_tokens: -1, total_tokens: 'bad' } }]))))
+      .toMatchObject([{ phase: 'finished', usage: undefined }])
+  })
+  it('retries explicit unsupported usage options once without that parameter and records both attempts', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "Unknown parameter: 'stream_options'" } }), { status: 400 }))
+      .mockResolvedValueOnce(sse([completed]))
+    const events = await capture(fetchMock)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).not.toHaveProperty('stream_options')
+    expect(events).toMatchObject([{ phase: 'failed', attempt: 1 }, { phase: 'finished', attempt: 2 }])
+    expect(new Set(events.map((event) => event.type === 'model-call' && event.callId)).size).toBe(2)
+  })
+  it('does not add a compatibility retry for unrelated errors', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'Unsupported model' } }), { status: 400 }))
+    expect(await capture(fetchMock)).toMatchObject([{ phase: 'failed' }])
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+})

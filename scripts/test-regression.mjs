@@ -10,6 +10,7 @@ const suites = [
   'tests/conversation-store.test.ts',
   'tests/task-run-agent.test.ts',
   'src/shared/analytics.test.ts',
+  'src/shared/usage-analytics.test.ts',
   'src/main/analytics.test.ts',
   'src/main/todo-tool.test.ts',
   'src/main/dag-tool.test.ts',

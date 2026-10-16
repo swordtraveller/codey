@@ -1,3 +1,4 @@
+import { aggregateUsageEvents, type UsageAnalytics, type UsageAnalyticsQuery } from '../shared/usage-analytics'
 import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../shared/analytics'
 import { aggregateModelCallEvents } from '../shared/analytics'
 import type { TaskRunEvent } from '../shared/task-run'
@@ -5,10 +6,8 @@ import { TaskRunJournal } from './task-run-journal'
 import { log } from './logger'
 import { getProjectsForRenderer, taskRunJournalPath } from './workspace'
 
-/** Read existing TaskRun journals and derive the performance view on demand. */
-export async function getPerformanceAnalytics(query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics> {
-  // Validate the IPC query before accessing any history.
-  aggregateModelCallEvents([], query)
+/** Shared read-only journal source for analytics views. */
+async function readModelCalls(): Promise<{ events: TaskRunEvent[]; skippedJournals: number }> {
   const projects = await getProjectsForRenderer()
   const events: TaskRunEvent[] = []
   let skippedJournals = 0
@@ -30,5 +29,17 @@ export async function getPerformanceAnalytics(query?: PerformanceAnalyticsQuery)
       }
     }
   }
+  return { events, skippedJournals }
+}
+
+export async function getPerformanceAnalytics(query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics> {
+  aggregateModelCallEvents([], query)
+  const { events, skippedJournals } = await readModelCalls()
   return { ...aggregateModelCallEvents(events, query), skippedJournals }
+}
+
+export async function getUsageAnalytics(query?: UsageAnalyticsQuery): Promise<UsageAnalytics> {
+  aggregateUsageEvents([], query)
+  const { events, skippedJournals } = await readModelCalls()
+  return { ...aggregateUsageEvents(events, query), skippedJournals }
 }

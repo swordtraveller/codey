@@ -1,3 +1,4 @@
+import type { UsageAnalytics, UsageAnalyticsQuery } from '../shared/usage-analytics'
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../shared/message-navigation'
 import type { CodeReadViewerData } from '../shared/code-reading'
 import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../shared/analytics'
@@ -52,6 +53,7 @@ contextBridge.exposeInMainWorld(
     checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('updates:check'),
     openLatestReleasePage: (): Promise<void> => ipcRenderer.invoke('updates:open-latest-release-page'),
     getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
+    getUsageAnalytics: (query?: UsageAnalyticsQuery): Promise<UsageAnalytics> => ipcRenderer.invoke('analytics:usage', query),
     getPerformanceAnalytics: (query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics> => ipcRenderer.invoke('analytics:performance', query),
     listPerformanceTraceFiles: (): Promise<PerformanceTraceFile[]> => ipcRenderer.invoke('performance:list-files'),
     readPerformanceTraceFile: (fileName: string): Promise<string> => ipcRenderer.invoke('performance:read-file', fileName),

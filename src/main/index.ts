@@ -1,3 +1,4 @@
+import type { UsageAnalyticsQuery } from '../shared/usage-analytics'
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
 import { registerMessageNavigation } from './message-navigation-window'
@@ -93,7 +94,7 @@ import { listProviderModels, testModelConnectivity, testProviderConnectivity } f
 import { buildAuditPromptTemplate } from './command-executor'
 import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
 import { buildRunCommandTool, createAgentTools } from './tools'
-import { getPerformanceAnalytics } from './analytics'
+import { getPerformanceAnalytics, getUsageAnalytics } from './analytics'
 import type { PerformanceAnalyticsQuery } from '../shared/analytics'
 import {
   exportPerformanceTraces,
@@ -1294,6 +1295,7 @@ app.whenReady().then(() => {
   ipcMain.handle('updates:check', () => checkForUpdates(app.getVersion()))
   ipcMain.handle('updates:open-latest-release-page', () => shell.openExternal(latestReleasePageUrl))
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('analytics:usage', (_event, query?: UsageAnalyticsQuery) => getUsageAnalytics(query))
   ipcMain.handle('analytics:performance', (_event, query?: PerformanceAnalyticsQuery) => getPerformanceAnalytics(query))
   ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
   ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
