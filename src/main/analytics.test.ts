@@ -25,11 +25,13 @@ describe('performance analytics journal reader', () => {
     await journal.append('run', { type: 'model-call', phase: 'finished', callId: 'call', requestIndex: 1,
       model: 'example-model', modelName: 'example-model', modelLabel: 'My model', providerId: 'p', provider: 'Provider',
       modelId: 'm', durationMs: 250, firstTokenMs: 30 })
+    await journal.append('run', { type: 'model-call', phase: 'failed', callId: 'quota-call', requestIndex: 2,
+      model: 'example-model', provider: 'Provider', reason: '用户额度不足, 剩余额度: ＄-1.093766', durationMs: 10 })
     await journal.append('run', { type: 'tool-call', toolCallId: 'tool', name: 'todo', phase: 'finished' })
     await writeFile(join(directory, 'broken.jsonl'), '{broken', 'utf8')
     const before = await readFile(path, 'utf8')
     const result = await getPerformanceAnalytics({ dimension: 'modelName' })
-    expect(result).toMatchObject({ totalCalls: 1, skippedJournals: 1, skippedCalls: 0 })
+    expect(result).toMatchObject({ totalCalls: 1, excludedQuotaCalls: 1, skippedJournals: 1, skippedCalls: 0 })
     expect(result.rows[0]).toMatchObject({ modelName: 'example-model', averageDurationMs: 250 })
     expect(mocks.warn).toHaveBeenCalledOnce()
     expect(await readFile(path, 'utf8')).toBe(before)

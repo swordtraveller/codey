@@ -16,6 +16,8 @@ const events: TaskRunEvent[] = [0, 1, 2].map((index) => ({
   modelId: index === 2 ? 'link-b' : 'link-a', providerId: index === 2 ? 'b' : 'a',
   provider: index === 2 ? 'Provider B' : 'Provider A', durationMs: 100 + index * 100, firstTokenMs: 20 + index * 20,
 }))
+events.push({ ...events[0], id: 'quota-event', sequence: 4, type: 'model-call', phase: 'failed', callId: 'quota-call',
+  requestIndex: 4, model: 'shared-model', reason: '用户额度不足, 剩余额度: ＄-1.093766', durationMs: 10 })
 const result = (dimension: PerformanceDimension = 'provider') => aggregateModelCallEvents(events, { dimension })
 let requests: PerformanceAnalyticsQuery[] = []
 let query: (value: PerformanceAnalyticsQuery) => Promise<PerformanceAnalytics> = async (value) => result(value.dimension)
@@ -43,6 +45,8 @@ async function runTests(): Promise<object> {
   assert(requests.length === 0, 'closed dialog must not load history')
   await render()
   assert(text().includes('统计分析') && rows().length === 2, 'Chinese provider view loads two providers')
+  assert(text().includes('有效模型调用：3 次') && text().includes('已排除 1 次计费额度不足'), 'Chinese effective count and quota notice')
+  assert(rows()[0].querySelector('.analytics-number')?.textContent === '2', 'quota failures excluded from table counts')
   assert(document.querySelectorAll('[role="tab"]').length === 4, 'four analytics tabs')
   await dimension('modelName')
   assert(rows().length === 1 && rows()[0].textContent?.includes('shared-model'), 'model names merge across providers')
@@ -62,6 +66,9 @@ async function runTests(): Promise<object> {
   query = async (value) => aggregateModelCallEvents([], value)
   await click('刷新')
   assert(text().includes('暂时没有可统计'), 'empty state is visible')
+  query = async (value) => aggregateModelCallEvents(events.filter((event) => event.type === 'model-call' && event.phase === 'failed'), value)
+  await click('刷新')
+  assert(text().includes('有效模型调用：0 次') && text().includes('已排除 1 次计费额度不足') && !document.querySelector('table'), 'quota-only history explains excluded data')
   query = async (value) => ({ ...result(value.dimension), skippedCalls: 2, skippedJournals: 1 })
   await click('刷新')
   assert(text().includes('当前统计不完整') && text().includes('缺少有效耗时'), 'missing history warnings are visible')
@@ -75,6 +82,7 @@ async function runTests(): Promise<object> {
   assert(rows().length === 1, 'late reply cannot overwrite newer dimension')
   await act(async () => { await i18n.changeLanguage('en') })
   assert(text().includes('Statistics & analytics') && text().includes('Model name'), 'English analytics translations work')
+  assert(text().includes('Effective model calls: 3') && text().includes('Calls excluded due to insufficient billing quota: 1'), 'English quota notice')
   assert(i18n.t('performanceDiagnostics') === 'Performance diagnostics', 'diagnostics rename in English')
   for (const name of ['Quality monitoring', 'Behavior analysis', 'Cost statistics']) {
     await click(name)
@@ -92,7 +100,7 @@ async function runTests(): Promise<object> {
   await render(false)
   await render()
   assert(requests.length === count + 1, 'reopening refreshes saved data')
-  return { passed: 12, checks: ['closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
+  return { passed: 15, checks: ['quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
 }
 function runLayoutTests(): object {
   const surface = document.querySelector<HTMLElement>('.analytics-dialog-surface')!

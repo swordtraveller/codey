@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { aggregateModelCallEvents } from './analytics'
+import { isBillingQuotaFailure } from './billing-quota'
 import { isTaskRunEvent, type TaskRunEvent } from './task-run'
 
 type ModelCall = Extract<TaskRunEvent, { type: 'model-call' }>
@@ -96,5 +97,56 @@ describe('performance analytics', () => {
     expect(isTaskRunEvent(event({ durationMs: -1 }))).toBe(false)
     expect(isTaskRunEvent(event({ firstTokenMs: Infinity }))).toBe(false)
     expect(isTaskRunEvent(event({ modelLabel: 3 as never }))).toBe(false)
+  })
+})
+
+// Real error wording with all provider/model names and branding removed.
+const billingErrors = [
+  '用户额度不足, 剩余额度: ＄-1.093766',
+  '当前凭证的可用额度已用完。 原因：该 API 令牌设置了额度上限，且已全部用完；这与账户总余额是否充足无关。 解决方案：请补充可用额度或改用可用凭证。',
+  '预扣费额度失败, 用户剩余额度: ＄0.009636, 需要预扣费额度: ＄0.122168',
+  'token quota is not enough, token remain quota: ＄0.010000, need quota: ＄0.026030',
+]
+const otherErrors = [
+  undefined, '', 'HTTP 402', 'HTTP 429', 'insufficient_quota', 'quota_exceeded',
+  'Rate limit exceeded: tokens per minute', 'RESOURCE_EXHAUSTED: daily quota exceeded',
+  '请求频率超限，请稍后重试', '上下文 token 超限', 'Invalid API key', 'Request timed out',
+  'token quota is not enough, token remain quota: 10, need quota: 26',
+  '预扣费额度失败: 服务暂时不可用', '用户额度不足检查失败: 网络错误',
+  'token quota is not enough, token remain quota: $1.00, need quota: $0.20',
+]
+describe('billing quota exclusions', () => {
+  it.each(billingErrors)('recognizes an observed billing error: %s', (reason) => {
+    expect(isBillingQuotaFailure(reason)).toBe(true)
+    expect(isBillingQuotaFailure('请求失败：【提示：】' + reason)).toBe(true)
+    expect(isBillingQuotaFailure(reason.normalize('NFKC').toUpperCase())).toBe(true)
+  })
+  it.each(otherErrors)('keeps ambiguous or unrelated errors: %s', (reason) => {
+    expect(isBillingQuotaFailure(reason)).toBe(false)
+    expect(aggregateModelCallEvents([event({ phase: 'failed', reason })])).toMatchObject({
+      totalCalls: 1, excludedQuotaCalls: 0, rows: [{ failureCount: 1 }],
+    })
+  })
+  it.each(['provider', 'modelName', 'specificModel'] as const)('excludes billing failures consistently for %s', (dimension) => {
+    const events = [...fixtures(), ...billingErrors.map((reason) => event({ phase: 'failed', reason }))]
+    const before = structuredClone(events)
+    const baseline = aggregateModelCallEvents(fixtures(), { dimension })
+    const result = aggregateModelCallEvents(events, { dimension })
+    expect(result).toMatchObject({ totalCalls: 4, excludedQuotaCalls: 4, skippedCalls: 0, rows: baseline.rows })
+    expect(events).toEqual(before)
+  })
+  it('deduplicates exclusions, filters dates and counts legacy quota failures separately from missing timing', () => {
+    const failed = event({ phase: 'failed', reason: billingErrors[0], durationMs: undefined })
+    const result = aggregateModelCallEvents([failed, failed,
+      event({ phase: 'failed', reason: billingErrors[1], at: '2026-10-15T00:00:00Z' }),
+      event({ phase: 'failed', durationMs: undefined }),
+      event({ phase: 'started', reason: billingErrors[2] }),
+    ], { from: '2026-10-16T00:00:00Z' })
+    expect(result).toMatchObject({ totalCalls: 0, excludedQuotaCalls: 1, skippedCalls: 1, rows: [] })
+  })
+  it('does not classify successful calls by their reason text', () => {
+    expect(aggregateModelCallEvents([event({ reason: billingErrors[0] })])).toMatchObject({
+      totalCalls: 1, excludedQuotaCalls: 0, rows: [{ successCount: 1 }],
+    })
   })
 })

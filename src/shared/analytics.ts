@@ -1,4 +1,5 @@
 import type { TaskRunEvent } from './task-run'
+import { isBillingQuotaFailure } from './billing-quota'
 
 export type PerformanceDimension = 'provider' | 'modelName' | 'specificModel'
 export type PerformanceAnalyticsQuery = {
@@ -28,7 +29,10 @@ export type PerformanceAnalytics = {
   dimension: PerformanceDimension
   from?: string
   to?: string
+  /** Effective timed calls, excluding confirmed billing quota failures. */
   totalCalls: number
+  /** Excluded terminal attempts, including legacy events without timings. */
+  excludedQuotaCalls: number
   skippedCalls: number
   skippedJournals: number
   rows: PerformanceAnalyticsRow[]
@@ -90,9 +94,11 @@ export function aggregateModelCallEvents(
   }
   const groups = new Map<string, Sample[]>()
   let skippedCalls = 0
+  let excludedQuotaCalls = 0
   for (const [callKey, event] of terminals) {
     const timestamp = Date.parse(event.at)
     if (!Number.isFinite(timestamp) || (from !== undefined && timestamp < from) || (to !== undefined && timestamp > to)) continue
+    if (event.phase === 'failed' && isBillingQuotaFailure(event.reason)) { excludedQuotaCalls += 1; continue }
     if (!validDuration(event.durationMs)) { skippedCalls += 1; continue }
     const start = starts.get(callKey)
     const provider = event.provider || start?.provider || ''
@@ -132,6 +138,6 @@ export function aggregateModelCallEvents(
   return {
     generatedAt: new Date().toISOString(), dimension,
     ...(query.from ? { from: query.from } : {}), ...(query.to ? { to: query.to } : {}),
-    totalCalls: rows.reduce((sum, row) => sum + row.sampleCount, 0), skippedCalls, skippedJournals: 0, rows,
+    totalCalls: rows.reduce((sum, row) => sum + row.sampleCount, 0), excludedQuotaCalls, skippedCalls, skippedJournals: 0, rows,
   }
 }

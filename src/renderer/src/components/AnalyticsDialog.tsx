@@ -72,6 +72,7 @@ export function AnalyticsDialog({ open, onOpenChange }: Props): React.JSX.Elemen
                   : loading ? <p className="analytics-empty" role="status">{t('loading')}</p> : data && (
                     <>
                       <p className="analytics-summary">{t('analyticsTotalCalls', { count: data.totalCalls })}</p>
+                      {data.excludedQuotaCalls > 0 && <p className="analytics-summary">{t('analyticsExcludedQuotaCalls', { count: data.excludedQuotaCalls })}</p>}
                       {data.skippedCalls > 0 && <p className="analytics-summary">{t('analyticsSkippedCalls', { count: data.skippedCalls })}</p>}
                       {data.skippedJournals > 0 && <p className="dialog-error" role="status">{t('analyticsSkippedJournals', { count: data.skippedJournals })}</p>}
                       {data.rows.length ? (
