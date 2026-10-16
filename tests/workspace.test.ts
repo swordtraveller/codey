@@ -17,7 +17,17 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return { ...actual, rename: vi.fn(actual.rename) }
 })
 
-import { addMessage, addModelRequestEvent, createConversation, createProject, getProjects, getProjectsLive, updateConversationHotLongTermContent } from '../src/main/workspace'
+import {
+  addMessage,
+  addModelRequestEvent,
+  createConversation,
+  createProject,
+  getProjects,
+  getProjectsLive,
+  renameConversation,
+  renameProject,
+  updateConversationHotLongTermContent,
+} from '../src/main/workspace'
 
 async function filesUnder(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -78,6 +88,48 @@ describe('sharded workspace storage', () => {
     expect(await readFile(join(electronState.userData, 'workspace-data', 'projects', Buffer.from(first.id).toString('base64url'), 'project.json'), 'utf8'))
       .toContain('conversationIds')
     expect((await getProjects()).map((project) => project.name)).toEqual(['First', 'Second'])
+  })
+
+  it('renames projects and conversations without changing history or losing the names after reload', async () => {
+    const project = await createProject('Before')
+    const conversation = project.conversations[0]!
+    await addMessage(project.id, conversation.id, 'user', 'Keep this history')
+
+    const renamedProject = await renameProject(project.id, 'After')
+    const renamed = await renameConversation(project.id, conversation.id, 'Reviewed conversation')
+
+    expect(renamedProject.name).toBe('After')
+    expect(renamed.name).toBe('After')
+    expect(renamed.conversations[0]!.title).toBe('Reviewed conversation')
+    expect(renamed.conversations[0]!.messages).toEqual([
+      expect.objectContaining({ role: 'user', content: 'Keep this history' }),
+    ])
+
+    await reloadFromDisk(electronState.userData)
+    const reloaded = (await getProjects())[0]!
+    expect(reloaded.name).toBe('After')
+    expect(reloaded.conversations[0]!.title).toBe('Reviewed conversation')
+    expect(reloaded.conversations[0]!.messages).toEqual([
+      expect.objectContaining({ role: 'user', content: 'Keep this history' }),
+    ])
+  })
+
+  it('rejects blank project and conversation names', async () => {
+    const project = await createProject('Project')
+    const conversation = project.conversations[0]!
+
+    await expect(renameProject(project.id, '   ')).rejects.toThrow('Enter a project name')
+    await expect(renameConversation(project.id, conversation.id, '   ')).rejects.toThrow('Enter a conversation name')
+  })
+
+  it('keeps an explicitly renamed empty conversation title when the first message arrives', async () => {
+    const project = await createProject('Project')
+    const conversation = project.conversations[0]!
+
+    await renameConversation(project.id, conversation.id, 'Pinned title')
+    await addMessage(project.id, conversation.id, 'user', 'First request')
+
+    expect((await getProjects())[0]!.conversations[0]!.title).toBe('Pinned title')
   })
 
   async function reloadFromDisk(directory: string): Promise<void> {

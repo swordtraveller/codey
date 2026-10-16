@@ -276,6 +276,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   return {
     ...value,
     archived: value.archived === true,
+    titleCustomized: value.titleCustomized === true,
     modelConfigId: value.modelConfigId ?? null,
     hotLongTermContent: typeof value.hotLongTermContent === 'string' ? value.hotLongTermContent : '',
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
@@ -657,6 +658,7 @@ function createConversationRecord(index: number): Conversation {
   return {
     id: randomUUID(),
     title: `Conversation ${index}`,
+    titleCustomized: false,
     archived: false,
     modelConfigId: null,
     contextConfigOverride: null,
@@ -748,6 +750,17 @@ export function createProject(name: string, defaultModelConfigId: string | null 
   })
 }
 
+export function renameProject(projectId: string, name: string): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalizedName = name.trim()
+    if (!normalizedName) throw new Error('Enter a project name')
+    const project = await findProject(projectId)
+    project.name = normalizedName
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
 export function addProjectFolder(projectId: string, folderPath: string): Promise<Project> {
   return serializeWrite(projectWriteScope(projectId), async () => {
     const project = await findProject(projectId)
@@ -814,6 +827,19 @@ export function createConversation(projectId: string): Promise<Project> {
     project.conversations.push(conversation)
     await persistConversation(project.id, conversation)
     await persistProjectMetadata(project)
+    return project
+  })
+}
+
+export function renameConversation(projectId: string, conversationId: string, title: string): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const normalizedTitle = title.trim()
+    if (!normalizedTitle) throw new Error('Enter a conversation name')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.title = normalizedTitle
+    conversation.titleCustomized = true
+    await persistConversation(projectId, conversation)
     return project
   })
 }
@@ -1013,7 +1039,7 @@ export async function addMessageImmediately(
     turn,
   }
   conversation.messages.push(message)
-  if (role === 'user' && conversation.messages.length === 1) {
+  if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
     const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
   }
@@ -1072,7 +1098,7 @@ export function addMessage(
       contextConfig,
       turn,
     })
-    if (role === 'user' && conversation.messages.length === 1) {
+    if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
       const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
       conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
     }

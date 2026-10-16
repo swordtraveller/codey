@@ -117,6 +117,8 @@ import {
   projectForRenderer,
   getConversationMessagePage,
   getProjectsLive,
+  renameConversation,
+  renameProject,
   saveConversationContext,
   updateConversationHotLongTermContent,
   setConversationAgentLimits,
@@ -1473,6 +1475,10 @@ app.whenReady().then(() => {
     const config = await readConfig()
     return createProject(name, config.activeModelConfigId).then(projectForRenderer)
   })
+  ipcMain.handle('projects:rename', (_event, projectId: string, name: string) => {
+    ensureProjectIdle(projectId)
+    return renameProject(projectId, name).then(projectForRenderer)
+  })
   ipcMain.handle('projects:add-folder', async (_event, projectId: string) => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
@@ -1500,6 +1506,10 @@ app.whenReady().then(() => {
     return setProjectArchived(projectId, archived).then(projectForRenderer)
   })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId).then(projectForRenderer))
+  ipcMain.handle('conversations:rename', (_event, projectId: string, conversationId: string, title: string) => {
+    ensureIdle(projectId, conversationId)
+    return renameConversation(projectId, conversationId, title).then(projectForRenderer)
+  })
   ipcMain.handle('conversations:set-read-state', (_event, projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) => {
     return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt).then(projectForRenderer)
   })

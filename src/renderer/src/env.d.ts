@@ -97,6 +97,7 @@ declare global {
       refreshBridgeEnrollment(channelId: string): Promise<BridgeChannelStatus>
       removeBridgeChannel(channelId: string): Promise<BridgeChannelStatus[]>
       createProject(name: string): Promise<Project>
+      renameProject(projectId: string, name: string): Promise<Project>
       addProjectFolder(projectId: string): Promise<Project | null>
       setProjectModelConfig(projectId: string, modelConfigId: string | null): Promise<Project>
       setProjectContextConfig(
@@ -107,6 +108,7 @@ declare global {
       setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
       setProjectArchived(projectId: string, archived: boolean): Promise<Project>
       createConversation(projectId: string): Promise<Project>
+      renameConversation(projectId: string, conversationId: string, title: string): Promise<Project>
       setConversationModelConfig(
         projectId: string,
         conversationId: string,

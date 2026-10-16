@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld(
     refreshBridgeEnrollment: (channelId: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:refresh', channelId),
     removeBridgeChannel: (channelId: string): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:remove', channelId),
     createProject: (name: string) => ipcRenderer.invoke('projects:create', name),
+    renameProject: (projectId: string, name: string): Promise<Project> => ipcRenderer.invoke('projects:rename', projectId, name),
     addProjectFolder: (projectId: string) =>
       ipcRenderer.invoke('projects:add-folder', projectId),
     setProjectModelConfig: (projectId: string, modelConfigId: string | null) =>
@@ -118,6 +119,12 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
       ipcRenderer.invoke('conversations:create', projectId),
+    renameConversation: (projectId: string, conversationId: string, title: string): Promise<Project> => ipcRenderer.invoke(
+      'conversations:rename',
+      projectId,
+      conversationId,
+      title,
+    ),
     setConversationModelConfig: (
       projectId: string,
       conversationId: string,

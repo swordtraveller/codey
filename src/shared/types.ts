@@ -859,6 +859,8 @@ export type Conversation = {
   history?: ConversationHistorySummary
   id: string
   title: string
+  /** True after the user explicitly chooses a conversation title. */
+  titleCustomized?: boolean
   archived: boolean
   modelConfigId: string | null
   contextConfigOverride: ContextManagementConfig | null

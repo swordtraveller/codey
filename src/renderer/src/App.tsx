@@ -75,6 +75,10 @@ import { useModelSettings } from './hooks/useModelSettings'
 
 const isValidContextConfig = isValidContextManagementConfig
 
+type RenameTarget =
+  | { kind: 'project'; projectId: string; name: string }
+  | { kind: 'conversation'; projectId: string; conversationId: string; name: string }
+
 export function App(): React.JSX.Element {
   const { t } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
@@ -114,6 +118,9 @@ export function App(): React.JSX.Element {
   const [archiveError, setArchiveError] = useState('')
   const [projectDialogOpen, setProjectDialogOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
+  const [renameError, setRenameError] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [saving, setSaving] = useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
   const [error, setError] = useState('')
@@ -1007,6 +1014,45 @@ export function App(): React.JSX.Element {
     setProjectDialogOpen(true)
   }
 
+  function openProjectRename(project: Project): void {
+    setOpenProjectMenuId(null)
+    setOpenConversationMenuId(null)
+    setRenameError('')
+    setRenameTarget({ kind: 'project', projectId: project.id, name: project.name })
+  }
+
+  function openConversationRename(projectId: string, conversation: Project['conversations'][number]): void {
+    setOpenProjectMenuId(null)
+    setOpenConversationMenuId(null)
+    setRenameError('')
+    setRenameTarget({ kind: 'conversation', projectId, conversationId: conversation.id, name: conversation.title })
+  }
+
+  function closeRenameDialog(): void {
+    if (renaming) return
+    setRenameTarget(null)
+    setRenameError('')
+  }
+
+  async function renameSelectedItem(): Promise<void> {
+    const target = renameTarget
+    if (!target || !target.name.trim() || renaming) return
+
+    setRenaming(true)
+    setRenameError('')
+    try {
+      const updated = target.kind === 'project'
+        ? await window.codey.renameProject(target.projectId, target.name)
+        : await window.codey.renameConversation(target.projectId, target.conversationId, target.name)
+      replaceProject(updated)
+      setRenameTarget(null)
+    } catch {
+      setRenameError(t(target.kind === 'project' ? 'unableRenameProject' : 'unableRenameConversation'))
+    } finally {
+      setRenaming(false)
+    }
+  }
+
   async function createNewProject(): Promise<void> {
     if (!projectName.trim() || creatingProject) {
       return
@@ -1201,6 +1247,7 @@ export function App(): React.JSX.Element {
                   </div>
                   {openProjectMenuId === project.id && (
                     <div className="project-menu-panel">
+                      <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openProjectRename(project)}>{t('renameProject')}</Button>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openProjectSettings(project)}>{t('projectSettings')}</Button>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void markProjectAllRead(project)}>{t('markAllRead')}</Button>
                       <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setProjectArchive(project, true)}>{t('archiveProject')}</Button>
@@ -1235,6 +1282,7 @@ export function App(): React.JSX.Element {
                     </div>
                     {openConversationMenuId === conversation.id && (
                       <div className="conversation-menu-panel">
+                        <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => openConversationRename(activeProject.id, conversation)}>{t('renameConversation')}</Button>
                         <Button appearance="subtle" size="small" disabled={interactionLocked} onClick={() => void setConversationArchive(activeProject.id, conversation.id, true)}>{t('archiveConversation')}</Button>
                       </div>
                     )}
@@ -1529,6 +1577,47 @@ export function App(): React.JSX.Element {
                 onClick={() => void createNewProject()}
               >
                 {creatingProject ? t('creating') : t('create')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog
+        open={renameTarget !== null}
+        onOpenChange={(_, data) => {
+          if (!data.open) closeRenameDialog()
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t(renameTarget?.kind === 'conversation' ? 'renameConversation' : 'renameProject')}</DialogTitle>
+            <DialogContent className="dialog-fields">
+              <Field label={t(renameTarget?.kind === 'conversation' ? 'conversationName' : 'projectName')} required>
+                <Input
+                  autoFocus
+                  value={renameTarget?.name ?? ''}
+                  onChange={(_, data) => setRenameTarget((current) => current ? { ...current, name: data.value } : current)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      void renameSelectedItem()
+                    }
+                  }}
+                />
+              </Field>
+              {renameError && <p className="dialog-error">{renameError}</p>}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" disabled={renaming} onClick={closeRenameDialog}>
+                {t('cancel')}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={!renameTarget?.name.trim() || renaming}
+                onClick={() => void renameSelectedItem()}
+              >
+                {renaming ? t('saving') : t('rename')}
               </Button>
             </DialogActions>
           </DialogBody>
