@@ -61,6 +61,7 @@ async function runTests(): Promise<object> {
   assert(!rows()[0].textContent?.includes('Provider A'), 'model name dimension does not split providers')
   await dimension('specificModel')
   assert(rows().length === 2 && text().includes('Fast B') && text().includes('Provider B'), 'specific models retain provider and nickname')
+  await runSuccessRateTests()
   for (const name of ['质量监控', '行为分析']) {
     await click(name)
     assert(document.querySelector('.analytics-empty-panel')?.textContent === '开发中', `${name} shows development placeholder`)
@@ -92,6 +93,7 @@ async function runTests(): Promise<object> {
   assert(rows().length === 1, 'late reply cannot overwrite newer dimension')
   await act(async () => { await i18n.changeLanguage('en') })
   assert(text().includes('Statistics & analytics') && text().includes('Model name'), 'English analytics translations work')
+  assert(document.querySelector('thead')?.textContent?.includes('Success rate'), 'English success-rate header')
   assert(text().includes('Effective model calls: 3') && text().includes('Calls excluded due to insufficient billing quota: 1'), 'English quota notice')
   assert(i18n.t('performanceDiagnostics') === 'Performance diagnostics', 'diagnostics rename in English')
   for (const name of ['Quality monitoring', 'Behavior analysis']) {
@@ -110,7 +112,33 @@ async function runTests(): Promise<object> {
   await render(false)
   await render()
   assert(requests.length === count + 1, 'reopening refreshes saved data')
-  return { passed: 24 + calendarChecks.length, checks: [...calendarChecks, 'usage period', 'usage dimensions', 'usage coverage', 'usage unknown values', 'usage errors', 'usage race', 'usage empty state', 'usage localization', 'usage refresh', 'quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
+  return { passed: 28 + calendarChecks.length, checks: [...calendarChecks, 'success-rate column order and alignment', 'success-rate rounding and boundaries', 'success-rate dimensions and quota exclusion', 'success-rate localization', 'usage period', 'usage dimensions', 'usage coverage', 'usage unknown values', 'usage errors', 'usage race', 'usage empty state', 'usage localization', 'usage refresh', 'quota counts', 'quota-only history', 'localized quota notices', 'closed dialog', 'provider dimension', 'model-name merge', 'specific-model split', 'four tabs and development placeholders', 'read errors', 'empty data', 'partial-history warnings', 'request race', 'English and Chinese', 'diagnostics rename', 'refresh on reopen'] }
+}
+async function runSuccessRateTests(): Promise<void> {
+  const values = () => [...rows()].map((row) => row.querySelectorAll('.analytics-number')[1]?.textContent)
+  assert(values().every((value) => value === '100.0%'), 'all-success rate retains one decimal and excludes quota failures')
+  const sample: TaskRunEvent[] = [...events, { ...events[0]!, type: 'model-call', phase: 'failed',
+    id: 'ordinary-failure', callId: 'ordinary-failure', model: 'shared-model', requestIndex: 5, reason: 'connection failed' }]
+  query = async (value) => aggregateModelCallEvents(sample, value)
+  for (const mode of ['provider', 'modelName', 'specificModel'] as const) {
+    await dimension(mode)
+    const headings = [...document.querySelectorAll('thead th')]
+    const index = headings.findIndex((cell) => cell.textContent === '成功率')
+    assert(index > 0 && headings[index - 1]?.textContent === '有效调用次数' && headings[index + 1]?.textContent === '成功', 'success rate is between effective calls and success')
+    assert(values()[0] === (mode === 'modelName' ? '75.0%' : '66.7%'), 'rounded success rate uses effective calls in each dimension')
+    const cell = rows()[0].children[index]!
+    assert(getComputedStyle(headings[index]!).textAlign === 'right' && getComputedStyle(cell).textAlign === 'right', 'success-rate heading and value are right aligned')
+  }
+  for (const [successCount, sampleCount, expected] of [[1, 3, '33.3%'], [0, 3, '0.0%'], [0, 0, '—']] as const) {
+    query = async (value) => {
+      const data = result(value.dimension)
+      return { ...data, rows: data.rows.map((row) => ({ ...row, successCount, sampleCount, failureCount: sampleCount - successCount })) }
+    }
+    await click('刷新')
+    assert(values().every((value) => value === expected), 'rounding down, all failures, and zero denominator are safe')
+  }
+  query = async (value) => result(value.dimension)
+  await click('刷新')
 }
 async function runLayoutTests(): Promise<object> {
   // Keep layout checks independent of the screenshot preview's sample data.

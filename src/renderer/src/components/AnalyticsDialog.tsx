@@ -83,7 +83,7 @@ export function AnalyticsDialog({ open, onOpenChange }: Props): React.JSX.Elemen
                               {dimension !== 'modelName' && <th scope="col">{t('analyticsProvider')}</th>}
                               {dimension !== 'provider' && <th scope="col">{t('analyticsModelName')}</th>}
                               {dimension === 'specificModel' && <th scope="col">{t('analyticsSpecificModel')}</th>}
-                              <th scope="col" className="analytics-number">{t('analyticsSamples')}</th><th scope="col" className="analytics-number">{t('analyticsSuccess')}</th>
+                              <th scope="col" className="analytics-number">{t('analyticsSamples')}</th><th scope="col" className="analytics-number">{t('analyticsSuccessRate')}</th><th scope="col" className="analytics-number">{t('analyticsSuccess')}</th>
                               <th scope="col" className="analytics-number">{t('analyticsFailure')}</th><th scope="col" className="analytics-number">{t('analyticsFirstToken')}</th>
                               <th scope="col" className="analytics-number">{t('analyticsAverage')}</th><th scope="col" className="analytics-number">{t('analyticsP50')}</th><th scope="col" className="analytics-number">{t('analyticsP95')}</th>
                             </tr></thead>
@@ -93,6 +93,7 @@ export function AnalyticsDialog({ open, onOpenChange }: Props): React.JSX.Elemen
                                 {dimension !== 'provider' && <td>{row.modelName || t('analyticsUnknown')}</td>}
                                 {dimension === 'specificModel' && <td>{row.specificModel || t('analyticsUnknown')}</td>}
                                 <td className="analytics-number">{row.sampleCount.toLocaleString()}</td>
+                                <td className="analytics-number">{row.sampleCount > 0 ? `${(100 * row.successCount / row.sampleCount).toFixed(1)}%` : '—'}</td>
                                 <td className="analytics-number">{row.successCount.toLocaleString()}</td>
                                 <td className="analytics-number">{row.failureCount.toLocaleString()}</td>
                                 <td className="analytics-number">{formatDuration(row.averageFirstTokenMs)}</td>
