@@ -1,5 +1,7 @@
+import type { UsageAnalytics, UsageAnalyticsQuery } from '../../shared/usage-analytics'
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../../shared/message-navigation'
 import type { CodeReadViewerData } from '../../shared/code-reading'
+import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../../shared/analytics'
 import type { BridgeChannelStatus } from '../../shared/bridge'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import type {
@@ -58,6 +60,8 @@ declare global {
       checkForUpdates(): Promise<UpdateCheckResult>
       openLatestReleasePage(): Promise<void>
       getPerformanceTraceStatus(): Promise<PerformanceTraceStatus>
+      getUsageAnalytics(query?: UsageAnalyticsQuery): Promise<UsageAnalytics>
+      getPerformanceAnalytics(query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics>
       listPerformanceTraceFiles(): Promise<PerformanceTraceFile[]>
       readPerformanceTraceFile(fileName: string): Promise<string>
       openPerformanceTraceFile(fileName: string): Promise<void>
@@ -97,6 +101,7 @@ declare global {
       refreshBridgeEnrollment(channelId: string): Promise<BridgeChannelStatus>
       removeBridgeChannel(channelId: string): Promise<BridgeChannelStatus[]>
       createProject(name: string): Promise<Project>
+      renameProject(projectId: string, name: string): Promise<Project>
       addProjectFolder(projectId: string): Promise<Project | null>
       setProjectModelConfig(projectId: string, modelConfigId: string | null): Promise<Project>
       setProjectContextConfig(
@@ -107,6 +112,7 @@ declare global {
       setProjectKnowledgeBaseSelection(projectId: string, selection: ResourceSelectionOverride): Promise<Project>
       setProjectArchived(projectId: string, archived: boolean): Promise<Project>
       createConversation(projectId: string): Promise<Project>
+      renameConversation(projectId: string, conversationId: string, title: string): Promise<Project>
       setConversationModelConfig(
         projectId: string,
         conversationId: string,

@@ -1,10 +1,11 @@
+import type { UsageAnalyticsQuery } from '../shared/usage-analytics'
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
 import { registerMessageNavigation } from './message-navigation-window'
 import { registerCodeReadingWindow } from './code-reading-window'
 import { captureCodeReadSnapshots, getCodeReadSnapshot } from './code-reading'
 import { getConversationNavigation } from './workspace'
-import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
@@ -93,6 +94,8 @@ import { listProviderModels, testModelConnectivity, testProviderConnectivity } f
 import { buildAuditPromptTemplate } from './command-executor'
 import { createMcpToolProvider, listMcpToolDefinitions, testMcpStdioServer } from './mcp/tool-provider'
 import { buildRunCommandTool, createAgentTools } from './tools'
+import { getPerformanceAnalytics, getUsageAnalytics } from './analytics'
+import type { PerformanceAnalyticsQuery } from '../shared/analytics'
 import {
   exportPerformanceTraces,
   flushPerformanceTraces,
@@ -117,6 +120,8 @@ import {
   projectForRenderer,
   getConversationMessagePage,
   getProjectsLive,
+  renameConversation,
+  renameProject,
   saveConversationContext,
   updateConversationHotLongTermContent,
   setConversationAgentLimits,
@@ -1285,11 +1290,17 @@ function openPerformanceTraceWindow(fileName: string): void {
 app.setAppUserModelId('com.codey.desktop')
 
 app.whenReady().then(() => {
+  // Electron's default Windows/Linux menu is shown when Alt is pressed, even when autoHideMenuBar is enabled.
+  // This app does not expose a native application menu; remove it entirely on platforms with window menu bars.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+
   ipcMain.handle('config:get', () => readConfig())
   ipcMain.handle('app:get-version', () => app.getVersion())
   ipcMain.handle('updates:check', () => checkForUpdates(app.getVersion()))
   ipcMain.handle('updates:open-latest-release-page', () => shell.openExternal(latestReleasePageUrl))
   ipcMain.handle('performance:get-status', () => getPerformanceTraceStatus())
+  ipcMain.handle('analytics:usage', (_event, query?: UsageAnalyticsQuery) => getUsageAnalytics(query))
+  ipcMain.handle('analytics:performance', (_event, query?: PerformanceAnalyticsQuery) => getPerformanceAnalytics(query))
   ipcMain.handle('performance:list-files', () => listPerformanceTraceFiles())
   ipcMain.handle('performance:read-file', (_event, fileName: string) => readPerformanceTraceFile(fileName))
   ipcMain.handle('performance:open-file', async (_event, fileName: string) => {
@@ -1473,6 +1484,10 @@ app.whenReady().then(() => {
     const config = await readConfig()
     return createProject(name, config.activeModelConfigId).then(projectForRenderer)
   })
+  ipcMain.handle('projects:rename', (_event, projectId: string, name: string) => {
+    ensureProjectIdle(projectId)
+    return renameProject(projectId, name).then(projectForRenderer)
+  })
   ipcMain.handle('projects:add-folder', async (_event, projectId: string) => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
@@ -1500,6 +1515,10 @@ app.whenReady().then(() => {
     return setProjectArchived(projectId, archived).then(projectForRenderer)
   })
   ipcMain.handle('conversations:create', (_event, projectId: string) => createConversation(projectId).then(projectForRenderer))
+  ipcMain.handle('conversations:rename', (_event, projectId: string, conversationId: string, title: string) => {
+    ensureIdle(projectId, conversationId)
+    return renameConversation(projectId, conversationId, title).then(projectForRenderer)
+  })
   ipcMain.handle('conversations:set-read-state', (_event, projectId: string, conversationId: string, lastReadMessageId: string | null, lastReadAt: number | null) => {
     return setConversationReadState(projectId, conversationId, lastReadMessageId, lastReadAt).then(projectForRenderer)
   })

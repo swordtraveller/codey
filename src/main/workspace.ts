@@ -29,6 +29,7 @@ import type { ConversationHistorySummary, ConversationMessagePage } from '../sha
 import { isValidAgentLimitsConfig, normalizeAgentLimitsConfig } from './agent-limits'
 import { isValidCommandExecutionConfig, normalizeCommandExecutionConfig } from './command-execution-config'
 import { log } from './logger'
+import { recoverQuarantinedConversations } from './workspace-recovery'
 import { isValidContextManagementConfig, normalizeContextManagementConfig } from './context-config'
 import { sanitizeResourceSelection } from './skills'
 import {
@@ -275,6 +276,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   return {
     ...value,
     archived: value.archived === true,
+    titleCustomized: value.titleCustomized === true,
     modelConfigId: value.modelConfigId ?? null,
     hotLongTermContent: typeof value.hotLongTermContent === 'string' ? value.hotLongTermContent : '',
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
@@ -506,6 +508,18 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
       continue
     }
 
+    try {
+      const recoveredIds = await recoverQuarantinedConversations(dirname(conversationPath(projectId, '')), metadata.conversationIds, {
+        onSkip: (file, error) => log.warn('workspace.recovery.skipped', { projectId, file, error: error instanceof Error ? error.message : String(error) }),
+      })
+      if (recoveredIds.length) {
+        await writeJson(metadataPath + '.before-history-recovery-' + randomUUID(), metadata)
+        metadata.conversationIds.push(...recoveredIds)
+        await writeJson(metadataPath, metadata)
+        log.warn('workspace.conversations.recovered', { projectId, count: recoveredIds.length })
+      }
+    } catch (error) { throw new WorkspaceMigrationError('Conversation history recovery failed; original files preserved', { cause: error }) }
+
     const conversations: Conversation[] = []
     for (const conversationId of metadata.conversationIds) {
       if (typeof conversationId !== 'string') {
@@ -517,9 +531,15 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
       try {
         const parsed = JSON.parse(await readFile(storedPath, 'utf8')) as unknown
         if (!isRecord(parsed)) throw new Error('Invalid conversation data')
+        if (parsed.storageVersion !== undefined && parsed.storageVersion !== 3) {
+          throw new WorkspaceMigrationError(`Unsupported conversation storage version ${String(parsed.storageVersion)}; please use a newer Codey version`)
+        }
         if (parsed.storageVersion === 3) {
           const stored = parsed as PagedConversation
           if (!isMessageStoreIndex(stored.messageIndex) || !stored.history) throw new Error('Invalid conversation index')
+          if (stored.messageIndex.readStateVersion !== undefined && stored.messageIndex.readStateVersion !== 2) {
+            throw new WorkspaceMigrationError(`Unsupported conversation read index version ${String(stored.messageIndex.readStateVersion)}; please use a newer Codey version`)
+          }
           if (stored.messageIndex.readStateVersion !== 2) {
             // Upgrade only the small index; preserve the original bodies and model context.
             try {
@@ -610,6 +630,8 @@ async function loadProjects(): Promise<Project[]> {
         const loaded = await loadShardedProjects(stored)
         projects = loaded.projects
         if (loaded.repaired) await persistManifest(projects)
+      } else if (isRecord(stored) && stored.version !== undefined && stored.version !== 2) {
+        throw new WorkspaceMigrationError(`Unsupported workspace storage version ${String(stored.version)}; please use a newer Codey version`)
       } else {
         throw new Error('Invalid workspace manifest')
       }
@@ -636,6 +658,7 @@ function createConversationRecord(index: number): Conversation {
   return {
     id: randomUUID(),
     title: `Conversation ${index}`,
+    titleCustomized: false,
     archived: false,
     modelConfigId: null,
     contextConfigOverride: null,
@@ -727,6 +750,17 @@ export function createProject(name: string, defaultModelConfigId: string | null 
   })
 }
 
+export function renameProject(projectId: string, name: string): Promise<Project> {
+  return serializeWrite(projectWriteScope(projectId), async () => {
+    const normalizedName = name.trim()
+    if (!normalizedName) throw new Error('Enter a project name')
+    const project = await findProject(projectId)
+    project.name = normalizedName
+    await persistProjectMetadata(project)
+    return project
+  })
+}
+
 export function addProjectFolder(projectId: string, folderPath: string): Promise<Project> {
   return serializeWrite(projectWriteScope(projectId), async () => {
     const project = await findProject(projectId)
@@ -793,6 +827,19 @@ export function createConversation(projectId: string): Promise<Project> {
     project.conversations.push(conversation)
     await persistConversation(project.id, conversation)
     await persistProjectMetadata(project)
+    return project
+  })
+}
+
+export function renameConversation(projectId: string, conversationId: string, title: string): Promise<Project> {
+  return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
+    const normalizedTitle = title.trim()
+    if (!normalizedTitle) throw new Error('Enter a conversation name')
+    const project = await findProject(projectId)
+    const conversation = findConversation(project, conversationId)
+    conversation.title = normalizedTitle
+    conversation.titleCustomized = true
+    await persistConversation(projectId, conversation)
     return project
   })
 }
@@ -992,7 +1039,7 @@ export async function addMessageImmediately(
     turn,
   }
   conversation.messages.push(message)
-  if (role === 'user' && conversation.messages.length === 1) {
+  if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
     const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
   }
@@ -1051,7 +1098,7 @@ export function addMessage(
       contextConfig,
       turn,
     })
-    if (role === 'user' && conversation.messages.length === 1) {
+    if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
       const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
       conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
     }

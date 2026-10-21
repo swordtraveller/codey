@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.web.json",
+  "compilerOptions": {
+    "composite": false
+  },
+  "include": [
+    "./**/*.tsx",
+    "../../src/renderer/src/env.d.ts"
+  ]
+}

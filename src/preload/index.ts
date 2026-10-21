@@ -1,5 +1,7 @@
+import type { UsageAnalytics, UsageAnalyticsQuery } from '../shared/usage-analytics'
 import type { MessageNavigationEntry, MessageNavigationTarget } from '../shared/message-navigation'
 import type { CodeReadViewerData } from '../shared/code-reading'
+import type { PerformanceAnalytics, PerformanceAnalyticsQuery } from '../shared/analytics'
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentLimitsConfig,
@@ -51,6 +53,8 @@ contextBridge.exposeInMainWorld(
     checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('updates:check'),
     openLatestReleasePage: (): Promise<void> => ipcRenderer.invoke('updates:open-latest-release-page'),
     getPerformanceTraceStatus: (): Promise<PerformanceTraceStatus> => ipcRenderer.invoke('performance:get-status'),
+    getUsageAnalytics: (query?: UsageAnalyticsQuery): Promise<UsageAnalytics> => ipcRenderer.invoke('analytics:usage', query),
+    getPerformanceAnalytics: (query?: PerformanceAnalyticsQuery): Promise<PerformanceAnalytics> => ipcRenderer.invoke('analytics:performance', query),
     listPerformanceTraceFiles: (): Promise<PerformanceTraceFile[]> => ipcRenderer.invoke('performance:list-files'),
     readPerformanceTraceFile: (fileName: string): Promise<string> => ipcRenderer.invoke('performance:read-file', fileName),
     openPerformanceTraceFile: (fileName: string): Promise<void> => ipcRenderer.invoke('performance:open-file', fileName),
@@ -102,6 +106,7 @@ contextBridge.exposeInMainWorld(
     refreshBridgeEnrollment: (channelId: string): Promise<BridgeChannelStatus> => ipcRenderer.invoke('bridge:refresh', channelId),
     removeBridgeChannel: (channelId: string): Promise<BridgeChannelStatus[]> => ipcRenderer.invoke('bridge:remove', channelId),
     createProject: (name: string) => ipcRenderer.invoke('projects:create', name),
+    renameProject: (projectId: string, name: string): Promise<Project> => ipcRenderer.invoke('projects:rename', projectId, name),
     addProjectFolder: (projectId: string) =>
       ipcRenderer.invoke('projects:add-folder', projectId),
     setProjectModelConfig: (projectId: string, modelConfigId: string | null) =>
@@ -118,6 +123,12 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.invoke('projects:set-archived', projectId, archived),
     createConversation: (projectId: string) =>
       ipcRenderer.invoke('conversations:create', projectId),
+    renameConversation: (projectId: string, conversationId: string, title: string): Promise<Project> => ipcRenderer.invoke(
+      'conversations:rename',
+      projectId,
+      conversationId,
+      title,
+    ),
     setConversationModelConfig: (
       projectId: string,
       conversationId: string,

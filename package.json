@@ -25,7 +25,9 @@
     "test:performance:loca": "tsx scripts/loca.ts",
     "test:performance:loca:smoke": "tsx scripts/loca.ts --smoke",
     "test:performance:loca:official": "tsx scripts/loca.ts --official",
-    "test:performance:loca:official:smoke": "tsx scripts/loca.ts --official --smoke"
+    "test:performance:loca:official:smoke": "tsx scripts/loca.ts --official --smoke",
+    "test:settings": "node scripts/test-settings.mjs",
+    "test:regression": "node scripts/test-regression.mjs"
   },
   "dependencies": {
     "@awesome.me/webawesome": "^3.12.0",
