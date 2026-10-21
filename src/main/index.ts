@@ -5,7 +5,7 @@ import { registerMessageNavigation } from './message-navigation-window'
 import { registerCodeReadingWindow } from './code-reading-window'
 import { captureCodeReadSnapshots, getCodeReadSnapshot } from './code-reading'
 import { getConversationNavigation } from './workspace'
-import { app, BrowserWindow, dialog, ipcMain, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, powerSaveBlocker, shell, type Display, type NativeImage, type WebContents } from 'electron'
 import { performance } from 'node:perf_hooks'
 import { join } from 'node:path'
 import type {
@@ -1290,6 +1290,10 @@ function openPerformanceTraceWindow(fileName: string): void {
 app.setAppUserModelId('com.codey.desktop')
 
 app.whenReady().then(() => {
+  // Electron's default Windows/Linux menu is shown when Alt is pressed, even when autoHideMenuBar is enabled.
+  // This app does not expose a native application menu; remove it entirely on platforms with window menu bars.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+
   ipcMain.handle('config:get', () => readConfig())
   ipcMain.handle('app:get-version', () => app.getVersion())
   ipcMain.handle('updates:check', () => checkForUpdates(app.getVersion()))
