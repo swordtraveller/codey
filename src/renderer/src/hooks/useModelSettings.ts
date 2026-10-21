@@ -309,16 +309,15 @@ export function useModelSettings({
     }))
   }
 
-  function moveGroupMember(groupId: string, modelId: string, direction: -1 | 1): void {
+  function moveGroupMember(groupId: string, modelId: string, targetIndex: number): void {
     setConfigDraft((current) => ({
       ...current,
       modelGroups: current.modelGroups.map((group) => {
         if (group.id !== groupId) return group
         const index = group.modelIds.indexOf(modelId)
-        const target = index + direction
-        if (index < 0 || target < 0 || target >= group.modelIds.length) return group
+        if (index < 0 || targetIndex < 0 || targetIndex >= group.modelIds.length || targetIndex === index) return group
         const modelIds = [...group.modelIds]
-        modelIds.splice(target, 0, modelIds.splice(index, 1)[0]!)
+        modelIds.splice(targetIndex, 0, modelIds.splice(index, 1)[0]!)
         return { ...group, modelIds }
       }),
     }))

@@ -1,4 +1,5 @@
 import { Button, Field, Input, Select, Switch } from '@fluentui/react-components'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { flattenModelLink } from '../../../shared/model-targets'
 import type {
@@ -58,7 +59,7 @@ export type ModelSettingsPanelProps = {
     onProviderFilterChange: (value: string) => void
     onModelFilterChange: (value: string) => void
     onMemberSelectionChange: (id: string, selected: boolean) => void
-    onMoveMember: (groupId: string, modelId: string, direction: -1 | 1) => void
+    onMoveMember: (groupId: string, modelId: string, targetIndex: number) => void
     onRemoveMember: (groupId: string, modelId: string) => void
     onAddSelectedMembers: (groupId: string) => void
   }
@@ -75,6 +76,8 @@ export function ModelSettingsPanel({
   groups,
 }: ModelSettingsPanelProps): React.JSX.Element {
   const { t } = useTranslation()
+  const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null)
+  const [dragOverMemberId, setDragOverMemberId] = useState<string | null>(null)
   const selectedGroup = groups.selected
   const sortedProviderOptions = [...configDraft.providers].sort((a, b) => (a.name || a.baseUrl).localeCompare(b.name || b.baseUrl))
   const sortedDefinitionOptions = [...configDraft.modelDefinitions].sort((a, b) => a.modelName.localeCompare(b.modelName))
@@ -371,11 +374,47 @@ export function ModelSettingsPanel({
             {selectedGroup.modelIds.map((modelId, index) => {
               const member = configDraft.models.find((model) => model.id === modelId)
               return (
-                <div className="group-member-row" key={modelId}>
+                <div
+                  className={`group-member-row${draggedMemberId === modelId ? ' dragging' : ''}${dragOverMemberId === modelId ? ' drop-target' : ''}`}
+                  key={modelId}
+                  onDragOver={(event) => {
+                    event.preventDefault()
+                    if (draggedMemberId && draggedMemberId !== modelId) setDragOverMemberId(modelId)
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    if (draggedMemberId && draggedMemberId !== modelId) {
+                      groups.onMoveMember(selectedGroup.id, draggedMemberId, index)
+                    }
+                    setDraggedMemberId(null)
+                    setDragOverMemberId(null)
+                  }}
+                >
                   <span className="group-member-index">{index + 1}</span>
                   <span className="group-member-name">{member?.name || t('unnamedModel')}</span>
-                  <Button appearance="subtle" size="small" disabled={index === 0} onClick={() => groups.onMoveMember(selectedGroup.id, modelId, -1)}>↑</Button>
-                  <Button appearance="subtle" size="small" disabled={index === selectedGroup.modelIds.length - 1} onClick={() => groups.onMoveMember(selectedGroup.id, modelId, 1)}>↓</Button>
+                  <button
+                    aria-label={t('reorderGroupMember', { name: member?.name || t('unnamedModel') })}
+                    className="group-member-drag-handle"
+                    draggable
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = 'move'
+                      event.dataTransfer.setData('text/plain', modelId)
+                      setDraggedMemberId(modelId)
+                    }}
+                    onDragEnd={() => {
+                      setDraggedMemberId(null)
+                      setDragOverMemberId(null)
+                    }}
+                    onKeyDown={(event) => {
+                      const targetIndex = event.key === 'ArrowUp' ? index - 1 : event.key === 'ArrowDown' ? index + 1 : index
+                      if (targetIndex !== index && targetIndex >= 0 && targetIndex < selectedGroup.modelIds.length) {
+                        event.preventDefault()
+                        groups.onMoveMember(selectedGroup.id, modelId, targetIndex)
+                      }
+                    }}
+                    title={t('reorderGroupMemberHint')}
+                    type="button"
+                  />
                   <Button appearance="subtle" size="small" onClick={() => groups.onRemoveMember(selectedGroup.id, modelId)}>{t('reviewRuleDelete')}</Button>
                 </div>
               )
