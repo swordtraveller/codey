@@ -940,7 +940,7 @@ async function developProject(
         .join('\n\n')
       pendingBlocks = []
       const assistantMessageId = randomUUID()
-      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId)
+      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId, new Date(startedAt).toISOString())
       await captureCodeReadSnapshots(project, conversationId, assistantMessageId, content)
     }
     for (const item of result.timeline) {
