@@ -278,6 +278,9 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
     archived: value.archived === true,
     titleCustomized: value.titleCustomized === true,
     modelConfigId: value.modelConfigId ?? null,
+    lastUsedModelId: typeof value.lastUsedModelId === 'string' && value.lastUsedModelId.trim()
+      ? value.lastUsedModelId
+      : undefined,
     hotLongTermContent: typeof value.hotLongTermContent === 'string' ? value.hotLongTermContent : '',
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
     agentLimits: normalizeStoredAgentLimits(value.agentLimits),
@@ -1147,6 +1150,7 @@ export function saveConversationContext(
   conversationId: string,
   agentMessages: Conversation['agentMessages'],
   context: Conversation['context'],
+  lastUsedModelId?: string,
 ): Promise<Project> {
   return serializeWrite(conversationWriteScope(projectId, conversationId), async () => {
     const project = await findProject(projectId)
@@ -1158,6 +1162,7 @@ export function saveConversationContext(
     }
     conversation.agentMessages = agentMessages
     conversation.context = context
+    if (lastUsedModelId !== undefined) conversation.lastUsedModelId = lastUsedModelId
     await persistConversation(projectId, conversation)
     return project
   })

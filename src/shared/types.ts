@@ -864,6 +864,8 @@ export type Conversation = {
   titleCustomized?: boolean
   archived: boolean
   modelConfigId: string | null
+  /** Final model actually requested in the previous user-initiated turn. */
+  lastUsedModelId?: string
   contextConfigOverride: ContextManagementConfig | null
   /** Last context config saved per model config id; restored when the
    *  conversation switches back to that model. */

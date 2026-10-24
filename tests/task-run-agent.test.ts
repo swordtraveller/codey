@@ -49,7 +49,7 @@ describe('TaskRun agent event integration', () => {
       .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
       .mockResolvedValueOnce(response({ content: 'Done' }))
     vi.stubGlobal('fetch', fetchMock)
-    await requestCompletion({ ...model, chain: [model.chain[0], { ...model.chain[0], modelName: 'backup', label: 'backup' }] },
+    await requestCompletion({ ...model, chain: [model.chain[0], { ...model.chain[0], modelId: 'backup', modelName: 'backup', label: 'backup' }] },
       history, [], undefined, undefined, { requestIndex: 2, onRunEvent: async (event) => { events.push(event) } })
     expect(fetchMock).toHaveBeenCalledTimes(3)
     const calls = events.filter((event) => event.type === 'model-call')

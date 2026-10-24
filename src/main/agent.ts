@@ -69,6 +69,7 @@ type AgentResult = {
   context?: ContextMetrics
   timeline: DevelopmentTimelineItem[]
   summaryArtifacts: import('../shared/types').ContextSummaryArtifact[]
+  lastUsedModelId?: string
   stopped?: boolean
   error?: string
 }
@@ -524,23 +525,32 @@ async function requestCompletionAttempt(
   }
 }
 
+export type ModelFailoverState = {
+  currentModelId?: string
+  exhaustedModels: Map<string, string>
+}
+
 export async function requestCompletion(
   target: RuntimeModelConfig,
   messages: ContextMessage[],
   tools: object[],
   onUpdate?: (message: ResponseMessage) => void,
   signal?: AbortSignal,
-  runtime?: { traceId?: string; projectId?: string; conversationId?: string; requestIndex?: number; onRunEvent?: (event: RunEventPayload) => Promise<void> },
+  runtime?: { traceId?: string; projectId?: string; conversationId?: string; requestIndex?: number; onRunEvent?: (event: RunEventPayload) => Promise<void>; failoverState?: ModelFailoverState },
   onModelChange?: (providerName: string, modelName: string) => void,
   onRequestEvent?: (event: ModelRequestEvent) => void,
 ): Promise<ChatResponse> {
   let latestPartial: ResponseMessage | undefined
   const hasImageInput = messages.some((message) => (message.images?.length ?? 0) > 0)
   let lastFailure: CompletionError | undefined
-  const exhaustedMembers: string[] = []
+  const failoverState: ModelFailoverState = runtime?.failoverState ?? { exhaustedModels: new Map() }
+  const startIndex = Math.max(0, target.chain.findIndex((member) => member.modelId === failoverState.currentModelId))
+  // Tool continuations share exhaustion state; each user turn gets one circular pass.
+  const members = [...target.chain.slice(startIndex), ...target.chain.slice(0, startIndex)]
 
-  for (let memberIndex = 0; memberIndex < target.chain.length; memberIndex += 1) {
-    const member = target.chain[memberIndex]!
+  for (let memberIndex = 0; memberIndex < members.length; memberIndex += 1) {
+    const member = members[memberIndex]!
+    if (failoverState.exhaustedModels.has(member.modelId)) continue
     onModelChange?.(member.providerName ?? '', member.modelName)
     const memberConfig: ModelConfig = {
       ...target,
@@ -590,9 +600,13 @@ export async function requestCompletion(
 
       let response: ChatResponse
       try {
+        throwIfAborted(signal)
         response = await requestCompletionAttempt(memberConfig, messages, tools, controller.signal, update, runtime, {
           onUsage: (reported) => { usage = { ...usage, ...reported } },
-          onRequestStart: () => { modelCallStartedAt = performance.now() },
+          onRequestStart: () => {
+            failoverState.currentModelId = member.modelId
+            modelCallStartedAt = performance.now()
+          },
           onFirstResponse: () => {
             if (firstTokenMs === undefined) firstTokenMs = Math.max(0, performance.now() - modelCallStartedAt)
           },
@@ -661,8 +675,10 @@ export async function requestCompletion(
           })
           continue
         }
-        exhaustedMembers.push(member.label)
-        const nextMember = target.chain[memberIndex + 1]
+        failoverState.exhaustedModels.set(member.modelId, member.label)
+        const nextMember = members
+          .slice(memberIndex + 1)
+          .find((candidate) => !failoverState.exhaustedModels.has(candidate.modelId))
         if (nextMember) {
           onRequestEvent?.({ kind: 'failover', model: member.label, reason: failure.message, nextModel: nextMember.label })
           latestPartial = undefined
@@ -674,7 +690,7 @@ export async function requestCompletion(
           break
         }
         const chainFailure = new Error(
-          `All models in the chain failed (${exhaustedMembers.join(' → ')}): ${failure.message}`,
+          `All models in the chain failed (${[...failoverState.exhaustedModels.values()].join(' → ')}): ${failure.message}`,
         ) as CompletionError
         chainFailure.partial = failure.partial
         chainFailure.status = failure.status
@@ -691,7 +707,7 @@ export async function requestCompletion(
     }
   }
 
-  const exhausted = exhaustedMembers.join(' → ')
+  const exhausted = [...failoverState.exhaustedModels.values()].join(' → ')
   const summary = new Error(
     `All models in the chain failed (${exhausted || 'no member attempted'}): ${lastFailure?.message ?? 'request failed'}`,
   ) as CompletionError
@@ -777,6 +793,7 @@ export async function develop(
     traceId?: string
     signal?: AbortSignal
     latestUserMessageId?: string
+    lastUsedModelId?: string
     allowCustomStrategy?: boolean
     roundId?: string
     roundCount?: number
@@ -860,6 +877,10 @@ export async function develop(
   const timeline: DevelopmentTimelineItem[] = []
   const summaryArtifacts: import('../shared/types').ContextSummaryArtifact[] = []
   const coldMessageIds = new Set<string>()
+  const failoverState: ModelFailoverState = {
+    currentModelId: runtime?.lastUsedModelId,
+    exhaustedModels: new Map(),
+  }
 
   // Set when a response is rejected for exceeding the per-request tool-call
   // limit; cleared once a later request succeeds, so only a terminal
@@ -980,7 +1001,7 @@ export async function develop(
       try {
           response = await requestCompletion(config, requestMessages, tools, (message) => {
             onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
-          }, runtime?.signal, { ...runtime, requestIndex }, (providerName, modelName) => {
+          }, runtime?.signal, { ...runtime, requestIndex, failoverState }, (providerName, modelName) => {
             onProgress?.({ type: 'model-changed', providerName, modelName })
           }, (event) => {
             onProgress?.({ type: 'clear-stream' })
@@ -1079,6 +1100,7 @@ export async function develop(
           context,
           timeline,
           summaryArtifacts,
+          lastUsedModelId: failoverState.currentModelId,
         }
       }
 
@@ -1251,6 +1273,7 @@ export async function develop(
       context,
       timeline,
       summaryArtifacts,
+      lastUsedModelId: failoverState.currentModelId,
       stopped,
       error: stopped ? undefined : error instanceof Error ? error.message : 'Request failed',
     }

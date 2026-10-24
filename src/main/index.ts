@@ -888,6 +888,7 @@ async function developProject(
           traceId,
           signal,
           latestUserMessageId: userMessageId,
+          lastUsedModelId: conversation.lastUsedModelId,
           allowCustomStrategy,
           roundId,
           roundCount,
@@ -923,6 +924,7 @@ async function developProject(
       conversationId,
       result.agentMessages,
       result.context,
+      result.lastUsedModelId,
     )
     try {
       await latestContextWrite

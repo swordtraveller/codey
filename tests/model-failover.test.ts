@@ -7,7 +7,7 @@ vi.mock('electron', () => ({
   },
 }))
 import type { ModelChainMember, RuntimeModelConfig } from '../src/shared/types'
-import { requestCompletion } from '../src/main/agent'
+import { requestCompletion, type ModelFailoverState } from '../src/main/agent'
 
 function member(baseUrl: string, label: string): ModelChainMember {
   return { modelId: label, label, baseUrl, apiKey: 'key', modelName: `${label}-model` }
@@ -514,6 +514,182 @@ describe('model chain failover', () => {
       )).rejects.toThrow('Operation stopped')
       expect(globalThis.fetch).toHaveBeenCalledTimes(1)
       expect(events).toEqual(['failure', 'retry'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('starts from the remembered tail member and wraps around to the group head', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    const failoverState: ModelFailoverState = { currentModelId: 'third', exhaustedModels: new Map() }
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url))
+      if (String(url).includes('third')) throw new Error('third unavailable')
+      return sseResponse([DONE_CHUNK])
+    }) as typeof fetch
+    try {
+      const result = await requestCompletion(
+        target([
+          member('https://first.example.com/v1', 'first'),
+          member('https://second.example.com/v1', 'second'),
+          member('https://third.example.com/v1', 'third'),
+        ], 0),
+        messages,
+        [],
+        undefined,
+        undefined,
+        { failoverState },
+      )
+
+      expect(result.choices?.[0]?.message?.content).toBe('ok')
+      expect(calls.map((url) => new URL(url).hostname.split('.')[0])).toEqual(['third', 'first'])
+      expect(failoverState.currentModelId).toBe('first')
+      expect([...failoverState.exhaustedModels.keys()]).toEqual(['third'])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('starts from the group head when the remembered model is no longer configured', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    const failoverState: ModelFailoverState = { currentModelId: 'removed', exhaustedModels: new Map() }
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url))
+      return sseResponse([DONE_CHUNK])
+    }) as typeof fetch
+    try {
+      await requestCompletion(
+        target([
+          member('https://first.example.com/v1', 'first'),
+          member('https://second.example.com/v1', 'second'),
+        ], 0),
+        messages,
+        [],
+        undefined,
+        undefined,
+        { failoverState },
+      )
+
+      expect(calls.map((url) => new URL(url).hostname.split('.')[0])).toEqual(['first'])
+      expect(failoverState.currentModelId).toBe('first')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('uses every member retry budget once in circular order, then terminates', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    const failoverState: ModelFailoverState = { currentModelId: 'second', exhaustedModels: new Map() }
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      calls.push(String(url))
+      throw new Error('unavailable')
+    }) as typeof fetch
+    try {
+      await expect(requestCompletion(
+        target([
+          member('https://first.example.com/v1', 'first'),
+          member('https://second.example.com/v1', 'second'),
+          member('https://third.example.com/v1', 'third'),
+        ], 1),
+        messages,
+        [],
+        undefined,
+        undefined,
+        { failoverState },
+      )).rejects.toThrow('All models in the chain failed (second → third → first)')
+
+      expect(calls.map((url) => new URL(url).hostname.split('.')[0])).toEqual([
+        'second', 'second', 'third', 'third', 'first', 'first',
+      ])
+      expect(failoverState.currentModelId).toBe('first')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('shares failover exhaustion across continuation requests in the same user turn', async () => {
+    const originalFetch = globalThis.fetch
+    const calls: string[] = []
+    const failoverState: ModelFailoverState = { currentModelId: 'second', exhaustedModels: new Map() }
+    let request = 1
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      const model = new URL(String(url)).hostname.split('.')[0]!
+      calls.push(model)
+      if ((request === 1 && model === 'third') || (request === 2 && model === 'first')) {
+        return sseResponse([DONE_CHUNK])
+      }
+      throw new Error(`${model} unavailable`)
+    }) as typeof fetch
+    const config = target([
+      member('https://first.example.com/v1', 'first'),
+      member('https://second.example.com/v1', 'second'),
+      member('https://third.example.com/v1', 'third'),
+    ], 0)
+    try {
+      await requestCompletion(config, messages, [], undefined, undefined, { failoverState })
+      expect(failoverState.currentModelId).toBe('third')
+
+      request = 2
+      await requestCompletion(config, messages, [], undefined, undefined, { failoverState })
+      expect(failoverState.currentModelId).toBe('first')
+
+      request = 3
+      await expect(requestCompletion(config, messages, [], undefined, undefined, { failoverState }))
+        .rejects.toThrow('All models in the chain failed (second → third → first)')
+
+      expect(calls).toEqual(['second', 'third', 'third', 'first', 'first'])
+      expect(calls.filter((model) => model === 'second')).toHaveLength(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('does not remember a failover target when cancellation happens before its request starts', async () => {
+    const originalFetch = globalThis.fetch
+    const controller = new AbortController()
+    const failoverState: ModelFailoverState = { exhaustedModels: new Map() }
+    globalThis.fetch = vi.fn(async () => { throw new Error('unavailable') }) as typeof fetch
+    try {
+      await expect(requestCompletion(
+        target([
+          member('https://first.example.com/v1', 'first'),
+          member('https://second.example.com/v1', 'second'),
+        ], 0),
+        messages,
+        [],
+        undefined,
+        controller.signal,
+        {
+          failoverState,
+          onRunEvent: async (event) => {
+            if (event.type === 'model-call' && event.phase === 'started' && event.modelId === 'second') controller.abort()
+          },
+        },
+      )).rejects.toThrow('Operation stopped')
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+      expect(failoverState.currentModelId).toBe('first')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('treats duplicate stable model ids as one member budget', async () => {
+    const originalFetch = globalThis.fetch
+    const failoverState: ModelFailoverState = { exhaustedModels: new Map() }
+    globalThis.fetch = vi.fn(async () => { throw new Error('unavailable') }) as typeof fetch
+    try {
+      const first = member('https://first.example.com/v1', 'duplicate')
+      const duplicate = { ...member('https://second.example.com/v1', 'second'), modelId: 'duplicate' }
+      await expect(requestCompletion(
+        target([first, duplicate], 0), messages, [], undefined, undefined, { failoverState },
+      )).rejects.toThrow('All models in the chain failed (duplicate)')
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+      expect([...failoverState.exhaustedModels.keys()]).toEqual(['duplicate'])
     } finally {
       globalThis.fetch = originalFetch
     }
