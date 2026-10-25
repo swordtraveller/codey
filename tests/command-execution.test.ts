@@ -1,5 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { spawnSync } from 'node:child_process'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 vi.mock('electron', () => ({
   app: {
@@ -433,6 +440,31 @@ describe('executeCommand', () => {
     shellDetectTestHooks.setBashOverride(bashAvailable ? 'bash' : null)
   })
 
+  afterEach(() => {
+    vi.mocked(spawn).mockReset()
+    shellDetectTestHooks.setBashOverride(null)
+  })
+
+  // Review-chain unit tests must not depend on a locally installed shell.
+  // Only replace the OS process boundary; executeCommand still runs its real
+  // review logic, command dispatch, output collection and exit-code handling.
+  function mockBashExecution(stdout: string, exitCode = 0) {
+    shellDetectTestHooks.setBashOverride('test-bash')
+    return vi.mocked(spawn).mockImplementationOnce(() => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: vi.fn(),
+      })
+      queueMicrotask(() => {
+        child.stdout.end(stdout)
+        child.stderr.end()
+        child.emit('close', exitCode)
+      })
+      return child as unknown as ChildProcess
+    })
+  }
+
   it('refuses sandboxed execution when the workspace is not a project folder', async () => {
     const outcome = await executeCommand({
       project: { folders: [{ id: 'f', path: 'D:/registered-folder' }] },
@@ -524,6 +556,7 @@ describe('executeCommand', () => {
   })
 
   it('skips the reviewer chain entirely on a whitelist hit, regardless of duration', async () => {
+    const spawn = mockBashExecution('whitelist-ok\n')
     let confirmations = 0
     const outcome = await executeCommand({
       project: { folders: [] },
@@ -547,6 +580,29 @@ describe('executeCommand', () => {
     expect(confirmations).toBe(0)
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('whitelist-ok')
+    expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo whitelist-ok'], {
+      cwd: process.cwd(), windowsHide: true, shell: false,
+    })
+    expect(outcome.audit.some((entry) => entry.description.includes('timeout=7200s'))).toBe(true)
+  })
+
+  it('reports a nonzero exit code even when the whitelist bypasses review', async () => {
+    const spawn = mockBashExecution('command failed\n', 7)
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: 'whitelist-execution-failure',
+      config: config({ enabled: true }),
+      command: 'echo command failed; exit 7',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime({
+        ruleLayers: [{ level: 'global', rules: [rule({ pattern: 'echo *', list: 'allow' })] }],
+      }),
+    })
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(outcome.ok).toBe(false)
+    expect(outcome.audit.some((entry) => entry.description.includes('exit=7 '))).toBe(true)
+    expect(outcome.output).toContain('command failed')
   })
 
   it('denies when the audit model cannot be resolved (fail closed)', async () => {
@@ -666,6 +722,7 @@ describe('executeCommand', () => {
   })
 
   it('defaults an undeclared duration to the gate and runs the chain', async () => {
+    const spawn = mockBashExecution('hi\n')
     let confirmations = 0
     let observedTimeout = 0
     const outcome = await executeCommand({
@@ -686,6 +743,10 @@ describe('executeCommand', () => {
     expect(confirmations).toBe(1)
     expect(observedTimeout).toBe(180)
     expect(outcome.ok).toBe(true)
+    expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo hi'], {
+      cwd: process.cwd(), windowsHide: true, shell: false,
+    })
+    expect(outcome.audit.some((entry) => entry.description.includes('timeout=180s'))).toBe(true)
   })
 
   bashIt('runs unmatched commands at their declared duration with all reviewers off (no clamp)', async () => {
@@ -745,6 +806,7 @@ describe('executeCommand', () => {
   })
 
   it('passes the requested duration and gate reference to the audit prompt', async () => {
+    const spawn = mockBashExecution('hi\n')
     const fetchCalls: Array<{ body: string }> = []
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -784,6 +846,10 @@ describe('executeCommand', () => {
       expect(fetchCalls[0]?.body).toContain('duration gate reference: 180s')
       expect(fetchCalls[0]?.body).toContain('Judge both the command content and the requested duration')
       expect(outcome.ok).toBe(true)
+      expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo hi'], {
+        cwd: process.cwd(), windowsHide: true, shell: false,
+      })
+      expect(outcome.audit.some((entry) => entry.description.includes('timeout=900s'))).toBe(true)
     } finally {
       globalThis.fetch = originalFetch
     }
