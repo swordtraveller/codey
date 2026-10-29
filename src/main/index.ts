@@ -55,7 +55,7 @@ import { createTodoToolProvider } from './todo-tool'
 import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
 import { checkForUpdates, latestReleasePageUrl } from './update-check'
-import { readConfig, saveConfig } from './config'
+import { readConfig, saveConfig, saveSidebarSort } from './config'
 import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
@@ -1343,6 +1343,7 @@ app.whenReady().then(() => {
     resolve(response)
     return true
   })
+  ipcMain.handle('config:sidebar-sort', (_event, preferences: unknown) => saveSidebarSort(preferences))
   ipcMain.handle('config:save', async (_event, config: AppConfig) => {
     ensureAllIdle()
     const saved = await saveConfig(config)

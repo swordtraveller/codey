@@ -73,6 +73,10 @@ import { useProjectSettings } from './hooks/useProjectSettings'
 import { useConversationSettings } from './hooks/useConversationSettings'
 import { useModelSettings } from './hooks/useModelSettings'
 import { AnalyticsDialog } from './components/AnalyticsDialog'
+import { ListSortMenu } from './components/ListSortMenu'
+import { useSidebarSorting } from './hooks/useSidebarSorting'
+import { useListScrollAnchor } from './hooks/useListScrollAnchor'
+import { sortConversations, sortProjects } from '../../shared/list-sorting'
 
 const isValidContextConfig = isValidContextManagementConfig
 
@@ -81,7 +85,7 @@ type RenameTarget =
   | { kind: 'conversation'; projectId: string; conversationId: string; name: string }
 
 export function App(): React.JSX.Element {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
@@ -162,7 +166,11 @@ export function App(): React.JSX.Element {
     updateTurnUserMessage,
   } = useConversationRuntime({ activeProjectId, activeConversationId })
 
-  const visibleProjects = projects.filter((project) => !project.archived)
+  const { sortingSaving, saveSort } = useSidebarSorting({ config, setConfig, setConfigDraft, onError: (message) => showToast(message, 'error') })
+  const visibleProjects = useMemo(() => sortProjects(
+    projects.filter((project) => !project.archived), config.sidebarSort.projects, i18n.resolvedLanguage,
+  ), [projects, config.sidebarSort.projects, i18n.resolvedLanguage])
+  const projectListScroll = useListScrollAnchor(visibleProjects.map((project) => project.id))
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
   const { dialogProps: helpDialogProps, openHelp, openCommandRulesHelp, invalidateToolHelp } = useHelpDialog(activeProject?.folders[0]?.path)
   const {
@@ -173,7 +181,10 @@ export function App(): React.JSX.Element {
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,
   } = useModelSettings({ config, configDraft, setConfigDraft, showToast })
-  const visibleConversations = activeProject?.conversations.filter((conversation) => !conversation.archived) ?? []
+  const visibleConversations = useMemo(() => sortConversations(
+    activeProject?.conversations.filter((conversation) => !conversation.archived) ?? [], config.sidebarSort.conversations, i18n.resolvedLanguage,
+  ), [activeProject, config.sidebarSort.conversations, i18n.resolvedLanguage])
+  const conversationListScroll = useListScrollAnchor(visibleConversations.map((conversation) => conversation.id), activeProjectId)
   const archivedProjects = projects.filter((project) => project.archived)
   const archivedConversations = projects
     .filter((project) => !project.archived)
@@ -1234,10 +1245,13 @@ export function App(): React.JSX.Element {
           </Button>
 
           <section className="sidebar-section projects-section">
-            <p className="section-label">{t('projects')}</p>
-            <nav className="nav-list" aria-label={t('projects')}>
+            <div className="section-heading">
+              <p className="section-label">{t('projects')}</p>
+              <ListSortMenu label={t('projects')} value={config.sidebarSort.projects} disabled={sortingSaving} onChange={(value) => void saveSort('projects', value)} />
+            </div>
+            <nav className="nav-list" aria-label={t('projects')} {...projectListScroll}>
               {visibleProjects.map((project) => (
-                <div className="project-nav-item" key={project.id}>
+                <div className="project-nav-item" key={project.id} data-nav-id={project.id}>
                   <div className="project-nav-row">
                     <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
                       <span className="nav-item-title">{project.name}</span>
@@ -1264,11 +1278,14 @@ export function App(): React.JSX.Element {
             <section className="sidebar-section conversations-section">
               <div className="section-heading">
                 <p className="section-label">{t('conversations')}</p>
-                <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
+                <div className="section-heading-actions">
+                  <ListSortMenu label={t('conversations')} value={config.sidebarSort.conversations} disabled={sortingSaving} onChange={(value) => void saveSort('conversations', value)} />
+                  <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
+                </div>
               </div>
-              <nav className="nav-list" aria-label={t('conversations')}>
+              <nav className="nav-list" aria-label={t('conversations')} {...conversationListScroll}>
                 {visibleConversations.map((conversation) => (
-                  <div className="conversation-nav-item" key={conversation.id}>
+                  <div className="conversation-nav-item" key={conversation.id} data-nav-id={conversation.id}>
                     <div className="conversation-nav-row">
                       <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => {
                         setActiveConversationId(conversation.id);

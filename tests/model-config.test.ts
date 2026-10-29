@@ -22,6 +22,7 @@ import { migrateLegacyModel } from '../src/main/config'
 import {
   defaultAgentLimitsConfig,
   defaultNotificationSettings,
+  defaultAppConfig,
   defaultCommandExecutionConfig,
   defaultCommandReviewConfig,
   defaultContextManagementConfig,
@@ -70,6 +71,7 @@ function layers(overrides: Partial<Pick<AppConfig, 'providers' | 'modelDefinitio
     keepAwakeOnlyWhileWorking: true,
     networkAccessEnabled: false,
     notificationSettings: { ...defaultNotificationSettings },
+    sidebarSort: structuredClone(defaultAppConfig.sidebarSort),
     performanceTracingEnabled: false,
     commandReviewGlobal: { ...defaultCommandReviewConfig, contentRules: [] },
     agentLimitsGlobal: { ...defaultAgentLimitsConfig },

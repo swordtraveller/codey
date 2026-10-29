@@ -2,6 +2,7 @@ import React, { act, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import i18next from '../../../src/renderer/src/i18n'
 import { runCommandReviewTests } from './command-review'
+import { runSidebarSortingTests } from './sidebar-sorting'
 import { defaultAppConfig, type Conversation, type Project } from '../../../src/shared/types'
 import { useProjectSettings } from '../../../src/renderer/src/hooks/useProjectSettings'
 import { useConversationSettings } from '../../../src/renderer/src/hooks/useConversationSettings'
@@ -265,6 +266,7 @@ async function runTests() {
     equal((calls[0].args[2] as typeof conversations.commandDraft).review?.reviewers.auditModelConfigId, 'audit-group', 'conversation audit group persisted')
   })
   passed.push(...await runCommandReviewTests())
+  passed.push(...await runSidebarSortingTests())
   return { passed: passed.length, tests: passed }
 }
 Object.assign(window, { runTests })

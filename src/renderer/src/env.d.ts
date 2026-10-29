@@ -70,6 +70,7 @@ declare global {
       revealPerformanceTraces(): Promise<void>
       recordPerformanceTrace(event: PerformanceTraceEvent): void
       saveConfig(config: AppConfig): Promise<AppConfig>
+      saveSidebarSort(preferences: AppConfig['sidebarSort']): Promise<AppConfig['sidebarSort']>
       testMcpServer(config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult>
       fetchModelCapabilities(modelName: string): Promise<ModelCapabilitiesResult>
       testModelConnectivity(model: ModelConfig): Promise<ModelConnectivityResult>

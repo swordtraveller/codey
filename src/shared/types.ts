@@ -511,6 +511,16 @@ export type McpServerTestResult = {
   error?: string
 }
 
+export type ListSortPreference = {
+  by: 'name' | 'activity' | 'created'
+  direction: 'asc' | 'desc'
+}
+
+export type SidebarSortPreferences = {
+  projects: ListSortPreference
+  conversations: ListSortPreference
+}
+
 export type AppConfig = {
   /** Legacy flat list — kept only for read-migration into the four-layer
    *  structure below; always empty after migration. */
@@ -528,6 +538,7 @@ export type AppConfig = {
   keepAwakeOnlyWhileWorking: boolean
   networkAccessEnabled: boolean
   notificationSettings: NotificationSettings
+  sidebarSort: SidebarSortPreferences
   performanceTracingEnabled: boolean
   /** Global command-review defaults; projects and conversations may override. */
   commandReviewGlobal: CommandReviewConfig
@@ -569,6 +580,10 @@ export const defaultAppConfig: AppConfig = {
   keepAwakeOnlyWhileWorking: true,
   networkAccessEnabled: false,
   notificationSettings: { ...defaultNotificationSettings },
+  sidebarSort: {
+    projects: { by: 'activity', direction: 'desc' },
+    conversations: { by: 'activity', direction: 'desc' },
+  },
   performanceTracingEnabled: false,
   commandReviewGlobal: { ...defaultCommandReviewConfig },
   commandExecutionGlobal: { ...defaultCommandExecutionConfig, review: null },
@@ -856,6 +871,9 @@ export type ConversationMessagePage = {
 }
 
 export type Conversation = {
+  /** Null preserves unknown legacy dates without inventing an upgrade time. */
+  createdAt?: string | null
+  lastActivityAt?: string | null
   /** Renderer metadata; full history remains in the main-process store. */
   history?: ConversationHistorySummary
   id: string
@@ -897,6 +915,8 @@ export type ProjectFolder = {
 }
 
 export type Project = {
+  /** Null preserves unknown legacy project creation dates. */
+  createdAt?: string | null
   id: string
   name: string
   archived: boolean

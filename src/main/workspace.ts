@@ -1,3 +1,5 @@
+import { inferConversationDates, recordConversationActivity } from '../shared/activity-metadata'
+import { validTimestamp } from '../shared/list-sorting'
 import { messageNavigationPreview, type MessageNavigationEntry } from '../shared/message-navigation'
 import { conversationReadState, readMessageMetadata, type ReadMessage } from '../shared/conversation-read-state'
 import { createHash, randomUUID } from 'node:crypto'
@@ -275,6 +277,7 @@ async function normalizeConversation(value: StoredConversation): Promise<Convers
   })))
   return {
     ...value,
+    ...inferConversationDates(value, messages),
     archived: value.archived === true,
     titleCustomized: value.titleCustomized === true,
     modelConfigId: value.modelConfigId ?? null,
@@ -306,6 +309,9 @@ async function normalizeProjectMetadata(
   return {
     id: value.id,
     name: value.name,
+    createdAt: value.createdAt === undefined
+      ? conversations.map((conversation) => validTimestamp(conversation.createdAt)).filter((date): date is string => Boolean(date)).sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null
+      : validTimestamp(value.createdAt) ?? null,
     archived: value.archived === true,
     defaultModelConfigId: value.defaultModelConfigId ?? null,
     contextConfigOverride: normalizeOverride(value.contextConfigOverride),
@@ -553,6 +559,16 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
               await writeJson(storedPath, stored)
             } catch (error) { throw new WorkspaceMigrationError('Conversation read index migration failed', { cause: error }) }
           }
+          if (stored.createdAt === undefined || stored.lastActivityAt === undefined) {
+            // Existing indexes already contain turn times. Read at most two bodies for older messages without turn metadata.
+            try {
+              const entries = stored.messageIndex.messages.filter((entry) => entry.role === 'user' || entry.replyContent !== false)
+              const boundaries = entries.length > 1 ? [entries[0], entries[entries.length - 1]] : entries
+              const messages = await readMessageRecords<ChatMessage>(storedPath + '.records', boundaries)
+              Object.assign(stored, inferConversationDates(stored, [...entries, ...messages]))
+              await writeJson(storedPath, stored)
+            } catch (error) { throw new WorkspaceMigrationError('Conversation activity migration failed; original history preserved', { cause: error }) }
+          }
           const { storageVersion: _version, messageIndex: _index, ...metadata } = stored
           const conversation = await normalizeConversation({ ...metadata, messages: [], agentMessages: [] })
           historyStates.set(storedPath, { index: stored.messageIndex, loaded: false })
@@ -593,9 +609,14 @@ async function loadShardedProjects(manifest: WorkspaceManifest): Promise<Sharded
         projectRepaired = true
         repaired = true
       }
-      if (projectRepaired) await persistProjectMetadata(project)
+      if (metadata.createdAt === undefined) {
+        // Freeze evidence-based legacy dates (including unknown) so later history changes cannot rewrite creation time.
+        try { await persistProjectMetadata(project) }
+        catch (error) { throw new WorkspaceMigrationError('Project date migration failed; original metadata preserved', { cause: error }) }
+      } else if (projectRepaired) await persistProjectMetadata(project)
       loaded.push(project)
     } catch (error) {
+      if (error instanceof WorkspaceMigrationError) throw error
       await quarantineBrokenFile(metadataPath, error)
       log.warn('workspace.project.skipped', { projectId, error: error instanceof Error ? error.message : String(error) })
       projectRepaired = true
@@ -658,8 +679,11 @@ async function loadProjects(): Promise<Project[]> {
 }
 
 function createConversationRecord(index: number): Conversation {
+  const createdAt = new Date().toISOString()
   return {
     id: randomUUID(),
+    createdAt,
+    lastActivityAt: createdAt,
     title: `Conversation ${index}`,
     titleCustomized: false,
     archived: false,
@@ -731,6 +755,7 @@ export function createProject(name: string, defaultModelConfigId: string | null 
     const project: Project = {
       id: randomUUID(),
       name: normalizedName,
+      createdAt: new Date().toISOString(),
       archived: false,
       defaultModelConfigId,
       contextConfigOverride: null,
@@ -1042,6 +1067,7 @@ export async function addMessageImmediately(
     turn,
   }
   conversation.messages.push(message)
+  if (role === 'user' || (!compression && !modelRequest)) recordConversationActivity(conversation)
   if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
     const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
     conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
@@ -1101,6 +1127,7 @@ export function addMessage(
       contextConfig,
       turn,
     })
+    if (role === 'user' || (!compression && !modelRequest)) recordConversationActivity(conversation)
     if (role === 'user' && conversation.messages.length === 1 && !conversation.titleCustomized) {
       const title = content || images?.[0]?.name || attachments?.[0]?.name || 'Attachment request'
       conversation.title = title.length > 36 ? `${title.slice(0, 36)}…` : title
@@ -1125,6 +1152,11 @@ export function updateConversationTurn(projectId: string, conversationId: string
     await hydrateConversationHistory(projectId, conversation)
     const message = conversation.messages.find((item) => item.id === messageId)
     if (!message) throw new Error('Conversation message not found')
+    if (message.turn?.result === 'processing' && turn.result !== 'processing') {
+      const endedAt = typeof turn.endedAt === 'number' && Number.isFinite(turn.endedAt) && Math.abs(turn.endedAt) <= 8.64e15
+        ? new Date(turn.endedAt).toISOString() : new Date().toISOString()
+      recordConversationActivity(conversation, endedAt)
+    }
     message.turn = turn
     await persistConversation(projectId, conversation)
     return project

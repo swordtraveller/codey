@@ -59,6 +59,16 @@ body {
   justify-content: space-between;
 }
 
+.section-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.projects-section .section-heading {
+  margin-bottom: 8px;
+}
+
 .section-label {
   margin: 0 0 8px;
   color: #707070;
@@ -77,6 +87,7 @@ body {
   gap: 4px;
   max-height: 180px;
   overflow-y: auto;
+  overflow-anchor: none;
 }
 
 .projects-section .nav-list,

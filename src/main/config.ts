@@ -1,3 +1,4 @@
+import { normalizeSidebarSort } from '../shared/list-sorting'
 import { randomUUID } from 'node:crypto'
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -53,6 +54,7 @@ type StoredAppConfig = {
   keepAwakeOnlyWhileWorking?: boolean
   networkAccessEnabled?: boolean
   notificationSettings?: Partial<NotificationSettings>
+  sidebarSort?: unknown
   performanceTracingEnabled?: boolean
   commandReview?: Partial<CommandReviewConfig>
   agentLimits?: Partial<AgentLimitsConfig>
@@ -412,6 +414,7 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement,
         language,
         developerMode,
+        sidebarSort: normalizeSidebarSort(stored.sidebarSort),
         performanceTracingEnabled: developerMode && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
@@ -438,6 +441,7 @@ export async function readConfig(): Promise<AppConfig> {
         stored.defaultSkillIds === undefined ||
         stored.defaultKnowledgeBaseIds === undefined ||
         stored.mcpServers === undefined ||
+        stored.sidebarSort === undefined ||
         legacyMargin !== undefined ||
         !stored.contextManagement || (stored.modelConfigs ?? []).some((model) =>
           !model.id || !model.name || model.safeOutputMargin !== undefined || model.recentKeepRounds !== undefined
@@ -454,6 +458,7 @@ export async function readConfig(): Promise<AppConfig> {
         contextManagement: normalizeContextManagementConfig(stored.contextManagement),
         language,
         developerMode: stored.developerMode === true,
+        sidebarSort: normalizeSidebarSort(stored.sidebarSort),
         performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
         keepAwakeEnabled,
         keepAwakeOnlyWhileWorking,
@@ -481,6 +486,7 @@ export async function readConfig(): Promise<AppConfig> {
       contextManagement: normalizeContextManagementConfig(stored.contextManagement),
       language,
       developerMode: stored.developerMode === true,
+      sidebarSort: normalizeSidebarSort(stored.sidebarSort),
       performanceTracingEnabled: stored.developerMode === true && stored.performanceTracingEnabled === true,
       keepAwakeEnabled,
       keepAwakeOnlyWhileWorking,
@@ -553,6 +559,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     keepAwakeOnlyWhileWorking: config.keepAwakeOnlyWhileWorking !== false,
     networkAccessEnabled: config.networkAccessEnabled === true,
     notificationSettings: normalizeNotificationSettings(config.notificationSettings),
+    sidebarSort: normalizeSidebarSort(config.sidebarSort),
     performanceTracingEnabled: config.developerMode === true && config.performanceTracingEnabled === true,
     commandReviewGlobal,
     agentLimitsGlobal,
@@ -563,4 +570,12 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   }
   await writeConfig(normalized)
   return normalized
+}
+
+/** UI-only preferences are writable even before models are configured or while a task is running. */
+export async function saveSidebarSort(value: unknown): Promise<AppConfig['sidebarSort']> {
+  const config = await readConfig()
+  const sidebarSort = normalizeSidebarSort(value)
+  await writeConfig({ ...config, sidebarSort })
+  return sidebarSort
 }

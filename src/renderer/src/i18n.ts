@@ -21,6 +21,18 @@ void i18n.use(initReactI18next).init({
   resources: {
     en: {
       translation: {
+        sidebarSort: 'Sort',
+        sidebarSortList: 'Sort {{list}}',
+        sidebarSortBy: 'Sort by',
+        sidebarSortName: 'Name',
+        sidebarSortActivity: 'Activity time',
+        sidebarSortCreated: 'Creation time',
+        sidebarSortDirection: 'Direction',
+        sidebarSortAZ: 'A → Z',
+        sidebarSortZA: 'Z → A',
+        sidebarSortNewest: 'Newest first',
+        sidebarSortOldest: 'Oldest first',
+        sidebarSortSaveFailed: 'Unable to save list sorting. Your previous order is unchanged.',
         copyMessage: 'Copy message',
         copyTurn: 'Copy turn',
         copyTurnToolParameters: '--- parameters ---',
@@ -826,6 +838,18 @@ void i18n.use(initReactI18next).init({
     },
     'zh-CN': {
       translation: {
+        sidebarSort: '排序',
+        sidebarSortList: '{{list}}排序',
+        sidebarSortBy: '排序方式',
+        sidebarSortName: '按名称',
+        sidebarSortActivity: '按活动时间',
+        sidebarSortCreated: '按创建时间',
+        sidebarSortDirection: '排序方向',
+        sidebarSortAZ: 'A → Z',
+        sidebarSortZA: 'Z → A',
+        sidebarSortNewest: '最新在前',
+        sidebarSortOldest: '最早在前',
+        sidebarSortSaveFailed: '排序设置保存失败，已保留原有顺序。',
         copyMessage: '复制消息',
         copyTurn: '复制本轮对话',
         copyTurnToolParameters: '--- 参数 ---',
