@@ -3,21 +3,19 @@ import { createHash } from 'node:crypto'
 import type {
   CommandExecutionConfig,
   ContextAuditEvent,
-  ModelConfig,
 } from '../shared/types'
 import {
   commandTimeoutMaxSeconds,
   commandTimeoutMinSeconds,
   defaultCommandReviewConfig,
 } from '../shared/types'
-import { isAuditModelAllowed } from './command-execution-config'
+import { requestAuditVerdict, type AuditModelTarget } from './command-audit'
+export { parseAuditVerdict, buildAuditPromptTemplate } from './command-audit'
 import { evaluateCommandRules, type CommandRuleLayer } from '../shared/command-rules'
-import { log } from './logger'
 import { resolveBareBashExecutable, resolveBarePwshExecutable } from './shell-detect'
 import { commandExecutionSupported, dockerBashImage, dockerPwshImage, type CommandEnvironment, type CommandInterpreter, type CommandReviewStep } from '../shared/types'
 
 const OUTPUT_LIMIT = 2_000
-const AUDIT_TIMEOUT_MS = 120_000
 
 /** Persistent review-history entry (command-review-history.jsonl). The
  *  recording sink adds projectId/conversationId context. */
@@ -44,8 +42,8 @@ export type CommandExecutorRuntime = {
   /** Rule pool for this conversation, highest precedence first (runtime
    *  memory, conversation, project, global). Settings live in config.review. */
   ruleLayers?: CommandRuleLayer[]
-  /** Resolves the audit model configuration by id. */
-  resolveAuditModel: (configId: string) => Promise<ModelConfig | undefined>
+  /** Resolves a single audit model or an ordered model group by id. */
+  resolveAuditModel: (configId: string) => Promise<AuditModelTarget | undefined>
   /** Shows the in-app approval card; resolves denied when dismissed. */
   requestConfirmation: (request: {
     command: string
@@ -84,150 +82,6 @@ function clip(text: string): string {
   if (text.length <= OUTPUT_LIMIT) return text
   const dropped = text.length - OUTPUT_LIMIT
   return `${text.slice(0, OUTPUT_LIMIT)}\n...[${dropped} characters truncated]`
-}
-
-/** Parses an audit verdict from a model reply. Tolerates code fences,
- *  surrounding prose, and reasoning noise by scanning every balanced {...}
- *  candidate from the end backwards. */
-export function parseAuditVerdict(content: string): { verdict: 'allow' | 'deny'; reason: string } | null {
-  const text = content.replace(/```(?:json)?/gi, '')
-  const candidates: string[] = []
-  const stack: number[] = []
-  let depth = 0
-  let start = -1
-  for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === '{') {
-      if (depth === 0) start = index
-      depth += 1
-      stack.push(index)
-    } else if (text[index] === '}' && depth > 0) {
-      depth -= 1
-      stack.pop()
-      if (depth === 0 && start >= 0) {
-        candidates.push(text.slice(start, index + 1))
-        start = -1
-      }
-    }
-  }
-  for (const candidate of candidates.reverse()) {
-    try {
-      const parsed = JSON.parse(candidate) as { verdict?: unknown; reason?: unknown }
-      if (parsed.verdict === 'allow') return { verdict: 'allow', reason: '' }
-      if (parsed.verdict === 'deny' && (typeof parsed.reason === 'string' || parsed.reason === undefined)) {
-        return { verdict: 'deny', reason: typeof parsed.reason === 'string' ? parsed.reason : 'denied by the audit model' }
-      }
-    } catch {
-      // Not the verdict object; try the next candidate.
-    }
-  }
-  return null
-}
-
-/** The audit prompt template; exposed for the settings prompt viewer. */
-export function buildAuditPromptTemplate(): string {
-  return [
-    `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
-    `Workspace: <workspace path>`,
-    `Environment: <interpreter>/<environment>`,
-    `Command: <the command>`,
-    `Requested timeout: <seconds>s (duration gate reference: <gate>s; deny when the requested duration is unreasonable for this command)`,
-    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
-  ].join('\n')
-}
-
-async function requestAuditVerdict(
-  command: string,
-  workspacePath: string,
-  environment: string,
-  timeoutSeconds: number,
-  durationGateSeconds: number,
-  auditModel: ModelConfig,
-  signal?: AbortSignal,
-): Promise<{ allow: boolean; reason: string }> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), AUDIT_TIMEOUT_MS)
-  const onAbort = () => controller.abort()
-  signal?.addEventListener('abort', onAbort, { once: true })
-  const basePrompt = [
-    `You are a command safety auditor. Decide whether the following shell command may run in a developer's project workspace.`,
-    `Workspace: ${workspacePath}`,
-    `Environment: ${environment}`,
-    `Command: ${command}`,
-    `Requested timeout: ${timeoutSeconds}s (duration gate reference: ${durationGateSeconds}s; deny when the requested duration is unreasonable for this command)`,
-    `Judge both the command content and the requested duration. Reply with a JSON object: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}.`,
-  ].join('\n')
-  try {
-    // Pass 1: JSON mode (API-enforced schema; chatty models cannot lead with
-    // prose). Falls back without it when the endpoint rejects the parameter.
-    // Pass 2 (rescue): JSON-only prompt with a large budget, for endpoints
-    // without JSON mode or replies still truncated (finish_reason=length).
-    let jsonModeSupported = true
-    for (let pass = 1; pass <= 2; pass += 1) {
-      const rescue = pass === 2
-      try {
-        const body: Record<string, unknown> = {
-          model: auditModel.modelName,
-          messages: [
-            {
-              role: 'user',
-              content: rescue
-                ? `Output ONLY the JSON verdict now, nothing else: {"verdict":"allow"} or {"verdict":"deny","reason":"<short reason>"}`
-                : basePrompt,
-            },
-          ],
-          max_tokens: rescue ? 2_000 : 800,
-          temperature: 0,
-        }
-        if (jsonModeSupported) body.response_format = { type: 'json_object' }
-        const response = await fetch(`${auditModel.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${auditModel.apiKey}`,
-          },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        })
-        if (response.status === 400 && jsonModeSupported) {
-          // Endpoint does not implement response_format; retry without it.
-          jsonModeSupported = false
-          pass -= 1
-          continue
-        }
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-        const content = payload.choices?.[0]?.message?.content ?? ''
-        const finishReason = (payload.choices?.[0] as { finish_reason?: string } | undefined)?.finish_reason ?? 'unknown'
-        const verdict = parseAuditVerdict(content)
-        if (verdict) return { allow: verdict.verdict === 'allow', reason: verdict.reason }
-        // Diagnostic: capture the raw audit reply so unparseable responses can
-        // be analyzed in main.log instead of guessing at the parser.
-        log.warn('command.audit.unparseable', {
-          command: command.slice(0, 200),
-          content: content.slice(0, 500),
-          finishReason,
-          pass,
-          jsonMode: jsonModeSupported,
-        })
-        // A truncated reply is not a model failure — go straight to the rescue
-        // pass instead of denying.
-        if (!rescue) continue
-        throw new Error('unparseable audit response')
-      } catch (error) {
-        if (signal?.aborted) return { allow: false, reason: 'aborted' }
-        const message = error instanceof Error ? error.message : String(error)
-        if (rescue) {
-          return { allow: false, reason: `audit model unavailable (${message})` }
-        }
-        // Non-rescue failures (network, 5xx): one rescue attempt remains.
-        log.warn('command.audit.request-failed', { command: command.slice(0, 200), error: message, pass })
-      }
-    }
-    return { allow: false, reason: 'audit model unavailable' }
-  } finally {
-    clearTimeout(timeout)
-    signal?.removeEventListener('abort', onAbort)
-  }
 }
 
 type RawRunResult = { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }
@@ -485,22 +339,26 @@ export async function executeCommand(options: {
           decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: 'audit model unresolved' })
           return { ok: false, output: 'Command denied: the audit model could not be resolved. Configure a valid audit model in command review settings.', audit, steps }
         }
-        if (!isAuditModelAllowed(review, runtime.sessionModelName, auditModel.modelName)) {
-          audit.push({ description: 'model audit: audit model has the same name as the session model; denied', simulated: false })
-          recordStep({ stage: 'audit-model', outcome: 'deny', detail: 'audit model equals session model' })
-          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: 'audit model equals session model' })
-          return { ok: false, output: 'Command denied: the audit model must differ from the session model.', audit, steps }
-        }
-        const auditVerdict = await requestAuditVerdict(trimmed, options.workspacePath, `${effectiveInterpreter}/${effectiveEnvironment}`, timeoutSeconds, review.durationAllowSeconds, auditModel, runtime.signal)
-        audit.push({ description: `model audit: ${auditVerdict.allow ? 'allowed' : `denied (${auditVerdict.reason})`}`, simulated: false })
-        if (!auditVerdict.allow) {
-          recordStep({ stage: 'audit-model', outcome: 'deny', detail: auditVerdict.reason })
-          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail: auditVerdict.reason })
-          return { ok: false, output: `Command denied by the audit model: ${auditVerdict.reason}`, audit, steps }
+        const auditVerdict = await requestAuditVerdict({
+          command: trimmed, workspacePath: options.workspacePath,
+          environment: `${effectiveInterpreter}/${effectiveEnvironment}`,
+          timeoutSeconds, durationGateSeconds: review.durationAllowSeconds,
+          target: auditModel, sessionModelName: runtime.sessionModelName, signal: runtime.signal,
+          onStep: (step) => {
+            recordStep(step)
+            audit.push({ description: 'model audit: ' + step.detail, simulated: false })
+          },
+        })
+        const detail = [auditVerdict.modelName, auditVerdict.reason || auditVerdict.status].filter(Boolean).join(': ')
+        audit.push({ description: 'model audit: ' + detail, simulated: false })
+        if (auditVerdict.status !== 'allow') {
+          recordStep({ stage: 'audit-model', outcome: 'deny', detail })
+          decide({ at: new Date().toISOString(), command: trimmed, decision: 'audit-deny', detail })
+          return { ok: false, output: 'Command denied by the audit model: ' + detail, audit, steps }
         }
         auditNote = auditVerdict.reason
-        auditModelName = auditModel.name || auditModel.modelName
-        recordStep({ stage: 'audit-model', outcome: 'pass', detail: auditNote || 'no objection' })
+        auditModelName = auditVerdict.modelName
+        recordStep({ stage: 'audit-model', outcome: 'pass', detail })
       } else {
         recordStep({ stage: 'audit-model', outcome: 'skipped', detail: 'reviewer disabled' })
       }
@@ -533,6 +391,10 @@ export async function executeCommand(options: {
       }
     }
 
+    if (runtime.signal?.aborted) {
+      recordStep({ stage: 'execution', outcome: 'skipped', detail: 'aborted before execution' })
+      return { ok: false, output: 'Command cancelled before execution.', audit, steps }
+    }
     const startedAt = Date.now()
     let result: RawRunResult
     try {

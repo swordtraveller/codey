@@ -156,6 +156,7 @@ export function ProjectSettingsDialog({
                   onChange={setProjectCommandDraft}
                   disabled={interactionLocked || !projectCommandOverride}
                   modelConfigs={flatModelConfigs}
+                  modelGroups={config.modelGroups}
                   sessionModel={effectiveModelConfig}
                   globalReview={config.commandReviewGlobal}
                   onOpenSyntaxHelp={openCommandRulesHelp}

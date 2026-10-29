@@ -290,6 +290,7 @@ export function ConversationSettingsDialogs({
                 onChange={setCommandDraft}
                 disabled={interactionLocked || !commandOverride}
                 modelConfigs={flatModelConfigs}
+                modelGroups={config.modelGroups}
                 sessionModel={effectiveModelConfig}
                 globalReview={config.commandReviewGlobal}
                 onOpenSyntaxHelp={openCommandRulesHelp}

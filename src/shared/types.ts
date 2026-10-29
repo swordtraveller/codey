@@ -265,8 +265,8 @@ export type CommandReviewConfig = {
    *  whitelist hit is treated as passing the whole chain. */
   reviewers: {
     auditModel: boolean
-    /** Model configuration id used for auditing; must resolve to a model whose
-     *  modelName differs from the session model (case-insensitive). */
+    /** Model or group id used for auditing; each candidate must have a
+     *  modelName that differs from the session model (case-insensitive). */
     auditModelConfigId: string | null
     manualConfirmation: boolean
   }

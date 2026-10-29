@@ -16,7 +16,7 @@ import {
   normalizeContextManagementConfig,
   resolveContextManagementConfig,
 } from '../src/main/context-config'
-import { createModelConfigSnapshot, resolveConversationModel, resolveModelById } from '../src/main/model-config'
+import { createModelConfigSnapshot, resolveConversationModel, resolveModelById, resolveAuditModelTarget } from '../src/main/model-config'
 import { flattenModelLink, groupEnvelope, resolveModelTarget } from '../src/shared/model-targets'
 import { migrateLegacyModel } from '../src/main/config'
 import {
@@ -261,5 +261,23 @@ describe('legacy migration', () => {
       supportsVideoInput: false,
       supportsAudioInput: false,
     })
+  })
+})
+
+
+describe('audit model targets', () => {
+  it('resolves group order, credentials, and retry policy', () => {
+    const result = resolveAuditModelTarget(layers(), 'group-1')!
+    expect(result.chain.map(member => [member.modelId, member.apiKey])).toEqual([['app', 'key-a'], ['conversation', 'key-b']])
+    expect(result.retriesPerModel).toBe(3)
+  })
+  it('preserves the single-model repair retry', () => {
+    const result = resolveAuditModelTarget(layers(), 'app')!
+    expect(result.chain.map(member => member.modelId)).toEqual(['app'])
+    expect(result.retriesPerModel).toBe(1)
+  })
+  it('rejects missing or empty audit targets', () => {
+    expect(resolveAuditModelTarget(layers(), 'missing')).toBeUndefined()
+    expect(resolveAuditModelTarget(layers({ modelGroups: [{ id: 'empty', name: 'Empty', modelIds: ['missing'], retriesPerModel: 1 }] }), 'empty')).toBeUndefined()
   })
 })

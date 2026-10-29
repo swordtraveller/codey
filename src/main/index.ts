@@ -88,7 +88,7 @@ import { BridgeHandoverService } from './bridge'
 import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
-import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveModelById } from './model-config'
+import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveAuditModelTarget } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
 import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
@@ -144,7 +144,7 @@ import {
   updateConversationTurn,
   taskRunJournalPath,
 } from './workspace'
-import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { resolveCommandExecutionConfig } from './command-execution-config'
 import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
 import { isContextConfigValidForModel } from './context-config'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
@@ -317,8 +317,8 @@ async function validateModelConfigId(modelConfigId: string | null): Promise<void
 }
 
 /** Validates an enabled command-execution config: the combo must be usable and
- *  the audit model (when enabled) must resolve and differ from the session
- *  model. Enforced again at execution time. */
+ *  the audit target (when enabled) must resolve. Candidate names are checked
+ *  against the actual session model at execution time. */
 async function validateCommandExecution(config: CommandExecutionConfig): Promise<void> {
   if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
     throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
@@ -327,7 +327,7 @@ async function validateCommandExecution(config: CommandExecutionConfig): Promise
     const { auditModelConfigId } = config.review.reviewers
     if (!auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
     const appConfig = await readConfig()
-    const auditModel = resolveModelById(appConfig, auditModelConfigId)
+    const auditModel = resolveAuditModelTarget(appConfig, auditModelConfigId)
     if (!auditModel) throw new Error('The audit model configuration was not found')
   }
 }
@@ -765,7 +765,7 @@ async function developProject(
         signal,
         sessionModelName: modelConfig.modelName,
         ruleLayers,
-        resolveAuditModel: async (configId) => resolveModelById(appConfig, configId),
+        resolveAuditModel: async (configId) => resolveAuditModelTarget(appConfig, configId),
         requestConfirmation: (request) => requestCommandApproval(request, { projectId, conversationId }),
         recordDecision: (entry) => appendCommandReviewHistory({ ...entry, projectId, conversationId }),
       }

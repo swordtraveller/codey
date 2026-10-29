@@ -1002,6 +1002,7 @@ export async function develop(
           response = await requestCompletion(config, requestMessages, tools, (message) => {
             onProgress?.({ type: 'replace-stream', blocks: toMessageBlocks(message) })
           }, runtime?.signal, { ...runtime, requestIndex, failoverState }, (providerName, modelName) => {
+            if (runtime?.commandRuntime) runtime.commandRuntime.sessionModelName = modelName
             onProgress?.({ type: 'model-changed', providerName, modelName })
           }, (event) => {
             onProgress?.({ type: 'clear-stream' })

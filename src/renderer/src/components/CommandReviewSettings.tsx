@@ -21,6 +21,7 @@ import type {
   CommandReviewConfig,
   CommandReviewRule,
   ModelConfig,
+  ModelGroupConfig,
 } from '../../../shared/types'
 import { findConflictingRule, isValidGlobPattern, validateCommandReviewConfig } from '../../../shared/command-rules'
 import { commandExecutionSupported, maximumAgentLimit } from '../../../shared/types'
@@ -117,11 +118,12 @@ export function AgentLimitsFields({ value, disabled, onChange }: {
 /** Shared command-execution editor (flat: execution + review sections) for
  * the conversation dialog and the project settings dialog. The override
  * switch (null = inherit) lives in the caller. */
-export function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs, sessionModel, globalReview, onOpenSyntaxHelp, showReview = true }: {
+export function CommandExecutionEditorFields({ value, onChange, disabled, modelConfigs, modelGroups, sessionModel, globalReview, onOpenSyntaxHelp, showReview = true }: {
   value: CommandExecutionConfig
   onChange: (next: CommandExecutionConfig) => void
   disabled?: boolean
   modelConfigs: ModelConfig[]
+  modelGroups: ModelGroupConfig[]
   sessionModel?: ModelConfig
   globalReview: CommandReviewConfig
   onOpenSyntaxHelp?: () => void
@@ -229,6 +231,7 @@ export function CommandExecutionEditorFields({ value, onChange, disabled, modelC
               value={value.review}
               disabled={disabled}
               modelConfigs={modelConfigs}
+              modelGroups={modelGroups}
               sessionModel={sessionModel}
               onOpenSyntaxHelp={onOpenSyntaxHelp}
               onChange={(next) => setDraft({ ...value, review: next })}
@@ -242,11 +245,12 @@ export function CommandExecutionEditorFields({ value, onChange, disabled, modelC
 
 /** Shared review editor for the three settings surfaces (global, project,
  * conversation): duration gate, reviewer checkboxes, rule list. */
-export function CommandReviewEditor({ value, onChange, disabled, modelConfigs, sessionModel, onOpenSyntaxHelp }: {
+export function CommandReviewEditor({ value, onChange, disabled, modelConfigs, modelGroups, sessionModel, onOpenSyntaxHelp }: {
   value: CommandReviewConfig
   onChange: (next: CommandReviewConfig) => void
   disabled?: boolean
   modelConfigs: ModelConfig[]
+  modelGroups: ModelGroupConfig[]
   sessionModel?: ModelConfig
   onOpenSyntaxHelp?: () => void
 }): React.JSX.Element {
@@ -258,6 +262,18 @@ export function CommandReviewEditor({ value, onChange, disabled, modelConfigs, s
   const auditModel = value.reviewers.auditModelConfigId
     ? modelConfigs.find((model) => model.id === value.reviewers.auditModelConfigId)
     : undefined
+  const auditGroup = modelGroups.find((group) => group.id === value.reviewers.auditModelConfigId)
+  const auditMembers = auditModel ? [auditModel] : auditGroup
+    ? auditGroup.modelIds.flatMap((id) => modelConfigs.filter((model) => model.id === id)) : []
+  const conflicts = sessionModel ? auditMembers.filter((model) =>
+    model.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) : []
+  const auditWarning = value.reviewers.auditModelConfigId && auditMembers.length === 0
+    ? 'commandAuditTargetUnavailable'
+    : conflicts.length > 0
+      ? auditGroup
+        ? conflicts.length === auditMembers.length ? 'commandAuditGroupConflict' : 'commandAuditGroupPartialConflict'
+        : 'commandAuditModelConflict'
+      : undefined
   const updateRule = (id: string, patch: Partial<CommandReviewRule>): void => {
     onChange({ ...value, contentRules: value.contentRules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) })
   }
@@ -311,19 +327,24 @@ export function CommandReviewEditor({ value, onChange, disabled, modelConfigs, s
             onChange={(_, data) => onChange({ ...value, reviewers: { ...value.reviewers, auditModelConfigId: data.value || null } })}
           >
             <option value="">{t('notConfigured')}</option>
-            {modelConfigs
-              .filter((model) => model.id !== sessionModel?.id)
-              .map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name || model.modelName || t('unnamedModel')}
-                </option>
-              ))}
+            {modelGroups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {t('modelGroupOption', { name: group.name || t('unnamedModelGroup') })}
+              </option>
+            ))}
+            {modelConfigs.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name || model.modelName || t('unnamedModel')}
+              </option>
+            ))}
+            {value.reviewers.auditModelConfigId && !auditModel && !auditGroup && (
+              <option value={value.reviewers.auditModelConfigId}>{t('commandAuditTargetUnavailable')}</option>
+            )}
           </Select>
         </Field>
       )}
-      {value.reviewers.auditModel && auditModel && sessionModel &&
-        auditModel.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase() && (
-        <p className="settings-warning" role="alert">{t('commandAuditModelConflict')}</p>
+      {value.reviewers.auditModel && auditWarning && (
+        <p className="settings-warning" role="alert">{t(auditWarning)}</p>
       )}
       <Switch
         checked={value.reviewers.manualConfirmation}

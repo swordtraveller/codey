@@ -245,7 +245,7 @@ export function App(): React.JSX.Element {
   const displayedSessionModel = sessionModelDisplay?.key === activeConversationKey
     ? sessionModelDisplay
     : effectiveModelMember
-  /** Single models flattened (audit-model pickers list models only, no groups). */
+  /** Flattened individual choices; audit pickers also include model groups. */
   const flatModelConfigs = config.models
     .map((model) => flattenModelLink(config, model))
     .filter((model): model is ModelConfig => model !== undefined)

@@ -876,3 +876,62 @@ describe('executeCommand', () => {
     expect(order).toEqual([1, 2])
   })
 })
+
+
+describe('audit group execution gate', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it.each(['deny', 'unavailable', 'aborted'])('never executes or asks for approval after %s', async (status) => {
+    const fetchMock = status === 'deny'
+      ? vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: '{"verdict":"deny","reason":"unsafe"}' } }] }))
+      : vi.fn().mockRejectedValue(new Error('unavailable'))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    if (status === 'aborted') controller.abort()
+    const confirmation = vi.fn()
+    vi.mocked(spawn).mockClear()
+    const outcome = await executeCommand({
+      project: { folders: [] }, conversationId: 'c',
+      config: config({ enabled: true, review: review({ reviewers: {
+        auditModel: true, auditModelConfigId: 'group', manualConfirmation: true,
+      } }) }),
+      command: 'echo audited', requestedTimeoutSeconds: 120,
+      workspaceFolderId: 'f', workspacePath: process.cwd(),
+      runtime: runtime({
+        sessionModelName: 'executor', signal: controller.signal, requestConfirmation: confirmation,
+        resolveAuditModel: async () => ({ ...defaultModelConfig, id: 'group', retriesPerModel: 1,
+          chain: ['first', 'second'].map(id => ({ modelId: id, label: id, modelName: id, baseUrl: 'https://audit.example/v1', apiKey: 'key' })),
+        }),
+      }),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(spawn).not.toHaveBeenCalled()
+    expect(confirmation).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(status === 'deny' ? 1 : status === 'aborted' ? 0 : 4)
+  })
+
+  it('shows the actual fallback auditor in manual approval and preserves manual denial', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('busy', { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"verdict":"allow"}' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const confirmation = vi.fn(async () => ({ approved: false, timeoutSeconds: 120 }))
+    vi.mocked(spawn).mockClear()
+    const outcome = await executeCommand({
+      project: { folders: [] }, conversationId: 'c',
+      config: config({ enabled: true, review: review({ reviewers: {
+        auditModel: true, auditModelConfigId: 'group', manualConfirmation: true,
+      } }) }),
+      command: 'echo audited', requestedTimeoutSeconds: 120,
+      workspaceFolderId: 'f', workspacePath: process.cwd(),
+      runtime: runtime({ sessionModelName: 'executor', requestConfirmation: confirmation,
+        resolveAuditModel: async () => ({ ...defaultModelConfig, id: 'group', retriesPerModel: 0,
+          chain: ['first', 'second'].map(id => ({ modelId: id, label: id, modelName: id, providerName: 'Provider', baseUrl: 'https://audit.example/v1', apiKey: 'key' })),
+        }),
+      }),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(confirmation).toHaveBeenCalledWith(expect.objectContaining({ auditModelName: 'Provider / second' }))
+    expect(outcome.steps).toContainEqual(expect.objectContaining({ stage: 'audit-model', detail: expect.stringContaining('switching to Provider / second') }))
+    expect(spawn).not.toHaveBeenCalled()
+  })
+})
