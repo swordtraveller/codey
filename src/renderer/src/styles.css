@@ -121,6 +121,30 @@ body {
   white-space: nowrap;
 }
 
+.sidebar-status {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-processing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-processing *,
+  .sidebar-processing *::before,
+  .sidebar-processing *::after {
+    animation: none !important;
+  }
+}
+
 .settings-button {
   margin-top: auto;
 }

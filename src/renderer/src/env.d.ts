@@ -14,6 +14,7 @@ import type {
   ContextDebugOverview,
   ContextManagementConfig,
   ConversationStateChange,
+  ConversationRuntimeState,
   ConversationMessagePage,
   DevelopmentProgress,
   DevelopmentProgressState,
@@ -188,6 +189,7 @@ declare global {
         serverId: string,
       ): Promise<{ status: 'opened' | 'starting' | 'stopped' | 'failed' }>
       onDevelopmentProgress(listener: (progress: DevelopmentProgress) => void): () => void
+      getConversationRuntimeStates(): Promise<Record<string, ConversationRuntimeState>>
       onConversationStateChange(listener: (change: ConversationStateChange) => void): () => void
       onProjectUpdated(listener: (project: Project) => void): () => void
       openContextDebug(projectId: string, conversationId: string): Promise<void>

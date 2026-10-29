@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import i18next from '../../../src/renderer/src/i18n'
 import { runCommandReviewTests } from './command-review'
 import { runSidebarSortingTests } from './sidebar-sorting'
+import { runConversationRuntimeTests } from './conversation-runtime'
 import { defaultAppConfig, type Conversation, type Project } from '../../../src/shared/types'
 import { useProjectSettings } from '../../../src/renderer/src/hooks/useProjectSettings'
 import { useConversationSettings } from '../../../src/renderer/src/hooks/useConversationSettings'
@@ -267,6 +268,7 @@ async function runTests() {
   })
   passed.push(...await runCommandReviewTests())
   passed.push(...await runSidebarSortingTests())
+  passed.push(...await runConversationRuntimeTests())
   return { passed: passed.length, tests: passed }
 }
 Object.assign(window, { runTests })

@@ -46,7 +46,7 @@ import {
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
-import { UnreadBadge } from './components/UnreadBadge'
+import { SidebarStatus } from './components/SidebarStatus'
 import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
@@ -235,20 +235,22 @@ export function App(): React.JSX.Element {
     }
     return errors
   }, [projects])
-  const projectUnreadState = useMemo((): Record<string, { count: number; error: boolean }> => {
-    const state: Record<string, { count: number; error: boolean }> = {}
+  const projectNavState = useMemo((): Record<string, { count: number; error: boolean; runningCount: number }> => {
+    const state: Record<string, { count: number; error: boolean; runningCount: number }> = {}
     for (const project of projects) {
       let count = 0
       let error = false
+      let runningCount = 0
       for (const conv of project.conversations) {
         if (conv.archived) continue
         count += unreadCounts[conv.id] || 0
         if (conversationErrors[conv.id]) error = true
+        if (conversationStates[`${project.id}:${conv.id}`] === 'running') runningCount++
       }
-      state[project.id] = { count, error }
+      state[project.id] = { count, error, runningCount }
     }
     return state
-  }, [projects, unreadCounts, conversationErrors])
+  }, [projects, unreadCounts, conversationErrors, conversationStates])
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
   const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
@@ -1255,7 +1257,7 @@ export function App(): React.JSX.Element {
                   <div className="project-nav-row">
                     <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
                       <span className="nav-item-title">{project.name}</span>
-                      <UnreadBadge count={projectUnreadState[project.id]?.count ?? 0} error={projectUnreadState[project.id]?.error ?? false} />
+                      <SidebarStatus unreadCount={projectNavState[project.id]?.count ?? 0} error={projectNavState[project.id]?.error ?? false} runningCount={projectNavState[project.id]?.runningCount ?? 0} project />
                     </Button>
                     <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
@@ -1295,7 +1297,7 @@ export function App(): React.JSX.Element {
 
                       }}>
                         <span className="nav-item-title">{conversation.title}</span>
-                        <UnreadBadge count={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} />
+                        <SidebarStatus unreadCount={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} runningCount={conversationStates[`${activeProject.id}:${conversation.id}`] === 'running' ? 1 : 0} />
                       </Button>
                       <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
                     </div>

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import i18n from '../../../src/renderer/src/i18n'
 import { ListSortMenu } from '../../../src/renderer/src/components/ListSortMenu'
+import { SidebarStatus } from '../../../src/renderer/src/components/SidebarStatus'
 import { useSidebarSorting } from '../../../src/renderer/src/hooks/useSidebarSorting'
 import { useListScrollAnchor } from '../../../src/renderer/src/hooks/useListScrollAnchor'
 import { defaultAppConfig, type AppConfig, type SidebarSortPreferences } from '../../../src/shared/types'
@@ -50,8 +51,36 @@ export async function runSidebarSortingTests(): Promise<string[]> {
   }
   const radio = (key: string) => [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(node => node.textContent === i18n.t(key))
   try {
+    await act(async () => {
+      root.render(<FluentProvider theme={webLightTheme}><SidebarStatus unreadCount={2} error runningCount={1} project /></FluentProvider>)
+    })
+    const processing = element.querySelector('.sidebar-processing')
+    assert(processing, 'running sidebar item renders a processing indicator')
+    assert(processing?.getAttribute('title') === i18n.t('projectProcessing', { count: 1 }), 'project processing tooltip is localized')
+    assert(processing?.querySelector('[aria-label]')?.getAttribute('aria-label') === i18n.t('projectProcessing', { count: 1 }), 'processing indicator is accessible')
+    assert(element.textContent?.includes('2'), 'running state preserves unread count')
+    assert(element.textContent?.includes('!'), 'running state preserves error marker')
+    await act(async () => {
+      root.render(<FluentProvider theme={webLightTheme}><SidebarStatus unreadCount={2} error runningCount={0} /></FluentProvider>)
+    })
+    assert(!element.querySelector('.sidebar-processing'), 'finished sidebar item removes processing indicator')
+    passed.push('sidebar processing indicator coexists with unread and error badges')
+
     for (const language of ['en', 'zh-CN']) {
       await act(async () => { await i18n.changeLanguage(language) })
+      for (const project of [false, true]) {
+        for (const runningCount of [1, 2]) {
+          await act(async () => {
+            root.render(<FluentProvider theme={webLightTheme}><SidebarStatus unreadCount={0} runningCount={runningCount} project={project} /></FluentProvider>)
+          })
+          const label = project ? i18n.t('projectProcessing', { count: runningCount }) : i18n.t('conversationProcessing')
+          assert(element.querySelector('.sidebar-processing')?.getAttribute('title') === label, language + ' localized processing tooltip')
+          assert(!label.includes('projectProcessing'), 'project plural translation resolves')
+          assert(element.querySelectorAll('.sidebar-processing').length === 1, 'concurrent tasks share one project spinner')
+        }
+      }
+      await act(async () => { root.render(<SidebarStatus unreadCount={0} runningCount={0} />) })
+      assert(!element.querySelector('.sidebar-status'), 'idle and read item has no status badge')
       await render()
       const button = element.querySelector('button')!
       assert(button.getAttribute('aria-label') === i18n.t('sidebarSortList', { list: i18n.t('projects') }), 'sort button accessible label is localized')

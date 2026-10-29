@@ -10,6 +10,7 @@ import type {
   CommandApprovalResponse,
   ContextManagementConfig,
   ConversationStateChange,
+  ConversationRuntimeState,
   DevelopmentProgress,
   DevelopmentProgressState,
   ImageAttachment,
@@ -253,6 +254,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('development:progress', handler)
       return () => ipcRenderer.removeListener('development:progress', handler)
     },
+    getConversationRuntimeStates: (): Promise<Record<string, ConversationRuntimeState>> =>
+      ipcRenderer.invoke('conversations:runtime-states'),
     onConversationStateChange: (listener: (change: ConversationStateChange) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, change: ConversationStateChange) =>
         listener(change)

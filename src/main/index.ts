@@ -1620,6 +1620,7 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
+  ipcMain.handle('conversations:runtime-states', () => Object.fromEntries(conversationStates))
   ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string, continueFromMessageId?: string) => {
     if (getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
