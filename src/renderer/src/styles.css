@@ -361,6 +361,17 @@ body {
   font-size: 12px;
 }
 
+.settings-change-list {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding-left: 24px;
+  overflow-wrap: anywhere;
+}
+
+.settings-change-list li {
+  margin: 6px 0;
+}
+
 .model-config-save-state {
   color: #616161;
 }

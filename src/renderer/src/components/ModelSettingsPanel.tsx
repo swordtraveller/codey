@@ -103,6 +103,7 @@ export function ModelSettingsPanel({
           <span className={`connectivity-status ${connectivityStatus.tone}`}> {connectivityStatus.text}</span>
         )}
       </p>
+      <p className="settings-description">{t('modelSettingsSaveHint')}</p>
 
       <h4 className="settings-section-title">{t('providersSection')}</h4>
       <div className="layer-config-toolbar">

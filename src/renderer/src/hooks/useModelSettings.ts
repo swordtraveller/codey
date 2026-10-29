@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type SetStateAction } from 'react'
+import { useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { useTranslation } from 'react-i18next'
 import { flattenModelLink } from '../../../shared/model-targets'
 import {
@@ -14,6 +14,7 @@ import {
   type ProviderConfig,
 } from '../../../shared/types'
 import type { ModelComboOption, ModelSettingsPanelProps } from '../components/ModelSettingsPanel'
+import { settingsEqual } from '../settings-changes'
 
 type UseModelSettingsOptions = {
   config: AppConfig
@@ -41,6 +42,21 @@ export function useModelSettings({
   const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
   const [connectivityBusy, setConnectivityBusy] = useState(false)
   const [connectivityStatus, setConnectivityStatus] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
+
+  const draftGeneration = useRef(0)
+
+  function resetModelSettingsUi(): void {
+    // Ignore stale network replies after Save/Discard and a subsequent reopen.
+    draftGeneration.current++
+    setModelCombos(null)
+    setComboBusy(false)
+    setCapabilitiesBusy(false)
+    setConnectivityBusy(false)
+    setConnectivityStatus(null)
+    setSelectedGroupMemberIds([])
+    setGroupMemberProviderFilter('')
+    setGroupMemberModelFilter('')
+  }
 
   const duplicateProviderNames = new Set(configDraft.providers.map((provider) => provider.name.trim().toLowerCase())).size !== configDraft.providers.length
   const duplicateDefinitionModelNames = new Set(configDraft.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== configDraft.modelDefinitions.length
@@ -174,6 +190,7 @@ export function useModelSettings({
   async function queryModelCombos(): Promise<void> {
     if (comboBusy) return
     setComboBusy(true)
+    const generation = draftGeneration.current
     try {
       const results = await Promise.all(configDraft.providers.map(async (provider) => {
         try {
@@ -183,6 +200,7 @@ export function useModelSettings({
           return { provider, models: [] as string[] }
         }
       }))
+      if (generation !== draftGeneration.current) return
       const existing = new Set(configDraft.models.map((model) => `${model.providerId}:${model.definitionId}`))
       const combos: ModelComboOption[] = []
       for (const definition of configDraft.modelDefinitions) {
@@ -202,7 +220,7 @@ export function useModelSettings({
       }
       setModelCombos(combos)
     } finally {
-      setComboBusy(false)
+      if (generation === draftGeneration.current) setComboBusy(false)
     }
   }
 
@@ -349,8 +367,10 @@ export function useModelSettings({
     if (!provider || connectivityBusy || !provider.baseUrl.trim() || !provider.apiKey.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.testProviderConnectivity({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -369,9 +389,10 @@ export function useModelSettings({
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } catch {
+      if (generation !== draftGeneration.current) return
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } finally {
-      setConnectivityBusy(false)
+      if (generation === draftGeneration.current) setConnectivityBusy(false)
     }
   }
 
@@ -381,8 +402,10 @@ export function useModelSettings({
     if (!flat || connectivityBusy || !flat.baseUrl.trim() || !flat.modelName.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.testModelConnectivity(flat)
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -401,9 +424,10 @@ export function useModelSettings({
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
     } catch {
+      if (generation !== draftGeneration.current) return
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } finally {
-      setConnectivityBusy(false)
+      if (generation === draftGeneration.current) setConnectivityBusy(false)
     }
   }
 
@@ -413,17 +437,24 @@ export function useModelSettings({
       return
     }
     setCapabilitiesBusy(true)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.fetchModelCapabilities(modelName)
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
-        updateSelectedDefinition({
+        const patch: Partial<ModelDefinition> = {
           ...(result.maxContextTokens !== undefined ? { modelMaxContext: result.maxContextTokens } : {}),
           ...(result.maxOutputTokens !== undefined ? { modelMaxOutputTokens: result.maxOutputTokens } : {}),
           supportsImageInput: result.image,
           supportsPdfInput: result.pdf,
           supportsVideoInput: result.video,
           supportsAudioInput: result.audio,
-        })
+        }
+        const definitionId = selectedDefinitionDraft?.id
+        setConfigDraft(current => ({
+          ...current,
+          modelDefinitions: current.modelDefinitions.map(definition => definition.id === definitionId && definition.modelName.trim() === modelName ? { ...definition, ...patch } : definition),
+        }))
         showToast(t('modelCapabilitiesFetched'), 'info')
         return
       }
@@ -433,15 +464,19 @@ export function useModelSettings({
       }
       showToast(t('modelCapabilitiesNetworkError'), 'error')
     } catch {
+      if (generation !== draftGeneration.current) return
       showToast(t('modelCapabilitiesNetworkError'), 'error')
     } finally {
-      setCapabilitiesBusy(false)
+      if (generation === draftGeneration.current) setCapabilitiesBusy(false)
     }
   }
 
   const panelProps: ModelSettingsPanelProps = {
     configDraft,
-    settingsDirty: configDraft !== config,
+    settingsDirty: !settingsEqual(configDraft.providers, config.providers)
+      || !settingsEqual(configDraft.modelDefinitions, config.modelDefinitions)
+      || !settingsEqual(configDraft.models, config.models)
+      || !settingsEqual(configDraft.modelGroups, config.modelGroups),
     connectivityBusy,
     connectivityStatus,
     providers: {
@@ -504,6 +539,7 @@ export function useModelSettings({
     panelProps,
     createSettingsDraft,
     invalidModelConfig,
+    resetModelSettingsUi,
     flatDraftModelConfigs,
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,

@@ -58,6 +58,8 @@ import {
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
 import { ModelSettingsPanel } from './components/ModelSettingsPanel'
+import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog'
+import { getSettingsChanges } from './settings-changes'
 import { SkillsSettingsPanel } from './components/SkillsSettingsPanel'
 import { KnowledgeBaseSettingsPanel } from './components/KnowledgeBaseSettingsPanel'
 import { AppPreferencesPanel } from './components/AppPreferencesPanel'
@@ -148,7 +150,10 @@ export function App(): React.JSX.Element {
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
   const toastTimerRef = useRef<number | undefined>(undefined)
-  const settingsOpenedOnceRef = useRef(false)
+  const savingSettingsRef = useRef(false)
+  const [settingsBaseline, setSettingsBaseline] = useState(defaultAppConfig)
+  const [settingsExitTarget, setSettingsExitTarget] = useState<'close' | 'archive' | null>(null)
+  const settingsChanges = useMemo(() => getSettingsChanges(settingsBaseline, configDraft), [settingsBaseline, configDraft])
   const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<GlobalSettingsTab>('model')
 
@@ -177,6 +182,7 @@ export function App(): React.JSX.Element {
     panelProps: modelSettingsPanelProps,
     createSettingsDraft,
     invalidModelConfig,
+    resetModelSettingsUi,
     flatDraftModelConfigs,
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,
@@ -541,6 +547,7 @@ export function App(): React.JSX.Element {
         ...current,
         defaultSkillIds: current.defaultSkillIds.filter((id) => id !== skill.id),
       }))
+      setSettingsBaseline(current => ({ ...current, defaultSkillIds: current.defaultSkillIds.filter(id => id !== skill.id) }))
       if (skillPreview?.skillId === skill.id) setSkillPreview(null)
     } catch (reason) {
       setSkillError(reason instanceof Error ? reason.message : t('unableRemoveSkill'))
@@ -665,6 +672,7 @@ export function App(): React.JSX.Element {
         ...current,
         defaultKnowledgeBaseIds: current.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBase.id),
       }))
+      setSettingsBaseline(current => ({ ...current, defaultKnowledgeBaseIds: current.defaultKnowledgeBaseIds.filter(id => id !== knowledgeBase.id) }))
     } catch (reason) {
       setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableRemoveKnowledgeBase'))
     } finally {
@@ -728,20 +736,36 @@ export function App(): React.JSX.Element {
     setOpenProjectMenuId(null)
   }
 
-  function openArchiveList(): void {
+  function finishSettingsExit(target: 'close' | 'archive', nextConfig = config): void {
+    resetModelSettingsUi()
+    setConfigDraft(nextConfig)
+    setSettingsBaseline(nextConfig)
+    setSettingsError('')
+    setSettingsExitTarget(null)
     setSettingsOpen(false)
-    setArchiveError('')
-    setArchiveDialogOpen(true)
+    if (target === 'archive') {
+      setArchiveError('')
+      setArchiveDialogOpen(true)
+    }
+  }
+
+  function requestSettingsExit(target: 'close' | 'archive' = 'close'): void {
+    if (savingSettingsRef.current || settingsExitTarget) return
+    if (settingsChanges.length > 0) setSettingsExitTarget(target)
+    else finishSettingsExit(target)
+  }
+
+  function openArchiveList(): void {
+    requestSettingsExit('archive')
   }
 
   function openSettings(): void {
-    // Keep unsaved drafts (e.g. a freshly added model configuration) across
-    // dialog close/reopen; only seed once when the dialog has never been
-    // opened or after a successful save replaced the draft.
-    if (!settingsOpenedOnceRef.current || configDraft === config) {
-      setConfigDraft(createSettingsDraft())
-      settingsOpenedOnceRef.current = true
-    }
+    resetModelSettingsUi()
+    const draft = createSettingsDraft()
+    setConfigDraft(draft)
+    // Automatically seeded first-run placeholders are not user edits.
+    setSettingsBaseline(draft)
+    setSettingsExitTarget(null)
     setSettingsError('')
     void window.codey.getCachedShellDetection().then((cached) => {
       if (cached) setShellDetection(cached)
@@ -1005,6 +1029,8 @@ export function App(): React.JSX.Element {
   }
 
   async function saveSettings(): Promise<void> {
+    if (savingSettingsRef.current || settingsSaveDisabled) return
+    savingSettingsRef.current = true
     setSaving(true)
     setSettingsError('')
 
@@ -1015,10 +1041,11 @@ export function App(): React.JSX.Element {
       setAppLanguage(saved.language)
       invalidateToolHelp()
       setError('')
-      setSettingsOpen(false)
+      finishSettingsExit(settingsExitTarget ?? 'close', saved)
     } catch {
-      setSettingsError(t('invalidModelConfig'))
+      setSettingsError(t('settingsSaveFailed'))
     } finally {
+      savingSettingsRef.current = false
       setSaving(false)
     }
   }
@@ -1236,6 +1263,8 @@ export function App(): React.JSX.Element {
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
   const invalidGlobalCommandExecution = !isValidCommandExecutionDraft(configDraft.commandExecutionGlobal)
+  const settingsSaveDisabled = invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked
+    || modelSettingsPanelProps.definitions.capabilitiesBusy || modelSettingsPanelProps.models.comboBusy
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -1694,11 +1723,11 @@ export function App(): React.JSX.Element {
         />
       )}
 
-      <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
+      <Dialog open={settingsOpen} onOpenChange={(_, data) => { if (!data.open) requestSettingsExit() }}>
         <DialogSurface className="settings-dialog-surface">
           <DialogBody className="settings-dialog-body">
             <DialogTitle>{t('settings')}</DialogTitle>
-            <DialogContent className="settings-dialog-content settings-layout">
+            <DialogContent className="settings-dialog-content settings-layout" inert={saving}>
               <TabList
                 className="settings-tab-list"
                 vertical
@@ -1910,12 +1939,12 @@ export function App(): React.JSX.Element {
               </div>
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => setSettingsOpen(false)}>
+              <Button appearance="secondary" disabled={saving} onClick={() => requestSettingsExit()}>
                 {t('cancel')}
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked || saving}
+                disabled={settingsSaveDisabled || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -1924,6 +1953,17 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+      <UnsavedSettingsDialog
+        open={settingsExitTarget !== null}
+        changes={settingsChanges}
+        saving={saving}
+        saveDisabled={settingsSaveDisabled}
+        error={settingsError}
+        onReturn={() => { if (!savingSettingsRef.current) setSettingsExitTarget(null) }}
+        onSave={() => void saveSettings()}
+        onDiscard={() => { if (!savingSettingsRef.current) finishSettingsExit(settingsExitTarget ?? 'close') }}
+      />
+
 
       <Dialog open={archiveDialogOpen} onOpenChange={(_, data) => setArchiveDialogOpen(data.open)}>
         <DialogSurface>
