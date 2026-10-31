@@ -1,6 +1,8 @@
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from '../../../src/renderer/src/App'
+import { modelReferenceKey, reconcileModelReferences } from '../../../src/shared/model-deletion'
+import { auditReview } from '../../model-deletion-fixtures'
 import i18n from '../../../src/renderer/src/i18n'
 import { createDevelopmentProgressState } from '../../../src/shared/development-progress'
 import { defaultAppConfig, defaultModelDefinition, type AppConfig, type Project } from '../../../src/shared/types'
@@ -34,10 +36,10 @@ const escapeDialog = async (surface: Element) => {
   })
 }
 const waitGone = async (selector: string) => {
-  for (let attempt = 0; attempt < 30 && document.querySelector(selector); attempt++) {
+  for (let attempt = 0; attempt < 100 && document.querySelector(selector); attempt++) {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)) })
   }
-  assert(!document.querySelector(selector), 'dialog closes: ' + selector)
+  assert(!document.querySelector(selector), 'dialog closes: ' + selector + '; remaining=' + [...document.querySelectorAll('[role="dialog"]')].map(node => node.textContent?.slice(0, 900)).join(' | '))
 }
 const waitClosed = () => waitGone('[role="dialog"]')
 
@@ -69,18 +71,23 @@ export async function runModelSettingsTests(): Promise<string[]> {
       }
       let rejectSave = false
       let saveCalls = 0
+      let savedReplacements: Record<string, string | null> = {}
       let selected = ''
       let resolveSave: (() => void) | undefined
       let delaySave = false
       let resolveCapabilities: ((value: unknown) => void) | undefined
       const subscribe = () => () => undefined
+      let publishProject: ((project: Project) => void) | undefined
       Object.assign(window, { codey: {
         getConfig: async () => structuredClone(saved),
-        saveConfig: async (next: AppConfig) => {
+        saveConfig: async (next: AppConfig, replacements: Record<string, string | null> = {}) => {
+          savedReplacements = replacements
           saveCalls++
           if (delaySave) await new Promise<void>(resolve => { resolveSave = resolve })
           if (rejectSave) throw new Error('save failed')
-          saved = structuredClone(next)
+          const repaired = reconcileModelReferences(next, [project], replacements, true, saved)
+          Object.assign(project, repaired.projects[0])
+          saved = structuredClone(repaired.config)
           return structuredClone(saved)
         },
         fetchModelCapabilities: async () => new Promise(resolve => { resolveCapabilities = resolve }),
@@ -94,7 +101,7 @@ export async function runModelSettingsTests(): Promise<string[]> {
         getPerformanceTraceStatus: async () => null,
         getCachedShellDetection: async () => null,
         recordPerformanceTrace: () => undefined,
-        onDevelopmentProgress: subscribe, onConversationStateChange: subscribe, onProjectUpdated: subscribe,
+        onDevelopmentProgress: subscribe, onConversationStateChange: subscribe, onProjectUpdated: (listener: (project: Project) => void) => { publishProject = listener; return () => undefined },
         onNotificationClicked: subscribe, onMessageNavigation: subscribe, onCommandReviewRequest: subscribe,
         setConversationModelConfig: async (_project: string, _conversation: string, id: string) => {
           assert(saved.models.some(model => model.id === id), 'selection references a persisted model')
@@ -132,6 +139,26 @@ export async function runModelSettingsTests(): Promise<string[]> {
         await waitClosed()
         assert(!confirmation(), 'reverted edits close without confirmation')
         passed.push(language + ' unchanged and reverted drafts do not prompt')
+
+        const deletion = () => document.querySelector('.model-deletion-dialog')!
+        for (const key of ['deleteModelConfig', 'deleteProvider', 'deleteDefinition', 'deleteGroup']) {
+          await open()
+          await click(button(dialog(), key))
+          assert(deletion()?.textContent?.includes('Group'), 'linked confirmation names the affected group')
+          if (key !== 'deleteGroup') {
+            assert(deletion().textContent?.includes('Original'), 'cascade confirmation names concrete model')
+            assert((button(deletion(), 'modelDeleteConfirm') as HTMLButtonElement).disabled, 'last concrete model cannot be deleted')
+            assert(deletion().textContent?.includes(i18n.t('modelDeleteLastBlocked')), 'last model guidance is localized')
+          }
+          await escapeDialog(deletion())
+          await waitGone('.model-deletion-dialog')
+          assert(dialog() && !confirmation(), 'Escape dismisses only deletion confirmation')
+          await cancel()
+          await waitClosed()
+          assert(!confirmation(), 'cancelled deletion does not dirty settings')
+        }
+        passed.push(language + ' all deletion types preview dependencies; last model is protected; Escape preserves settings')
+
 
         await open()
         await changeInput(input(dialog(), 'apiKey'), 'secret-must-not-appear')
@@ -236,6 +263,83 @@ export async function runModelSettingsTests(): Promise<string[]> {
         assert(confirmation().textContent?.includes('example-model'), 'fetched capabilities are unsaved definition edits')
         await discard()
         passed.push(language + ' fetched capabilities require save; stale asynchronous results are ignored')
+
+        const requestOriginalDeletion = async () => {
+          await open()
+          const models = dialog().querySelector<HTMLSelectElement>('select[aria-label="' + i18n.t('modelsSection') + '"]')!
+          await act(async () => { models.value = 'original'; models.dispatchEvent(new Event('change', { bubbles: true })) })
+          await click(button(dialog(), 'deleteModelConfig'))
+          assert(deletion().textContent?.includes('Original') && deletion().textContent?.includes('Group'), 'confirmation lists model and empty group')
+          const confirm = button(deletion(), 'modelDeleteConfirm') as HTMLButtonElement
+          assert(!confirm.disabled, 'affected references may be cleared and configured before sending')
+          const replacement = deletion().querySelector('select')!
+          await act(async () => { replacement.value = draftModelId; replacement.dispatchEvent(new Event('change', { bubbles: true })) })
+          assert(!confirm.disabled, 'valid replacement enables linked deletion')
+          await click(confirm)
+          await waitGone('.model-deletion-dialog')
+          assert(saved.models.some(model => model.id === 'original'), 'confirmed deletion remains a draft before Save')
+          assert([...picker().options].some(option => option.value === 'original'), 'draft deletion does not change executable picker')
+        }
+        await requestOriginalDeletion()
+        await cancel()
+        assert(confirmation().textContent?.includes('Original'), 'exit summary includes draft deletion')
+        await discard()
+        assert(saved.models.some(model => model.id === 'original'), 'discard restores deleted entities')
+        await act(async () => { picker().value = 'original'; picker().dispatchEvent(new Event('change', { bubbles: true })) })
+        await requestOriginalDeletion()
+        rejectSave = true
+        await click(saveButton())
+        assert(dialog().textContent?.includes(i18n.t('settingsSaveFailed')), 'failed linked save retains the draft and error')
+        assert(saved.models.some(model => model.id === 'original'), 'failed linked save does not publish deletion')
+        rejectSave = false
+        await click(saveButton())
+        await waitClosed()
+        assert(!saved.models.some(model => model.id === 'original'), 'successful save applies deletion')
+        assert(saved.activeModelConfigId === draftModelId && savedReplacements.original === draftModelId, 'replacement is persisted and sent to main process')
+        assert(![...picker().options].some(option => option.value === 'original' || option.value === 'group'), 'saved deletion immediately removes executable model and empty group')
+        assert(picker().value !== 'original', 'affected conversation returns to inheritance')
+        passed.push(language + ' linked deletion supports discard, failed-save retry, explicit replacement and immediate picker refresh')
+
+
+        // Stale references can predate this settings session, including archived conversations.
+        const stale = structuredClone(project)
+        stale.defaultModelConfigId = 'stale'
+        stale.commandExecutionDefault = { ...saved.commandExecutionGlobal, review: auditReview('stale') }
+        stale.conversations[0]!.modelConfigId = null
+        const archived = { ...structuredClone(stale.conversations[0]!), id: 'archived', title: 'Archived conversation', archived: true,
+          modelConfigId: 'stale', commandExecution: { ...saved.commandExecutionGlobal, review: auditReview('stale') } }
+        stale.conversations.push(archived)
+        Object.assign(project, stale)
+        await act(async () => { publishProject!(structuredClone(stale)) })
+        const repairReferences = async () => {
+          await open()
+          await click(saveButton())
+          assert(deletion()?.textContent?.includes(i18n.t('modelReferenceRepairTitle')), 'saving stale references opens centralized repair')
+          const selects = [...deletion().querySelectorAll('select')]
+          assert(selects.length === 5, 'bulk selector and all four project/archived references are listed')
+          assert(deletion().textContent?.includes('Archived conversation'), 'archived conversation is identifiable')
+          await act(async () => { selects[0].value = draftModelId; selects[0].dispatchEvent(new Event('change', { bubbles: true })) })
+          assert([...deletion().querySelectorAll('select')].every(select => select.value === draftModelId), 'bulk replacement updates each row')
+          const archivedAudit = [...deletion().querySelectorAll('select')].find(select => select.getAttribute('aria-label')?.includes('Archived conversation') && select.getAttribute('aria-label')?.includes(i18n.t('modelReferenceAudit')))!
+          await act(async () => { archivedAudit.value = ''; archivedAudit.dispatchEvent(new Event('change', { bubbles: true })) })
+          await click(button(deletion(), 'modelReferenceApply'))
+          await waitGone('.model-deletion-dialog')
+        }
+        await repairReferences()
+        await cancel()
+        assert(confirmation()?.textContent?.includes(i18n.t('modelReferenceRepairTitle')), 'reference-only edits participate in unsaved-change protection')
+        await discard()
+        assert(project.defaultModelConfigId === 'stale', 'discard leaves project references unchanged')
+        await repairReferences()
+        await click(saveButton())
+        await waitClosed()
+        assert(project.defaultModelConfigId === draftModelId, 'selected project model is saved')
+        assert(savedReplacements[modelReferenceKey('audit', project.id, 'archived')] === null, 'individual clear overrides bulk replacement')
+        assert(project.conversations.find(conversation => conversation.id === 'archived')!.commandExecution?.review?.reviewers.auditModel === true, 'clearing audit selection retains enabled audit')
+        await open()
+        await click(saveButton())
+        await waitClosed()
+        passed.push(language + ' stale references offer bulk and individual repair, clearing, archived scopes and discard protection')
 
         await open()
         await addModel('Navigation draft')

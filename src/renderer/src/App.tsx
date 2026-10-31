@@ -1,3 +1,4 @@
+import { modelReadinessIssue } from '../../shared/model-readiness'
 import type { MessageNavigationTarget } from '../../shared/message-navigation'
 import { conversationReadState } from '../../shared/conversation-read-state'
 import {
@@ -58,6 +59,8 @@ import {
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
 import { ModelSettingsPanel } from './components/ModelSettingsPanel'
+import { reconcileModelReferences } from '../../shared/model-deletion'
+import { ModelDeletionDialog } from './components/ModelDeletionDialog'
 import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog'
 import { getSettingsChanges } from './settings-changes'
 import { SkillsSettingsPanel } from './components/SkillsSettingsPanel'
@@ -153,7 +156,6 @@ export function App(): React.JSX.Element {
   const savingSettingsRef = useRef(false)
   const [settingsBaseline, setSettingsBaseline] = useState(defaultAppConfig)
   const [settingsExitTarget, setSettingsExitTarget] = useState<'close' | 'archive' | null>(null)
-  const settingsChanges = useMemo(() => getSettingsChanges(settingsBaseline, configDraft), [settingsBaseline, configDraft])
   const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<GlobalSettingsTab>('model')
 
@@ -180,13 +182,24 @@ export function App(): React.JSX.Element {
   const { dialogProps: helpDialogProps, openHelp, openCommandRulesHelp, invalidateToolHelp } = useHelpDialog(activeProject?.folders[0]?.path)
   const {
     panelProps: modelSettingsPanelProps,
+    deletionDialogProps,
+    modelReplacements,
+    requestReferenceRepair,
     createSettingsDraft,
     invalidModelConfig,
     resetModelSettingsUi,
     flatDraftModelConfigs,
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,
-  } = useModelSettings({ config, configDraft, setConfigDraft, showToast })
+  } = useModelSettings({ config, configDraft, projects, setConfigDraft, showToast })
+  const settingsChanges = useMemo(() => {
+    const changes = getSettingsChanges(settingsBaseline, configDraft)
+    if (Object.keys(modelReplacements).some(key => key.startsWith('ref:'))) {
+      changes.push({ section: 'modelReferenceRepairTitle', kind: 'modified' })
+    }
+    return changes
+  }, [settingsBaseline, configDraft, modelReplacements])
+
   const visibleConversations = useMemo(() => sortConversations(
     activeProject?.conversations.filter((conversation) => !conversation.archived) ?? [], config.sidebarSort.conversations, i18n.resolvedLanguage,
   ), [activeProject, config.sidebarSort.conversations, i18n.resolvedLanguage])
@@ -340,7 +353,8 @@ export function App(): React.JSX.Element {
       activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
       effectiveModelConfig.modelMaxContext,
     ))
-  const canSend = Boolean(messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const modelIssue = activeProject && activeConversation ? modelReadinessIssue(config, activeProject, activeConversation) : null
+  const canSend = Boolean(!modelIssue && messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
     : undefined
@@ -750,7 +764,7 @@ export function App(): React.JSX.Element {
   }
 
   function requestSettingsExit(target: 'close' | 'archive' = 'close'): void {
-    if (savingSettingsRef.current || settingsExitTarget) return
+    if (savingSettingsRef.current || settingsExitTarget || deletionDialogProps) return
     if (settingsChanges.length > 0) setSettingsExitTarget(target)
     else finishSettingsExit(target)
   }
@@ -1029,21 +1043,22 @@ export function App(): React.JSX.Element {
   }
 
   async function saveSettings(): Promise<void> {
-    if (savingSettingsRef.current || settingsSaveDisabled) return
+    if (savingSettingsRef.current || settingsSaveDisabled || requestReferenceRepair()) return
     savingSettingsRef.current = true
     setSaving(true)
     setSettingsError('')
 
     try {
-      const saved = await window.codey.saveConfig(configDraft)
+      const saved = await window.codey.saveConfig(configDraft, modelReplacements)
+      setProjects(current => reconcileModelReferences(saved, current, modelReplacements, false, config).projects)
       setConfig(saved)
       setConfigDraft(saved)
       setAppLanguage(saved.language)
       invalidateToolHelp()
       setError('')
       finishSettingsExit(settingsExitTarget ?? 'close', saved)
-    } catch {
-      setSettingsError(t('settingsSaveFailed'))
+    } catch (error) {
+      setSettingsError(t(String(error).includes('MODEL_REPLACEMENT_REQUIRED') ? 'modelDeleteReplacementError' : 'settingsSaveFailed'))
     } finally {
       savingSettingsRef.current = false
       setSaving(false)
@@ -1568,6 +1583,7 @@ export function App(): React.JSX.Element {
           </div>
 
           {error && <p className="composer-error" role="alert">{error}</p>}
+          {modelIssue && <p className="composer-error" role="alert">{t(modelIssue)}</p>}
           <Composer
             key={activeConversationKey || 'no-conversation'}
             canSend={canSend}
@@ -1953,8 +1969,9 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+      {deletionDialogProps && <ModelDeletionDialog {...deletionDialogProps} />}
       <UnsavedSettingsDialog
-        open={settingsExitTarget !== null}
+        open={settingsExitTarget !== null && !deletionDialogProps}
         changes={settingsChanges}
         saving={saving}
         saveDisabled={settingsSaveDisabled}

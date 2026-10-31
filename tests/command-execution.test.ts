@@ -139,8 +139,8 @@ describe('command execution config', () => {
     expect(isValidCommandExecutionConfig(config())).toBe(true)
   })
 
-  it('requires an audit model when model audit is enabled', () => {
-    expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: null, manualConfirmation: false } }) }))).toBe(false)
+  it('allows saving an empty enabled audit model; sending enforces readiness', () => {
+    expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: null, manualConfirmation: false } }) }))).toBe(true)
     expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: 'audit', manualConfirmation: false } }) }))).toBe(true)
   })
 

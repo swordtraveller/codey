@@ -1,3 +1,6 @@
+import { reconcileModelReferences, type ModelReferenceReplacements } from '../shared/model-deletion'
+import { getConfigPath, normalizeConfig, readConfig, serializeConfig } from './config'
+import { recoverModelReferenceUpdate, writeModelReferenceUpdate } from './model-reference-update'
 import { inferConversationDates, recordConversationActivity } from '../shared/activity-metadata'
 import { validTimestamp } from '../shared/list-sorting'
 import { messageNavigationPreview, type MessageNavigationEntry } from '../shared/message-navigation'
@@ -9,6 +12,7 @@ import { dirname, join } from 'node:path'
 import {
   defaultAgentLimitsConfig,
   defaultCommandExecutionConfig,
+  type AppConfig,
   type AgentContextMessage,
   type AgentLimitsConfig,
   type AssistantMessageBlock,
@@ -102,6 +106,7 @@ let historyStates = new Map<string, HistoryState>()
 let projects: Project[] | undefined
 let projectsLoad: Promise<Project[]> | undefined
 let loadedUserDataPath: string | undefined
+let modelUpdateBarrier = Promise.resolve()
 let writeQueues = new Map<string, Promise<void>>()
 
 function userDataPath(): string {
@@ -112,6 +117,7 @@ function userDataPath(): string {
     projects = undefined
     projectsLoad = undefined
     writeQueues = new Map<string, Promise<void>>()
+    modelUpdateBarrier = Promise.resolve()
   }
   return current
 }
@@ -203,7 +209,7 @@ async function discoverProjectIds(): Promise<string[]> {
 function serializeWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
   userDataPath()
   const previous = writeQueues.get(scope) ?? Promise.resolve()
-  const result = previous.then(operation, operation)
+  const result = Promise.all([previous, modelUpdateBarrier]).then(operation)
   const settled = result.then(() => undefined, () => undefined)
   writeQueues.set(scope, settled)
   void settled.then(() => {
@@ -213,6 +219,7 @@ function serializeWrite<T>(scope: string, operation: () => Promise<T>): Promise<
 }
 
 async function awaitPendingWrites(): Promise<void> {
+  await modelUpdateBarrier
   while (writeQueues.size > 0) await Promise.all([...writeQueues.values()])
 }
 
@@ -420,6 +427,7 @@ export function projectForRenderer(project: Project): Project {
 }
 
 export async function getProjectsForRenderer(): Promise<Project[]> {
+  await modelUpdateBarrier
   return (await loadProjects()).map(projectForRenderer)
 }
 
@@ -1213,4 +1221,64 @@ export function updateConversationAgentMessages(
     await persistConversation(projectId, conversation)
     return project
   })
+}
+
+
+/** Model changes and all dependent metadata share one recoverable commit. History files are never rewritten. */
+export async function saveModelConfiguration(config: AppConfig, replacements: ModelReferenceReplacements = {}): Promise<AppConfig> {
+  userDataPath()
+  const previous = modelUpdateBarrier
+  const pending = [...writeQueues.values()]
+  let release!: () => void
+  modelUpdateBarrier = new Promise<void>(resolve => { release = resolve })
+  try {
+    await previous
+    await Promise.all(pending)
+    await recoverModelReferenceUpdate()
+    const current = await loadProjects()
+    const oldConfig = await readConfig()
+    if (oldConfig.models.length > 0 && config.models.length === 0) throw new Error('MODEL_LAST_REQUIRED')
+    const repaired = reconcileModelReferences(config, current, replacements, true, oldConfig)
+    const normalized = normalizeConfig(repaired.config)
+    const files: Array<{ path: string; content: string }> = []
+    const commits: Array<() => void> = []
+    const stage = async (path: string, before: object, after: object, apply: () => void) => {
+      if (JSON.stringify(before) === JSON.stringify(after)) return
+      // Merge only reference metadata into the original shard; paged messages, indexes and snapshots remain byte-for-byte data-equivalent.
+      const stored = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+      const content = JSON.stringify({ ...stored, ...after })
+      files.push({ path, content })
+      commits.push(apply)
+    }
+    const projectFields = (project: Project) => ({
+      defaultModelConfigId: project.defaultModelConfigId,
+      contextConfigOverride: project.contextConfigOverride,
+      commandExecutionDefault: project.commandExecutionDefault,
+    })
+    const conversationFields = (conversation: Conversation) => ({
+      modelConfigId: conversation.modelConfigId,
+      contextConfigOverride: conversation.contextConfigOverride,
+      commandExecution: conversation.commandExecution,
+      lastUsedModelId: conversation.lastUsedModelId,
+      perModelContextConfigs: conversation.perModelContextConfigs,
+    })
+    for (let i = 0; i < current.length; i++) {
+      const before = current[i]!
+      const after = repaired.projects[i]!
+      const fields = projectFields(after)
+      await stage(projectPath(before.id), projectFields(before), fields, () => Object.assign(before, fields))
+      for (let j = 0; j < before.conversations.length; j++) {
+        const conversation = before.conversations[j]!
+        const next = conversationFields(after.conversations[j]!)
+        await stage(conversationPath(before.id, conversation.id), conversationFields(conversation), next, () => Object.assign(conversation, next))
+      }
+    }
+    // Credentials are serialized with the existing safeStorage policy before they enter the recovery journal.
+    files.push({ path: getConfigPath(), content: serializeConfig(normalized) })
+    await writeModelReferenceUpdate(files)
+    for (const commit of commits) commit()
+    return normalized
+  } finally {
+    release()
+  }
 }

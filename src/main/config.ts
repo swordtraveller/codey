@@ -68,7 +68,7 @@ type LegacyStoredConfig = LegacyStoredModel & {
   language?: AppLanguage
 }
 
-function getConfigPath(): string {
+export function getConfigPath(): string {
   return join(app.getPath('userData'), 'model-config.json')
 }
 
@@ -311,7 +311,7 @@ export function isValidAppConfigLayers(config: Pick<AppConfig, 'providers' | 'mo
   return true
 }
 
-async function writeConfig(config: AppConfig): Promise<void> {
+export function serializeConfig(config: AppConfig): string {
   const encrypted = safeStorage.isEncryptionAvailable()
   const stored: StoredAppConfig = {
     ...config,
@@ -330,7 +330,11 @@ async function writeConfig(config: AppConfig): Promise<void> {
   delete (stored as Record<string, unknown>).commandReviewGlobal
   delete (stored as Record<string, unknown>).agentLimitsGlobal
 
-  await writeFile(getConfigPath(), JSON.stringify(stored), 'utf8')
+  return JSON.stringify(stored)
+}
+
+async function writeConfig(config: AppConfig): Promise<void> {
+  await writeFile(getConfigPath(), serializeConfig(config), 'utf8')
 }
 
 function readLayers(stored: StoredAppConfig): {
@@ -359,6 +363,7 @@ function readLayers(stored: StoredAppConfig): {
 }
 
 function repairActiveTarget(layers: { models: ModelLink[]; modelGroups: ModelGroupConfig[] }, active: string | null): string | null {
+  if (active === null) return null
   if (active && (layers.models.some((model) => model.id === active) || layers.modelGroups.some((group) => group.id === active))) {
     return active
   }
@@ -403,7 +408,7 @@ export async function readConfig(): Promise<AppConfig> {
         : normalizeCommandReviewConfig(stored.commandReview)
       const agentLimitsGlobal = readAgentLimitsGlobal(stored)
       const commandExecutionGlobal = readCommandExecutionGlobal(stored)
-      const activeModelConfigId = repairActiveTarget(layers, stored.activeModelConfigId ?? null)
+      const activeModelConfigId = repairActiveTarget(layers, stored.activeModelConfigId === undefined ? layers.models[0]?.id ?? null : stored.activeModelConfigId)
       const config: AppConfig = {
         modelConfigs: [],
         providers: layers.providers,
@@ -482,7 +487,7 @@ export async function readConfig(): Promise<AppConfig> {
       modelDefinitions: layers.modelDefinitions,
       models: layers.models,
       modelGroups: layers.modelGroups,
-      activeModelConfigId: repairActiveTarget(layers, stored.activeModelConfigId ?? layers.models[0]?.id ?? null),
+      activeModelConfigId: repairActiveTarget(layers, stored.activeModelConfigId === undefined ? layers.models[0]?.id ?? null : stored.activeModelConfigId),
       contextManagement: normalizeContextManagementConfig(stored.contextManagement),
       language,
       developerMode: stored.developerMode === true,
@@ -511,7 +516,7 @@ export async function readConfig(): Promise<AppConfig> {
   }
 }
 
-export async function saveConfig(config: AppConfig): Promise<AppConfig> {
+export function normalizeConfig(config: AppConfig): AppConfig {
   const providers = config.providers.map(normalizeProviderConfig)
   const modelDefinitions = config.modelDefinitions.map(normalizeModelDefinition)
   const models = config.models.map(normalizeModelLink)
@@ -523,7 +528,7 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   const mcpServers = normalizeMcpServers(config.mcpServers)
   const activeModelConfigId = repairActiveTarget(
     { models, modelGroups },
-    config.activeModelConfigId ?? models[0]?.id ?? null,
+    config.activeModelConfigId === undefined ? models[0]?.id ?? null : config.activeModelConfigId,
   )
 
   const layersValid = isValidAppConfigLayers({
@@ -568,6 +573,11 @@ export async function saveConfig(config: AppConfig): Promise<AppConfig> {
     defaultKnowledgeBaseIds: normalizeSkillIds(config.defaultKnowledgeBaseIds),
     mcpServers,
   }
+  return normalized
+}
+
+export async function saveConfig(config: AppConfig): Promise<AppConfig> {
+  const normalized = normalizeConfig(config)
   await writeConfig(normalized)
   return normalized
 }

@@ -63,7 +63,7 @@ contextBridge.exposeInMainWorld(
     exportPerformanceTraces: (): Promise<string | null> => ipcRenderer.invoke('performance:export'),
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
-    saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    saveConfig: (config: AppConfig, replacements?: Record<string, string | null>) => ipcRenderer.invoke('config:save', config, replacements),
     saveSidebarSort: (preferences: AppConfig['sidebarSort']): Promise<AppConfig['sidebarSort']> => ipcRenderer.invoke('config:sidebar-sort', preferences),
     testMcpServer: (config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult> =>
       ipcRenderer.invoke('mcp:test-stdio-server', config, projectRoot),

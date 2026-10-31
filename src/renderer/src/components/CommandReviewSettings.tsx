@@ -267,7 +267,9 @@ export function CommandReviewEditor({ value, onChange, disabled, modelConfigs, m
     ? auditGroup.modelIds.flatMap((id) => modelConfigs.filter((model) => model.id === id)) : []
   const conflicts = sessionModel ? auditMembers.filter((model) =>
     model.modelName.trim().toLowerCase() === sessionModel.modelName.trim().toLowerCase()) : []
-  const auditWarning = value.reviewers.auditModelConfigId && auditMembers.length === 0
+  const auditWarning = value.reviewers.auditModel && !value.reviewers.auditModelConfigId
+    ? 'sendAuditModelRequired'
+    : value.reviewers.auditModelConfigId && auditMembers.length === 0
     ? 'commandAuditTargetUnavailable'
     : conflicts.length > 0
       ? auditGroup
