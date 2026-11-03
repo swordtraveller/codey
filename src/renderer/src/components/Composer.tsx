@@ -49,6 +49,7 @@ type ComposerProps = {
   supportsPdfInput: boolean
   configured: boolean
   conversationWorking: boolean
+  queueEnabled: boolean
   hasActiveConversation: boolean
   hasProjectFolders: boolean
   interactionLocked: boolean
@@ -68,6 +69,7 @@ export const Composer = memo(function Composer({
   supportsPdfInput,
   configured,
   conversationWorking,
+  queueEnabled,
   hasActiveConversation,
   hasProjectFolders,
   interactionLocked,
@@ -230,7 +232,7 @@ export const Composer = memo(function Composer({
     const content = draft.trim()
     const images = draftImages
     const attachments = draftAttachments
-    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || interactionLocked) return
+    if ((!content && images.length === 0 && attachments.length === 0) || (!canSend && !queueEnabled) || (interactionLocked && !queueEnabled)) return
     if (!onSubmit(content, images, attachments)) return
     setDraft('')
     replaceDraftImages([])
@@ -418,7 +420,7 @@ export const Composer = memo(function Composer({
       <Textarea
         aria-label={t('developmentRequest')}
         className="message-input"
-        disabled={!canSend || interactionLocked}
+        disabled={(!canSend && !queueEnabled) || (interactionLocked && !queueEnabled)}
         size="large"
         value={draft}
         onChange={(_, data) => setDraft(data.value)}

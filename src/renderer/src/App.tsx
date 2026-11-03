@@ -18,7 +18,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
@@ -89,6 +89,14 @@ type RenameTarget =
   | { kind: 'project'; projectId: string; name: string }
   | { kind: 'conversation'; projectId: string; conversationId: string; name: string }
 
+type QueuedUserMessage = {
+  id: string
+  content: string
+  images: ImageAttachment[]
+  attachments: MediaAttachment[]
+  createdAt: number
+}
+
 export function App(): React.JSX.Element {
   const { t, i18n } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
@@ -158,6 +166,15 @@ export function App(): React.JSX.Element {
   const [settingsExitTarget, setSettingsExitTarget] = useState<'close' | 'archive' | null>(null)
   const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<GlobalSettingsTab>('model')
+  const [messageQueues, setMessageQueues] = useState<Record<string, QueuedUserMessage[]>>({})
+  const [blockedQueueKeys, setBlockedQueueKeys] = useState<Record<string, boolean>>({})
+  const [queueExpanded, setQueueExpanded] = useState(true)
+  const [queueTrayHeight, setQueueTrayHeight] = useState(0)
+  const [queueDrainTick, setQueueDrainTick] = useState(0)
+  const messageQueuesRef = useRef(messageQueues)
+  const queueProcessingRef = useRef<Record<string, boolean>>({})
+  const queueTrayRef = useRef<HTMLElement>(null)
+  messageQueuesRef.current = messageQueues
 
   const {
     activeConversationKey,
@@ -306,6 +323,7 @@ export function App(): React.JSX.Element {
     ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
   const interactionLocked = activeConversationState !== 'idle'
+  const activeQueue = activeConversationKey ? messageQueues[activeConversationKey] ?? [] : []
 
   const projectSettings = useProjectSettings({
     config,
@@ -355,6 +373,7 @@ export function App(): React.JSX.Element {
     ))
   const modelIssue = activeProject && activeConversation ? modelReadinessIssue(config, activeProject, activeConversation) : null
   const canSend = Boolean(!modelIssue && messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const queueEnabled = Boolean(!modelIssue && messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && conversationWorking && !conversationContextConfigInvalid)
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
     : undefined
@@ -371,6 +390,50 @@ export function App(): React.JSX.Element {
         : prompts[0]
     void sendMessage(content, [], [], lastUserMessage.id)
   }
+
+  function updateMessageQueues(update: (current: Record<string, QueuedUserMessage[]>) => Record<string, QueuedUserMessage[]>): void {
+    const next = update(messageQueuesRef.current)
+    messageQueuesRef.current = next
+    setMessageQueues(next)
+  }
+
+  function enqueueMessage(conversationKey: string, content: string, images: ImageAttachment[], attachments: MediaAttachment[]): void {
+    updateMessageQueues((current) => ({
+      ...current,
+      [conversationKey]: [...(current[conversationKey] ?? []), {
+        id: crypto.randomUUID(), content, images, attachments, createdAt: Date.now(),
+      }],
+    }))
+  }
+
+  function removeQueuedMessage(conversationKey: string, messageId: string): void {
+    updateMessageQueues((current) => {
+      const remaining = (current[conversationKey] ?? []).filter((message) => message.id !== messageId)
+      const next = { ...current }
+      if (remaining.length) next[conversationKey] = remaining
+      else delete next[conversationKey]
+      return next
+    })
+  }
+
+  useLayoutEffect(() => {
+    const tray = queueTrayRef.current
+    setQueueTrayHeight(tray?.getBoundingClientRect().height ?? 0)
+  }, [activeQueue.length, queueExpanded])
+
+  useEffect(() => {
+    const tray = queueTrayRef.current
+    if (!tray) return
+    const observer = new ResizeObserver(() => setQueueTrayHeight(tray.getBoundingClientRect().height))
+    observer.observe(tray)
+    return () => observer.disconnect()
+  }, [activeConversationKey, activeQueue.length, queueExpanded])
+
+  useLayoutEffect(() => {
+    if (showScrollToBottom || queueTrayHeight <= 0) return
+    const conversation = conversationRef.current
+    if (conversation) conversation.scrollTop = conversation.scrollHeight
+  }, [queueTrayHeight, showScrollToBottom])
 
   useEffect(() => {
     void window.codey
@@ -1192,9 +1255,9 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<void> {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<boolean> {
     if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
-      return
+      return false
     }
 
     const projectId = activeProject.id
@@ -1237,13 +1300,34 @@ export function App(): React.JSX.Element {
           : ''
         setError(`${result.error}${files}`)
       }
+      return true
     } catch {
       finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
       if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
+      return false
     } finally {
       clearRun(conversationKey)
     }
   }
+
+  useEffect(() => {
+    if (!activeConversationKey || activeConversationState !== 'idle' || !canSend || maxInputTokensError || blockedQueueKeys[activeConversationKey]) return
+    if (queueProcessingRef.current[activeConversationKey] || !messageQueuesRef.current[activeConversationKey]?.length) return
+    const conversationKey = activeConversationKey
+    const next = messageQueuesRef.current[conversationKey][0]
+    queueProcessingRef.current[conversationKey] = true
+    void (async () => {
+      try {
+        const sent = await sendMessage(next.content, next.images, next.attachments)
+        if (sent) removeQueuedMessage(conversationKey, next.id)
+        else setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
+      } finally {
+        queueProcessingRef.current[conversationKey] = false
+        if (!blockedQueueKeys[conversationKey]) window.setTimeout(() => setQueueDrainTick((tick) => tick + 1), 0)
+      }
+    })()
+  }, [activeConversationKey, activeConversationState, blockedQueueKeys, canSend, maxInputTokensError, messageQueues, queueDrainTick])
+
   async function stopMessage(): Promise<void> {
     if (!activeProject || !activeConversation || !conversationWorking || stopping) {
       return
@@ -1530,6 +1614,7 @@ export function App(): React.JSX.Element {
               ref={conversationRef}
               className="conversation"
               aria-label={t('conversation')}
+              style={{ '--queue-safe-bottom': `${queueTrayHeight + (queueTrayHeight ? 24 : 0)}px` } as React.CSSProperties}
             >
             {!activeConversation || (messageHistory.loaded && activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
@@ -1568,6 +1653,45 @@ export function App(): React.JSX.Element {
               </div>
             )}
             </div>
+            {activeQueue.length > 0 && (
+              <section ref={queueTrayRef} className={`conversation-queue-tray ${queueExpanded ? 'is-expanded' : 'is-collapsed'}`}>
+                <div className="conversation-queue-header">
+                  <button className="conversation-queue-toggle" onClick={() => setQueueExpanded((expanded) => !expanded)} aria-expanded={queueExpanded}>
+                    <span aria-hidden="true">{queueExpanded ? '⌄' : '›'}</span>
+                    <strong>{t('queuedMessages')}</strong>
+                    <span className="conversation-queue-count">{activeQueue.length}</span>
+                    {!queueExpanded && <span className="conversation-queue-summary">{activeQueue[0]?.content || activeQueue[0]?.attachments[0]?.name || t('attachment')}</span>}
+                  </button>
+                  {blockedQueueKeys[activeConversationKey] && (
+                    <Button appearance="subtle" size="small" onClick={() => {
+                      setBlockedQueueKeys((current) => {
+                        const next = { ...current }
+                        delete next[activeConversationKey]
+                        return next
+                      })
+                      setQueueDrainTick((tick) => tick + 1)
+                    }}>{t('retryQueuedMessage')}</Button>
+                  )}
+                  <Button appearance="subtle" size="small" onClick={() => updateMessageQueues((current) => {
+                    const next = { ...current }
+                    delete next[activeConversationKey]
+                    return next
+                  })}>{t('clearQueue')}</Button>
+                </div>
+                {queueExpanded && (
+                  <ol className="conversation-queue-items">
+                    {activeQueue.map((message, index) => (
+                      <li className="conversation-queue-item" key={message.id}>
+                        <span className="conversation-queue-order">{index + 1}</span>
+                        <p title={message.content}>{message.content || message.images[0]?.name || message.attachments[0]?.name || t('attachment')}</p>
+                        {(message.images.length + message.attachments.length > 0) && <span className="conversation-queue-attachment-count">+{message.images.length + message.attachments.length}</span>}
+                        <Button appearance="subtle" size="small" aria-label={t('removeQueuedMessage')} title={t('removeQueuedMessage')} onClick={() => removeQueuedMessage(activeConversationKey, message.id)}>×</Button>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+            )}
             {showScrollToBottom && (
               <Button
                 aria-label={t('scrollToBottom')}
@@ -1593,9 +1717,10 @@ export function App(): React.JSX.Element {
             supportsPdfInput={effectiveModelConfig?.supportsPdfInput ?? false}
             configured={configured}
             conversationWorking={conversationWorking}
+            queueEnabled={queueEnabled}
             hasActiveConversation={Boolean(activeConversation)}
             hasProjectFolders={Boolean(activeProject?.folders.length)}
-            interactionLocked={interactionLocked}
+            interactionLocked={interactionLocked && !conversationWorking}
             networkAccessEnabled={config.networkAccessEnabled}
             stopping={stopping}
             onError={setError}
@@ -1605,6 +1730,10 @@ export function App(): React.JSX.Element {
               if (maxInputTokensError) {
                 setError(maxInputTokensError)
                 return false
+              }
+              if (conversationWorking && queueEnabled && activeConversationKey) {
+                enqueueMessage(activeConversationKey, content, images, attachments)
+                return true
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
               void sendMessage(content, images, attachments)
