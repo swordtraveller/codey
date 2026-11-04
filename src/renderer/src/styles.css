@@ -645,11 +645,24 @@ body {
 .conversation-queue-count { display: grid; place-items: center; min-width: 19px; height: 19px; border-radius: 10px; padding: 0 5px; background: #e7f2fa; color: #145d93; font-size: 11px; font-weight: 600; }
 .conversation-queue-summary { min-width: 0; overflow: hidden; color: #777; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-queue-items { display: grid; flex: 1 1 auto; min-height: 0; max-height: calc(min(40vh, 320px) - 44px); margin: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 10px 5px; list-style: none; }
-.conversation-queue-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 30px; align-items: center; gap: 8px; min-height: 40px; border-top: 1px solid #edf1f4; }
+.conversation-queue-item { position: relative; display: grid; grid-template-columns: 20px 22px minmax(0, 1fr) auto auto 30px; align-items: center; gap: 8px; min-height: 40px; border-top: 1px solid #edf1f4; }
+.conversation-queue-item.is-dragging { opacity: 0.45; }
+.conversation-queue-item.drop-before::before, .conversation-queue-item.drop-after::after { position: absolute; right: 0; left: 0; height: 2px; background: #0f6cbd; content: ''; pointer-events: none; }
+.conversation-queue-item.drop-before::before { top: 0; }
+.conversation-queue-item.drop-after::after { bottom: 0; }
+.conversation-queue-drag { display: grid; place-items: center; width: 20px; height: 28px; padding: 0; border: 0; border-radius: 3px; color: #84919b; background: transparent; cursor: grab; font-size: 20px; }
+.conversation-queue-drag:active { cursor: grabbing; }
+.conversation-queue-drag:disabled { cursor: default; opacity: 0.4; }
+.conversation-queue-drag:focus-visible { outline: 2px solid #0f6cbd; outline-offset: 1px; }
 .conversation-queue-order { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #dfe5e9; border-radius: 50%; color: #6e7880; font-size: 10px; }
 .conversation-queue-item p { min-width: 0; margin: 0; overflow: hidden; color: #3a3a3a; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-queue-attachment-count { color: #777; font-size: 11px; }
-.conversation-queue-item .fui-Button { min-width: 28px; width: 28px; height: 28px; padding: 0; color: #777; font-size: 18px; }
+.conversation-queue-item .conversation-queue-remove { min-width: 28px; width: 28px; height: 28px; padding: 0; color: #777; font-size: 18px; }
+.conversation-queue-item .conversation-queue-run { min-width: 0; padding: 3px 6px; color: #0f6cbd; white-space: nowrap; }
+.conversation-queue-item .conversation-queue-run:disabled { color: #929292; }
+@media (max-width: 600px) {
+  .conversation-queue-item { grid-template-columns: 18px 19px minmax(0, 1fr) auto auto 28px; gap: 4px; }
+}
 
 .empty-state {
   margin: auto;

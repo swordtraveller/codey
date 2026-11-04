@@ -82,6 +82,9 @@ import { ListSortMenu } from './components/ListSortMenu'
 import { useSidebarSorting } from './hooks/useSidebarSorting'
 import { useListScrollAnchor } from './hooks/useListScrollAnchor'
 import { sortConversations, sortProjects } from '../../shared/list-sorting'
+import { ConversationTurnCoordinator } from './conversation-turn-coordinator'
+import { reorderQueuedMessages } from './message-queue'
+import { QueuedMessageList } from './components/QueuedMessageList'
 
 const isValidContextConfig = isValidContextManagementConfig
 
@@ -171,10 +174,13 @@ export function App(): React.JSX.Element {
   const [queueExpanded, setQueueExpanded] = useState(true)
   const [queueTrayHeight, setQueueTrayHeight] = useState(0)
   const [queueDrainTick, setQueueDrainTick] = useState(0)
+  const [immediateQueueMessages, setImmediateQueueMessages] = useState<Record<string, string>>({})
+  const [turnCoordinator] = useState(() => new ConversationTurnCoordinator(() => setQueueDrainTick((tick) => tick + 1)))
   const messageQueuesRef = useRef(messageQueues)
-  const queueProcessingRef = useRef<Record<string, boolean>>({})
+  const projectsRef = useRef(projects)
   const queueTrayRef = useRef<HTMLElement>(null)
   messageQueuesRef.current = messageQueues
+  projectsRef.current = projects
 
   const {
     activeConversationKey,
@@ -322,7 +328,7 @@ export function App(): React.JSX.Element {
   const activeConversationState = activeConversationKey
     ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
-  const interactionLocked = activeConversationState !== 'idle'
+  const interactionLocked = activeConversationState !== 'idle' || turnCoordinator.isBusy(activeConversationKey) || Boolean(immediateQueueMessages[activeConversationKey])
   const activeQueue = activeConversationKey ? messageQueues[activeConversationKey] ?? [] : []
 
   const projectSettings = useProjectSettings({
@@ -414,6 +420,13 @@ export function App(): React.JSX.Element {
       else delete next[conversationKey]
       return next
     })
+  }
+
+  function reorderQueue(conversationKey: string, sourceId: string, targetId: string, placement: 'before' | 'after'): void {
+    updateMessageQueues((current) => ({
+      ...current,
+      [conversationKey]: reorderQueuedMessages(current[conversationKey] ?? [], sourceId, targetId, placement),
+    }))
   }
 
   useLayoutEffect(() => {
@@ -1255,77 +1268,119 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<boolean> {
-    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string, queuedStart = false, queuedMessage?: QueuedUserMessage): Promise<boolean> {
+    if ((!content && images.length === 0 && attachments.length === 0) || !activeProject || !activeConversation || (!queuedStart && (!canSend || interactionLocked))) {
       return false
     }
 
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
-    const traceId = crypto.randomUUID()
-    const sendStartedAt = performance.now()
-    setError('')
-    const userMessageId = crypto.randomUUID()
-    messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
-    window.codey.recordPerformanceTrace({
-      traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
-      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
+    // A run-now request keeps its original target even if the user switches conversations while stopping.
+    if (!projectsRef.current.some((project) => project.id === projectId && project.conversations.some((conversation) => conversation.id === conversationId))) return false
+    return turnCoordinator.run(conversationKey, async () => {
+      const traceId = crypto.randomUUID()
+      const sendStartedAt = performance.now()
+      try {
+        // Remove only after reserving this conversation; an executing message is no longer pending.
+        if (queuedMessage) removeQueuedMessage(conversationKey, queuedMessage.id)
+        if (conversationKey === activeConversationKeyRef.current) setError('')
+        const userMessageId = crypto.randomUUID()
+        messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
+        window.codey.recordPerformanceTrace({
+          traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
+          durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
+        })
+        beginTurn({ projectId, conversationId, userMessageId, traceId })
+        window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
+        const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
+        if (result.project) {
+          const updatedConversation = result.project.conversations.find(
+            (conversation) => conversation.id === conversationId,
+          )
+          const updatedUserMessage = updatedConversation?.history?.lastUserMessage
+          await messageHistory.refresh()
+          if (updatedUserMessage?.id) updateTurnUserMessage(conversationKey, updatedUserMessage.id)
+          replaceProject(result.project)
+        }
+        finishTurn(conversationKey, {
+          result: result.stopped
+            ? 'stopped'
+            : result.error
+              ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+              : 'normal',
+          error: result.stopped ? undefined : result.error,
+        })
+        if (result.error && conversationKey === activeConversationKeyRef.current) {
+          const files = result.writtenFiles.length
+            ? t('filesWritten', { count: result.writtenFiles.length })
+            : ''
+          setError(`${result.error}${files}`)
+        }
+        return true
+      } catch {
+        if (queuedMessage) {
+          updateMessageQueues((current) => ({ ...current, [conversationKey]: [queuedMessage, ...(current[conversationKey] ?? [])] }))
+          setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
+        }
+        finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
+        if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
+        return false
+      } finally {
+        clearRun(conversationKey)
+      }
     })
-    beginTurn({ projectId, conversationId, userMessageId, traceId })
+  }
 
+  function dispatchQueuedMessage(conversationKey: string, messageId: string, queuedStart = false): Promise<boolean> {
+    const message = messageQueuesRef.current[conversationKey]?.find((item) => item.id === messageId)
+    if (!message) return Promise.resolve(false)
+    return sendMessage(message.content, message.images, message.attachments, undefined, queuedStart, message)
+  }
+
+  async function runQueuedMessageNow(messageId: string): Promise<void> {
+    if (!activeProject || !activeConversation || maxInputTokensError || !(canSend || queueEnabled)
+      || immediateQueueMessages[activeConversationKey]
+      || turnCoordinator.isInterrupting(activeConversationKey)
+      || (conversationWorking && !turnCoordinator.hasTurn(activeConversationKey))
+      || !messageQueuesRef.current[activeConversationKey]?.some((message) => message.id === messageId)) return
+    const conversationKey = activeConversationKey
+    const projectId = activeProject.id
+    const conversationId = activeConversation.id
+    setImmediateQueueMessages((current) => ({ ...current, [conversationKey]: messageId }))
+    const clearImmediate = (): void => setImmediateQueueMessages((current) => {
+      if (current[conversationKey] !== messageId) return current
+      const next = { ...current }
+      delete next[conversationKey]
+      return next
+    })
     try {
-      window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
-      if (result.project) {
-        const updatedConversation = result.project.conversations.find(
-          (conversation) => conversation.id === conversationId,
-        )
-        const updatedUserMessage = updatedConversation?.history?.lastUserMessage
-        await messageHistory.refresh()
-        if (updatedUserMessage?.id) updateTurnUserMessage(conversationKey, updatedUserMessage.id)
-        replaceProject(result.project)
-      }
-      finishTurn(conversationKey, {
-        result: result.stopped
-          ? 'stopped'
-          : result.error
-            ? /timed out/i.test(result.error) ? 'timeout' : 'other'
-            : 'normal',
-        error: result.stopped ? undefined : result.error,
+      await turnCoordinator.runNow(conversationKey, async () => {
+        if (!turnCoordinator.hasTurn(conversationKey)) return
+        setStopping(conversationKey, true)
+        const accepted = await window.codey.stopDevelopment(projectId, conversationId)
+        // The main process may have just finished; the coordinator still waits for renderer cleanup.
+        if (!accepted) setStopping(conversationKey, false)
+      }, () => {
+        clearImmediate()
+        setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: false }))
+        return dispatchQueuedMessage(conversationKey, messageId, true)
       })
-      if (result.error && conversationKey === activeConversationKeyRef.current) {
-        const files = result.writtenFiles.length
-          ? t('filesWritten', { count: result.writtenFiles.length })
-          : ''
-        setError(`${result.error}${files}`)
-      }
-      return true
     } catch {
-      finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
-      if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
-      return false
+      setStopping(conversationKey, false)
+      setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
+      if (conversationKey === activeConversationKeyRef.current) setError(t('unableStopRequest'))
     } finally {
-      clearRun(conversationKey)
+      clearImmediate()
     }
   }
 
   useEffect(() => {
     if (!activeConversationKey || activeConversationState !== 'idle' || !canSend || maxInputTokensError || blockedQueueKeys[activeConversationKey]) return
-    if (queueProcessingRef.current[activeConversationKey] || !messageQueuesRef.current[activeConversationKey]?.length) return
+    if (turnCoordinator.isBusy(activeConversationKey) || !messageQueuesRef.current[activeConversationKey]?.length) return
     const conversationKey = activeConversationKey
     const next = messageQueuesRef.current[conversationKey][0]
-    queueProcessingRef.current[conversationKey] = true
-    void (async () => {
-      try {
-        const sent = await sendMessage(next.content, next.images, next.attachments)
-        if (sent) removeQueuedMessage(conversationKey, next.id)
-        else setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
-      } finally {
-        queueProcessingRef.current[conversationKey] = false
-        if (!blockedQueueKeys[conversationKey]) window.setTimeout(() => setQueueDrainTick((tick) => tick + 1), 0)
-      }
-    })()
+    void dispatchQueuedMessage(conversationKey, next.id)
   }, [activeConversationKey, activeConversationState, blockedQueueKeys, canSend, maxInputTokensError, messageQueues, queueDrainTick])
 
   async function stopMessage(): Promise<void> {
@@ -1663,7 +1718,7 @@ export function App(): React.JSX.Element {
                     {!queueExpanded && <span className="conversation-queue-summary">{activeQueue[0]?.content || activeQueue[0]?.attachments[0]?.name || t('attachment')}</span>}
                   </button>
                   {blockedQueueKeys[activeConversationKey] && (
-                    <Button appearance="subtle" size="small" onClick={() => {
+                    <Button appearance="subtle" size="small" disabled={Boolean(immediateQueueMessages[activeConversationKey])} onClick={() => {
                       setBlockedQueueKeys((current) => {
                         const next = { ...current }
                         delete next[activeConversationKey]
@@ -1672,23 +1727,26 @@ export function App(): React.JSX.Element {
                       setQueueDrainTick((tick) => tick + 1)
                     }}>{t('retryQueuedMessage')}</Button>
                   )}
-                  <Button appearance="subtle" size="small" onClick={() => updateMessageQueues((current) => {
+                  <Button appearance="subtle" size="small" disabled={Boolean(immediateQueueMessages[activeConversationKey])} onClick={() => updateMessageQueues((current) => {
                     const next = { ...current }
                     delete next[activeConversationKey]
                     return next
                   })}>{t('clearQueue')}</Button>
                 </div>
                 {queueExpanded && (
-                  <ol className="conversation-queue-items">
-                    {activeQueue.map((message, index) => (
-                      <li className="conversation-queue-item" key={message.id}>
-                        <span className="conversation-queue-order">{index + 1}</span>
-                        <p title={message.content}>{message.content || message.images[0]?.name || message.attachments[0]?.name || t('attachment')}</p>
-                        {(message.images.length + message.attachments.length > 0) && <span className="conversation-queue-attachment-count">+{message.images.length + message.attachments.length}</span>}
-                        <Button appearance="subtle" size="small" aria-label={t('removeQueuedMessage')} title={t('removeQueuedMessage')} onClick={() => removeQueuedMessage(activeConversationKey, message.id)}>×</Button>
-                      </li>
-                    ))}
-                  </ol>
+                  <QueuedMessageList
+                    key={activeConversationKey}
+                    items={activeQueue.map((message) => ({
+                      id: message.id,
+                      text: message.content || message.images[0]?.name || message.attachments[0]?.name || t('attachment'),
+                      attachmentCount: message.images.length + message.attachments.length,
+                    }))}
+                    pendingId={immediateQueueMessages[activeConversationKey]}
+                    canRunNow={!maxInputTokensError && (canSend || (queueEnabled && turnCoordinator.hasTurn(activeConversationKey)))}
+                    onReorder={(source, target, placement) => reorderQueue(activeConversationKey, source, target, placement)}
+                    onRunNow={(id) => void runQueuedMessageNow(id)}
+                    onRemove={(id) => removeQueuedMessage(activeConversationKey, id)}
+                  />
                 )}
               </section>
             )}
@@ -1736,6 +1794,8 @@ export function App(): React.JSX.Element {
                 return true
               }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
+              // A second Enter can arrive before React publishes the first turn's running state.
+              if (turnCoordinator.isBusy(activeConversationKey)) return false
               void sendMessage(content, images, attachments)
               return true
             }}
