@@ -1,17 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { Button, FluentProvider, Textarea, webLightTheme } from '@fluentui/react-components'
-
-type QueueItem = { id: number; text: string; time: string }
+import { QueuedMessageList } from './components/QueuedMessageList'
+import { createQueuePreviewState, queuePreviewReducer } from './queue-preview-state'
 
 export function QueuePreviewApp(): React.JSX.Element {
-  const [queue, setQueue] = useState<QueueItem[]>([
-    { id: 1, text: '帮我检查一下最近修改的故障转移逻辑，并补充边界测试。', time: '刚刚' },
-    { id: 2, text: '再整理一份这次改动的简短说明。', time: '刚刚' },
-  ])
+  const [{ queue, turns }, dispatch] = useReducer(queuePreviewReducer, undefined, createQueuePreviewState)
   const [draft, setDraft] = useState('')
   const [expanded, setExpanded] = useState(true)
-  const [running, setRunning] = useState(true)
-  const [nextId, setNextId] = useState(3)
+  const running = turns.at(-1)?.running ?? false
   const conversationRef = useRef<HTMLElement>(null)
   const trayRef = useRef<HTMLElement>(null)
   const followLatestRef = useRef(true)
@@ -39,7 +35,7 @@ export function QueuePreviewApp(): React.JSX.Element {
     if (!followLatestRef.current) return
     const conversation = conversationRef.current
     if (conversation) conversation.scrollTop = conversation.scrollHeight
-  }, [safeBottom])
+  }, [safeBottom, turns.length])
 
   const toggleQueue = (): void => {
     const conversation = conversationRef.current
@@ -52,8 +48,7 @@ export function QueuePreviewApp(): React.JSX.Element {
   const addToQueue = (): void => {
     const text = draft.trim()
     if (!text) return
-    setQueue((items) => [...items, { id: nextId, text, time: '刚刚' }])
-    setNextId((id) => id + 1)
+    dispatch({ type: 'enqueue', text })
     setDraft('')
   }
 
@@ -90,16 +85,20 @@ export function QueuePreviewApp(): React.JSX.Element {
             >
             <div className="queue-conversation-inner">
               <div className="queue-date">今天</div>
-              <article className="queue-message user-message">
-                <div className="queue-message-avatar">W</div>
-                <div><div className="queue-message-heading">你 <time>10:42</time></div><p>调研一下会话工作期间，用户继续发送消息并先进入队列，待会话空闲时再从队列取用户消息使会话工作的可行性。</p></div>
-              </article>
-              <article className="queue-message assistant-message">
-                <div className="queue-assistant-mark">C</div>
-                <div><div className="queue-message-heading">Codey <time>正在处理</time></div><p>我在梳理会话忙碌期间的消息处理方式，重点看队列顺序、取消行为和会话空闲后的消费时机。</p>
-                  <div className="queue-working"><span className="queue-pulse"></span><span>正在分析队列消费与会话状态</span><span className="queue-working-time">00:18</span></div>
-                </div>
-              </article>
+              {turns.map((turn) => (
+                <Fragment key={turn.id}>
+                  <article className="queue-message user-message">
+                    <div className="queue-message-avatar">W</div>
+                    <div><div className="queue-message-heading">你</div><p>{turn.text}</p></div>
+                  </article>
+                  <article className="queue-message assistant-message">
+                    <div className="queue-assistant-mark">C</div>
+                    <div><div className="queue-message-heading">Codey <time>{turn.running ? '正在处理' : '已停止'}</time></div><p>{turn.reply}</p>
+                      {turn.running && <div className="queue-working"><span className="queue-pulse"></span><span>正在处理当前消息（演示）</span></div>}
+                    </div>
+                  </article>
+                </Fragment>
+              ))}
             </div>
             </section>
             {queue.length > 0 && <section ref={trayRef} className={`queue-tray queue-tray-overlay ${expanded ? 'is-expanded' : 'is-collapsed'}`}>
@@ -109,16 +108,15 @@ export function QueuePreviewApp(): React.JSX.Element {
                   <strong>待发送</strong><span className="queue-count">{queue.length}</span>
                   <span className="queue-tray-summary">{expanded ? '会话空闲后按顺序发送' : queue[0]?.text}</span>
                 </button>
-                <Button appearance="subtle" size="small" onClick={() => setQueue([])}>清空</Button>
+                <Button appearance="subtle" size="small" onClick={() => dispatch({ type: 'clear' })}>清空</Button>
               </div>
-              {expanded && <ol className="queue-items">{queue.map((item, index) => (
-                <li className="queue-item" key={item.id}>
-                  <span className="queue-item-order">{index + 1}</span>
-                  <p>{item.text}</p>
-                  <span className="queue-item-time">{item.time}</span>
-                  <Button appearance="subtle" size="small" aria-label="移出队列" title="移出队列" onClick={() => setQueue((items) => items.filter((entry) => entry.id !== item.id))}>×</Button>
-                </li>
-              ))}</ol>}
+              {expanded && <QueuedMessageList
+                items={queue.map((item) => ({ ...item, attachmentCount: 0 }))}
+                canRunNow
+                onReorder={(source, target, placement) => dispatch({ type: 'reorder', source, target, placement })}
+                onRunNow={(id) => dispatch({ type: 'run-now', id })}
+                onRemove={(id) => dispatch({ type: 'remove', id })}
+              />}
             </section>}
           </section>
 
@@ -130,13 +128,12 @@ export function QueuePreviewApp(): React.JSX.Element {
                 <div className="queue-composer-tools"><Button appearance="subtle" aria-label="添加附件" title="添加附件">＋</Button><Button appearance="subtle">工具　⌄</Button><span className="queue-input-hint">Enter 发送 · Shift+Enter 换行</span></div>
                 <div className="queue-send-actions">
                   <span className="queue-queued-hint">{running ? '会话运行中，消息将加入队列' : '会话已暂停'}</span>
-                  <Button appearance="primary" className="queue-send-button" onClick={addToQueue} disabled={!draft.trim()}>加入队列 <span>↑</span></Button>
                 </div>
               </div>
             </div>
             <div className="queue-run-controls">
               <span><span className={`queue-status-dot ${running ? 'is-running' : 'is-paused'}`}></span>{running ? '会话正在工作' : '会话已暂停'}</span>
-              <Button appearance="subtle" size="small" onClick={() => setRunning((value) => !value)}>{running ? '■ 停止当前' : '▶ 继续会话'}</Button>
+              <Button appearance="subtle" size="small" onClick={() => dispatch({ type: 'toggle-running' })}>{running ? '■ 停止当前' : '▶ 继续会话'}</Button>
             </div>
           </footer>
         </section>
