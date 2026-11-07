@@ -159,6 +159,7 @@ export function GlobalSettingsPanel({
                 commandExecutionGlobal: next,
               }))}
               modelConfigs={flatModelConfigs}
+              modelGroups={configDraft.modelGroups}
               globalReview={configDraft.commandReviewGlobal}
               onOpenSyntaxHelp={onOpenSyntaxHelp}
               showReview={false}
@@ -170,6 +171,7 @@ export function GlobalSettingsPanel({
             <CommandReviewEditor
               value={configDraft.commandReviewGlobal}
               modelConfigs={flatModelConfigs}
+              modelGroups={configDraft.modelGroups}
               onOpenSyntaxHelp={onOpenSyntaxHelp}
               onChange={(next) => onConfigDraftChange((current) => ({
                 ...current,

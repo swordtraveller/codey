@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type SetStateAction } from 'react'
+import { useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { useTranslation } from 'react-i18next'
 import { flattenModelLink } from '../../../shared/model-targets'
 import {
@@ -14,9 +14,13 @@ import {
   type ProviderConfig,
 } from '../../../shared/types'
 import type { ModelComboOption, ModelSettingsPanelProps } from '../components/ModelSettingsPanel'
+import { deleteModelEntities, extendModelReplacements, invalidModelReferences, modelDeletionImpact, reconcileModelReferences, type ModelDeletionTarget, type ModelReferenceReplacements } from '../../../shared/model-deletion'
+import type { Project } from '../../../shared/types'
+import { settingsEqual } from '../settings-changes'
 
 type UseModelSettingsOptions = {
   config: AppConfig
+  projects?: Project[]
   configDraft: AppConfig
   setConfigDraft: Dispatch<SetStateAction<AppConfig>>
   showToast: (message: string, tone: 'info' | 'error') => void
@@ -25,6 +29,7 @@ type UseModelSettingsOptions = {
 export function useModelSettings({
   config,
   configDraft,
+  projects = [],
   setConfigDraft,
   showToast,
 }: UseModelSettingsOptions) {
@@ -41,6 +46,64 @@ export function useModelSettings({
   const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
   const [connectivityBusy, setConnectivityBusy] = useState(false)
   const [connectivityStatus, setConnectivityStatus] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
+
+  const [deletion, setDeletion] = useState<{ target: ModelDeletionTarget; name: string } | null>(null)
+  const [repair, setRepair] = useState(false)
+  const [referenceChoices, setReferenceChoices] = useState<ModelReferenceReplacements>({})
+  const [replacement, setReplacement] = useState('')
+  const [modelReplacements, setModelReplacements] = useState<ModelReferenceReplacements>({})
+  const draftProjects = deletion || repair ? reconcileModelReferences(configDraft, projects, modelReplacements, false, config).projects : projects
+  const afterDeletion = deletion ? deleteModelEntities(configDraft, deletion.target) : repair ? configDraft : null
+
+  function requestDeletion(target: ModelDeletionTarget, name: string): void {
+    setReplacement('')
+    setReferenceChoices({})
+    setDeletion({ target, name })
+  }
+
+  function requestReferenceRepair(): boolean {
+    const current = reconcileModelReferences(configDraft, projects, modelReplacements, false, config)
+    if (invalidModelReferences(current.config, current.projects).length === 0) return false
+    setReferenceChoices({})
+    setReplacement('')
+    setRepair(true)
+    return true
+  }
+
+  function confirmDeletion(): void {
+    if (!afterDeletion || afterDeletion.models.length === 0 || afterDeletion.providers.length === 0) return
+    const impact = modelDeletionImpact(configDraft, afterDeletion, draftProjects)
+    const bulk = deletion ? extendModelReplacements(modelReplacements, impact.removedIds, replacement || null) : modelReplacements
+    const choices = Object.fromEntries(invalidModelReferences(afterDeletion, draftProjects).map(ref => [ref.key,
+      Object.hasOwn(referenceChoices, ref.key) ? referenceChoices[ref.key] : replacement || null,
+    ]))
+    const replacements = { ...bulk, ...choices }
+    const repaired = reconcileModelReferences(afterDeletion, draftProjects, replacements, false, configDraft)
+    setConfigDraft(repaired.config)
+    setModelReplacements(replacements)
+    setDeletion(null)
+    setRepair(false)
+  }
+
+  const draftGeneration = useRef(0)
+
+  function resetModelSettingsUi(): void {
+    // Ignore stale network replies after Save/Discard and a subsequent reopen.
+    setDeletion(null)
+    setRepair(false)
+    setReferenceChoices({})
+    setReplacement('')
+    setModelReplacements({})
+    draftGeneration.current++
+    setModelCombos(null)
+    setComboBusy(false)
+    setCapabilitiesBusy(false)
+    setConnectivityBusy(false)
+    setConnectivityStatus(null)
+    setSelectedGroupMemberIds([])
+    setGroupMemberProviderFilter('')
+    setGroupMemberModelFilter('')
+  }
 
   const duplicateProviderNames = new Set(configDraft.providers.map((provider) => provider.name.trim().toLowerCase())).size !== configDraft.providers.length
   const duplicateDefinitionModelNames = new Set(configDraft.modelDefinitions.map((definition) => definition.modelName.trim().toLowerCase())).size !== configDraft.modelDefinitions.length
@@ -65,8 +128,6 @@ export function useModelSettings({
       !group.name.trim() ||
       group.modelIds.length === 0 ||
       group.modelIds.some((id) => !modelIds.has(id)))) return true
-    const active = configDraft.activeModelConfigId
-    if (active && !modelIds.has(active) && !configDraft.modelGroups.some((group) => group.id === active)) return true
     return false
   })()
   const flatDraftModelConfigs = configDraft.models
@@ -120,15 +181,7 @@ export function useModelSettings({
   function deleteSelectedProviderDraft(): void {
     const provider = selectedProviderDraft
     if (!provider) return
-    if (configDraft.models.some((model) => model.providerId === provider.id)) {
-      showToast(t('providerInUse'), 'error')
-      return
-    }
-    if (!window.confirm(t('deleteProviderConfirm', { name: provider.name || provider.baseUrl }))) return
-    setConfigDraft((current) => ({
-      ...current,
-      providers: current.providers.filter((entry) => entry.id !== provider.id),
-    }))
+    requestDeletion({ kind: 'provider', id: provider.id }, provider.name || provider.baseUrl)
   }
 
   function updateSelectedDefinition(patch: Partial<ModelDefinition>): void {
@@ -149,15 +202,7 @@ export function useModelSettings({
   function deleteSelectedDefinitionDraft(): void {
     const definition = selectedDefinitionDraft
     if (!definition) return
-    if (configDraft.models.some((model) => model.definitionId === definition.id)) {
-      showToast(t('definitionInUse'), 'error')
-      return
-    }
-    if (!window.confirm(t('deleteDefinitionConfirm', { name: definition.modelName }))) return
-    setConfigDraft((current) => ({
-      ...current,
-      modelDefinitions: current.modelDefinitions.filter((entry) => entry.id !== definition.id),
-    }))
+    requestDeletion({ kind: 'definition', id: definition.id }, definition.modelName)
   }
 
   function updateSelectedLink(patch: Partial<ModelLink>): void {
@@ -174,6 +219,7 @@ export function useModelSettings({
   async function queryModelCombos(): Promise<void> {
     if (comboBusy) return
     setComboBusy(true)
+    const generation = draftGeneration.current
     try {
       const results = await Promise.all(configDraft.providers.map(async (provider) => {
         try {
@@ -183,6 +229,7 @@ export function useModelSettings({
           return { provider, models: [] as string[] }
         }
       }))
+      if (generation !== draftGeneration.current) return
       const existing = new Set(configDraft.models.map((model) => `${model.providerId}:${model.definitionId}`))
       const combos: ModelComboOption[] = []
       for (const definition of configDraft.modelDefinitions) {
@@ -202,7 +249,7 @@ export function useModelSettings({
       }
       setModelCombos(combos)
     } finally {
-      setComboBusy(false)
+      if (generation === draftGeneration.current) setComboBusy(false)
     }
   }
 
@@ -258,18 +305,7 @@ export function useModelSettings({
   function deleteSelectedModelLinkDraft(): void {
     const link = selectedModelLinkDraft
     if (!link) return
-    if (!window.confirm(t('deleteModelConfigConfirm', { name: link.name }))) return
-    setConfigDraft((current) => ({
-      ...current,
-      models: current.models.filter((entry) => entry.id !== link.id),
-      // Strip the link from every group and drop groups left empty.
-      modelGroups: current.modelGroups
-        .map((group) => ({ ...group, modelIds: group.modelIds.filter((id) => id !== link.id) }))
-        .filter((group) => group.modelIds.length > 0),
-      activeModelConfigId: current.activeModelConfigId === link.id
-        ? (current.models.find((entry) => entry.id !== link.id)?.id ?? null)
-        : current.activeModelConfigId,
-    }))
+    requestDeletion({ kind: 'model', id: link.id }, link.name)
   }
 
   function updateSelectedGroup(patch: Partial<ModelGroupConfig>): void {
@@ -299,14 +335,7 @@ export function useModelSettings({
   function deleteSelectedGroupDraft(): void {
     const group = selectedGroupDraft
     if (!group) return
-    if (!window.confirm(t('deleteGroupConfirm', { name: group.name }))) return
-    setConfigDraft((current) => ({
-      ...current,
-      modelGroups: current.modelGroups.filter((entry) => entry.id !== group.id),
-      activeModelConfigId: current.activeModelConfigId === group.id
-        ? (current.models[0]?.id ?? null)
-        : current.activeModelConfigId,
-    }))
+    requestDeletion({ kind: 'group', id: group.id }, group.name)
   }
 
   function moveGroupMember(groupId: string, modelId: string, targetIndex: number): void {
@@ -349,8 +378,10 @@ export function useModelSettings({
     if (!provider || connectivityBusy || !provider.baseUrl.trim() || !provider.apiKey.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.testProviderConnectivity({ baseUrl: provider.baseUrl, apiKey: provider.apiKey })
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -369,9 +400,10 @@ export function useModelSettings({
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } catch {
+      if (generation !== draftGeneration.current) return
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } finally {
-      setConnectivityBusy(false)
+      if (generation === draftGeneration.current) setConnectivityBusy(false)
     }
   }
 
@@ -381,8 +413,10 @@ export function useModelSettings({
     if (!flat || connectivityBusy || !flat.baseUrl.trim() || !flat.modelName.trim()) return
     setConnectivityBusy(true)
     setConnectivityStatus(null)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.testModelConnectivity(flat)
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
         setConnectivityStatus({ tone: 'ok', text: t('connectivityOk', { count: result.models }) })
         return
@@ -401,9 +435,10 @@ export function useModelSettings({
       }
       setConnectivityStatus({ tone: 'error', text: t('connectivityEndpointError', { detail: result.detail }) })
     } catch {
+      if (generation !== draftGeneration.current) return
       setConnectivityStatus({ tone: 'error', text: t('connectivityNetworkError') })
     } finally {
-      setConnectivityBusy(false)
+      if (generation === draftGeneration.current) setConnectivityBusy(false)
     }
   }
 
@@ -413,17 +448,24 @@ export function useModelSettings({
       return
     }
     setCapabilitiesBusy(true)
+    const generation = draftGeneration.current
     try {
       const result = await window.codey.fetchModelCapabilities(modelName)
+      if (generation !== draftGeneration.current) return
       if (result.status === 'ok') {
-        updateSelectedDefinition({
+        const patch: Partial<ModelDefinition> = {
           ...(result.maxContextTokens !== undefined ? { modelMaxContext: result.maxContextTokens } : {}),
           ...(result.maxOutputTokens !== undefined ? { modelMaxOutputTokens: result.maxOutputTokens } : {}),
           supportsImageInput: result.image,
           supportsPdfInput: result.pdf,
           supportsVideoInput: result.video,
           supportsAudioInput: result.audio,
-        })
+        }
+        const definitionId = selectedDefinitionDraft?.id
+        setConfigDraft(current => ({
+          ...current,
+          modelDefinitions: current.modelDefinitions.map(definition => definition.id === definitionId && definition.modelName.trim() === modelName ? { ...definition, ...patch } : definition),
+        }))
         showToast(t('modelCapabilitiesFetched'), 'info')
         return
       }
@@ -433,15 +475,19 @@ export function useModelSettings({
       }
       showToast(t('modelCapabilitiesNetworkError'), 'error')
     } catch {
+      if (generation !== draftGeneration.current) return
       showToast(t('modelCapabilitiesNetworkError'), 'error')
     } finally {
-      setCapabilitiesBusy(false)
+      if (generation === draftGeneration.current) setCapabilitiesBusy(false)
     }
   }
 
   const panelProps: ModelSettingsPanelProps = {
     configDraft,
-    settingsDirty: configDraft !== config,
+    settingsDirty: !settingsEqual(configDraft.providers, config.providers)
+      || !settingsEqual(configDraft.modelDefinitions, config.modelDefinitions)
+      || !settingsEqual(configDraft.models, config.models)
+      || !settingsEqual(configDraft.modelGroups, config.modelGroups),
     connectivityBusy,
     connectivityStatus,
     providers: {
@@ -501,9 +547,22 @@ export function useModelSettings({
   }
 
   return {
+    modelReplacements,
+    requestReferenceRepair,
+    deletionDialogProps: afterDeletion ? {
+      before: configDraft, after: afterDeletion, projects: draftProjects, name: deletion?.name ?? '',
+      repairOnly: repair, referenceChoices,
+      onReferenceChoice: (key: string, id: string | null) => setReferenceChoices(current => ({ ...current, [key]: id })),
+      replacement, onReplacement: (id: string) => {
+        setReplacement(id)
+        setReferenceChoices(Object.fromEntries(invalidModelReferences(afterDeletion, draftProjects).map(ref => [ref.key, id || null])))
+      },
+      onCancel: () => { setDeletion(null); setRepair(false) }, onConfirm: confirmDeletion,
+    } : null,
     panelProps,
     createSettingsDraft,
     invalidModelConfig,
+    resetModelSettingsUi,
     flatDraftModelConfigs,
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,

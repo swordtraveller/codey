@@ -1,3 +1,6 @@
+import { modelReadinessIssue, modelReadinessMessage } from '../shared/model-readiness'
+import { recoverModelReferenceUpdate } from './model-reference-update'
+import type { ModelReferenceReplacements } from '../shared/model-deletion'
 import type { UsageAnalyticsQuery } from '../shared/usage-analytics'
 import { randomUUID } from 'node:crypto'
 import { access, appendFile } from 'node:fs/promises'
@@ -55,7 +58,7 @@ import { createTodoToolProvider } from './todo-tool'
 import { createHotLongTermTools } from './hot-long-term'
 import { getAppIconPath } from './app-icon'
 import { checkForUpdates, latestReleasePageUrl } from './update-check'
-import { readConfig, saveConfig } from './config'
+import { readConfig, saveConfig, saveSidebarSort } from './config'
 import type { CommandExecutorRuntime, CommandReviewDecision } from './command-executor'
 import { resolveContextManagementConfig } from './context-config'
 import {
@@ -88,7 +91,7 @@ import { BridgeHandoverService } from './bridge'
 import { getFrontendServer, onFrontendServerEnded, stopAllFrontendServers } from './frontend-runtime'
 import { captureDisplay, copyImageToClipboard, createImageAttachment, cropScreenshot } from './screenshot'
 import { closeAllPreviewWindows, closePreviewWindow, openPreviewWindow } from './preview-window'
-import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveModelById } from './model-config'
+import { createModelConfigSnapshot, isValidModelTargetId, resolveConversationModel, resolveAuditModelTarget } from './model-config'
 import { fetchModelCapabilities } from './model-capabilities'
 import { listProviderModels, testModelConnectivity, testProviderConnectivity } from './model-connectivity'
 import { buildAuditPromptTemplate } from './command-executor'
@@ -117,6 +120,7 @@ import {
   getProjectLive,
   getProjects,
   getProjectsForRenderer,
+  saveModelConfiguration,
   projectForRenderer,
   getConversationMessagePage,
   getProjectsLive,
@@ -144,7 +148,7 @@ import {
   updateConversationTurn,
   taskRunJournalPath,
 } from './workspace'
-import { isAuditModelAllowed, resolveCommandExecutionConfig } from './command-execution-config'
+import { resolveCommandExecutionConfig } from './command-execution-config'
 import { buildMemoryPattern, type CommandRuleLayer } from '../shared/command-rules'
 import { isContextConfigValidForModel } from './context-config'
 import { commandComboUsable, detectShells, getCachedShellDetection, getWsl2ManualConfig, listUserWslDistros, setManualBashPath, setWsl2ManualConfig, translateGitBashLauncher } from './shell-detect'
@@ -272,19 +276,24 @@ function setConversationState(
   }
 }
 
+let modelConfigurationSaving = false
+
 function ensureIdle(projectId: string, conversationId: string): void {
+  if (modelConfigurationSaving) throw new Error('Model configuration is being saved')
   if (getConversationState(projectId, conversationId) !== 'idle') {
     throw new Error('The conversation must be idle')
   }
 }
 
 function ensureAllIdle(): void {
+  if (modelConfigurationSaving) throw new Error('Model configuration is being saved')
   if ([...conversationStates.values()].some((state) => state !== 'idle')) {
     throw new Error('Context settings cannot be changed during a conversation round or debug operation')
   }
 }
 
 function ensureProjectIdle(projectId: string): void {
+  if (modelConfigurationSaving) throw new Error('Model configuration is being saved')
   const busy = [...conversationStates.entries()].some(([key, state]) => key.startsWith(`${projectId}:`) && state !== 'idle')
   if (busy) throw new Error('The project must be idle')
 }
@@ -317,17 +326,17 @@ async function validateModelConfigId(modelConfigId: string | null): Promise<void
 }
 
 /** Validates an enabled command-execution config: the combo must be usable and
- *  the audit model (when enabled) must resolve and differ from the session
- *  model. Enforced again at execution time. */
+ *  the audit target (when enabled) must resolve. Candidate names are checked
+ *  against the actual session model at execution time. */
 async function validateCommandExecution(config: CommandExecutionConfig): Promise<void> {
   if (!commandComboUsable(config.interpreter, config.environment, getCachedShellDetection())) {
     throw new Error('The selected interpreter/environment combination is not available. Run environment detection in settings.')
   }
   if (config.review?.reviewers.auditModel) {
     const { auditModelConfigId } = config.review.reviewers
-    if (!auditModelConfigId) throw new Error('An audit model is required when model audit is enabled')
+    if (!auditModelConfigId) return
     const appConfig = await readConfig()
-    const auditModel = resolveModelById(appConfig, auditModelConfigId)
+    const auditModel = resolveAuditModelTarget(appConfig, auditModelConfigId)
     if (!auditModel) throw new Error('The audit model configuration was not found')
   }
 }
@@ -717,6 +726,9 @@ async function developProject(
   if (!conversation) return { project, writtenFiles: [], error: 'Conversation not found' }
 
   const appConfig = await readConfig()
+  const readinessIssue = modelReadinessIssue(appConfig, project, conversation)
+  if (readinessIssue) return { project, writtenFiles: [], error: modelReadinessMessage(readinessIssue, appConfig.language === 'system' ? (app.getLocale().startsWith('zh') ? 'zh-CN' : 'en') : appConfig.language) }
+
   const effectiveSkillIds = resolveSkillSelection(
     appConfig.defaultSkillIds,
     project.skillSelection,
@@ -765,7 +777,7 @@ async function developProject(
         signal,
         sessionModelName: modelConfig.modelName,
         ruleLayers,
-        resolveAuditModel: async (configId) => resolveModelById(appConfig, configId),
+        resolveAuditModel: async (configId) => resolveAuditModelTarget(appConfig, configId),
         requestConfirmation: (request) => requestCommandApproval(request, { projectId, conversationId }),
         recordDecision: (entry) => appendCommandReviewHistory({ ...entry, projectId, conversationId }),
       }
@@ -888,6 +900,7 @@ async function developProject(
           traceId,
           signal,
           latestUserMessageId: userMessageId,
+          lastUsedModelId: conversation.lastUsedModelId,
           allowCustomStrategy,
           roundId,
           roundCount,
@@ -923,6 +936,7 @@ async function developProject(
       conversationId,
       result.agentMessages,
       result.context,
+      result.lastUsedModelId,
     )
     try {
       await latestContextWrite
@@ -940,7 +954,7 @@ async function developProject(
         .join('\n\n')
       pendingBlocks = []
       const assistantMessageId = randomUUID()
-      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId)
+      project = await addMessage(projectId, conversationId, 'assistant', content, messageBlocks, undefined, undefined, undefined, undefined, undefined, undefined, assistantMessageId, new Date(startedAt).toISOString())
       await captureCodeReadSnapshots(project, conversationId, assistantMessageId, content)
     }
     for (const item of result.timeline) {
@@ -1010,7 +1024,7 @@ async function developProject(
 }
 
 async function processBridgeMessage(message: import('../shared/bridge').HandoverUserMessage): Promise<boolean> {
-  if (getConversationState(message.projectId, message.conversationId) !== 'idle') return false
+  if (modelConfigurationSaving || getConversationState(message.projectId, message.conversationId) !== 'idle') return false
   const key = conversationKey(message.projectId, message.conversationId)
   const controller = new AbortController()
   const publishProject = (project: Project): void => {
@@ -1289,7 +1303,8 @@ function openPerformanceTraceWindow(fileName: string): void {
 
 app.setAppUserModelId('com.codey.desktop')
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await recoverModelReferenceUpdate()
   // Electron's default Windows/Linux menu is shown when Alt is pressed, even when autoHideMenuBar is enabled.
   // This app does not expose a native application menu; remove it entirely on platforms with window menu bars.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
@@ -1341,13 +1356,19 @@ app.whenReady().then(() => {
     resolve(response)
     return true
   })
-  ipcMain.handle('config:save', async (_event, config: AppConfig) => {
+  ipcMain.handle('config:sidebar-sort', (_event, preferences: unknown) => saveSidebarSort(preferences))
+  ipcMain.handle('config:save', async (_event, config: AppConfig, replacements?: ModelReferenceReplacements) => {
     ensureAllIdle()
-    const saved = await saveConfig(config)
-    notificationManager.updateSettings(saved.notificationSettings)
-    updateKeepAwake(saved)
-    setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
-    return saved
+    modelConfigurationSaving = true
+    try {
+      const saved = await saveModelConfiguration(config, replacements)
+      notificationManager.updateSettings(saved.notificationSettings)
+      updateKeepAwake(saved)
+      setPerformanceTracingEnabled(saved.developerMode && saved.performanceTracingEnabled)
+      return saved
+    } finally {
+      modelConfigurationSaving = false
+    }
   })
   ipcMain.handle(
     'mcp:test-stdio-server',
@@ -1496,6 +1517,7 @@ app.whenReady().then(() => {
   ipcMain.handle('projects:set-model-config', async (_event, projectId: string, modelConfigId: string | null) => {
     ensureAllIdle()
     await validateModelConfigId(modelConfigId)
+    ensureProjectIdle(projectId)
     return setProjectModelConfig(projectId, modelConfigId).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-context-config', (_event, projectId: string, contextConfig: ContextManagementConfig | null) => {
@@ -1525,6 +1547,7 @@ app.whenReady().then(() => {
   ipcMain.handle('conversations:set-model-config', async (_event, projectId: string, conversationId: string, modelConfigId: string | null) => {
     ensureIdle(projectId, conversationId)
     await validateModelConfigId(modelConfigId)
+    ensureIdle(projectId, conversationId)
     return setConversationModelConfig(projectId, conversationId, modelConfigId).then(projectForRenderer)
   })
   ipcMain.handle('conversations:set-context-config', (_event, projectId: string, conversationId: string, contextConfig: ContextManagementConfig | null) => {
@@ -1548,6 +1571,7 @@ app.whenReady().then(() => {
     if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
+    ensureIdle(projectId, conversationId)
     return setConversationCommandExecution(projectId, conversationId, commandExecution).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-command-execution-default', async (_event, projectId: string, commandExecution: CommandExecutionConfig | null) => {
@@ -1555,6 +1579,7 @@ app.whenReady().then(() => {
     if (commandExecution?.enabled) {
       await validateCommandExecution(commandExecution)
     }
+    ensureProjectIdle(projectId)
     return setProjectCommandExecutionDefault(projectId, commandExecution).then(projectForRenderer)
   })
   ipcMain.handle('projects:set-agent-limits-default', (_event, projectId: string, agentLimits: AgentLimitsConfig | null) => {
@@ -1617,8 +1642,9 @@ app.whenReady().then(() => {
     closePendingScreenshot(captureId, null)
   })
 
+  ipcMain.handle('conversations:runtime-states', () => Object.fromEntries(conversationStates))
   ipcMain.handle('development:send', async (event, projectId: string, conversationId: string, content: string, images: ImageAttachment[] = [], attachments: MediaAttachment[] = [], traceId?: string, continueFromMessageId?: string) => {
-    if (getConversationState(projectId, conversationId) !== 'idle') {
+    if (modelConfigurationSaving || getConversationState(projectId, conversationId) !== 'idle') {
       return { writtenFiles: [], error: 'A conversation round or debug operation is already running' }
     }
     const key = conversationKey(projectId, conversationId)

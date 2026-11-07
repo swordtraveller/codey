@@ -1,3 +1,4 @@
+import { modelReadinessIssue } from '../../shared/model-readiness'
 import type { MessageNavigationTarget } from '../../shared/message-navigation'
 import { conversationReadState } from '../../shared/conversation-read-state'
 import {
@@ -17,7 +18,7 @@ import {
   Textarea,
   webLightTheme,
 } from '@fluentui/react-components'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { setAppLanguage } from './i18n'
@@ -46,7 +47,7 @@ import {
   type ShellDetectionResult,
   type Wsl2ManualConfig,
 } from '../../shared/types'
-import { UnreadBadge } from './components/UnreadBadge'
+import { SidebarStatus } from './components/SidebarStatus'
 import { McpSettings } from './components/McpSettings'
 import type { UpdateCheckResult } from '../../shared/update-check'
 import { flattenModelLink, resolveModelTarget } from '../../shared/model-targets'
@@ -58,6 +59,10 @@ import {
 } from './components/CommandReviewSettings'
 import { GlobalSettingsPanel, type GlobalSettingsTab } from './components/GlobalSettingsPanel'
 import { ModelSettingsPanel } from './components/ModelSettingsPanel'
+import { reconcileModelReferences } from '../../shared/model-deletion'
+import { ModelDeletionDialog } from './components/ModelDeletionDialog'
+import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog'
+import { getSettingsChanges } from './settings-changes'
 import { SkillsSettingsPanel } from './components/SkillsSettingsPanel'
 import { KnowledgeBaseSettingsPanel } from './components/KnowledgeBaseSettingsPanel'
 import { AppPreferencesPanel } from './components/AppPreferencesPanel'
@@ -73,6 +78,13 @@ import { useProjectSettings } from './hooks/useProjectSettings'
 import { useConversationSettings } from './hooks/useConversationSettings'
 import { useModelSettings } from './hooks/useModelSettings'
 import { AnalyticsDialog } from './components/AnalyticsDialog'
+import { ListSortMenu } from './components/ListSortMenu'
+import { useSidebarSorting } from './hooks/useSidebarSorting'
+import { useListScrollAnchor } from './hooks/useListScrollAnchor'
+import { sortConversations, sortProjects } from '../../shared/list-sorting'
+import { ConversationTurnCoordinator } from './conversation-turn-coordinator'
+import { reorderQueuedMessages } from './message-queue'
+import { QueuedMessageList } from './components/QueuedMessageList'
 
 const isValidContextConfig = isValidContextManagementConfig
 
@@ -80,8 +92,16 @@ type RenameTarget =
   | { kind: 'project'; projectId: string; name: string }
   | { kind: 'conversation'; projectId: string; conversationId: string; name: string }
 
+type QueuedUserMessage = {
+  id: string
+  content: string
+  images: ImageAttachment[]
+  attachments: MediaAttachment[]
+  createdAt: number
+}
+
 export function App(): React.JSX.Element {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('')
   const [activeConversationId, setActiveConversationId] = useState('')
@@ -144,9 +164,23 @@ export function App(): React.JSX.Element {
   const conversationRef = useRef<HTMLDivElement>(null)
   const conversationEndRef = useRef<HTMLDivElement>(null)
   const toastTimerRef = useRef<number | undefined>(undefined)
-  const settingsOpenedOnceRef = useRef(false)
+  const savingSettingsRef = useRef(false)
+  const [settingsBaseline, setSettingsBaseline] = useState(defaultAppConfig)
+  const [settingsExitTarget, setSettingsExitTarget] = useState<'close' | 'archive' | null>(null)
   const [settingsTab, setSettingsTab] = useState<'models' | 'global' | 'skills' | 'knowledgeBases' | 'mcp' | 'language' | 'power' | 'archive' | 'developer' | 'prompts' | 'notifications' | 'about'>('models')
   const [globalSettingsTab, setGlobalSettingsTab] = useState<GlobalSettingsTab>('model')
+  const [messageQueues, setMessageQueues] = useState<Record<string, QueuedUserMessage[]>>({})
+  const [blockedQueueKeys, setBlockedQueueKeys] = useState<Record<string, boolean>>({})
+  const [queueExpanded, setQueueExpanded] = useState(true)
+  const [queueTrayHeight, setQueueTrayHeight] = useState(0)
+  const [queueDrainTick, setQueueDrainTick] = useState(0)
+  const [immediateQueueMessages, setImmediateQueueMessages] = useState<Record<string, string>>({})
+  const [turnCoordinator] = useState(() => new ConversationTurnCoordinator(() => setQueueDrainTick((tick) => tick + 1)))
+  const messageQueuesRef = useRef(messageQueues)
+  const projectsRef = useRef(projects)
+  const queueTrayRef = useRef<HTMLElement>(null)
+  messageQueuesRef.current = messageQueues
+  projectsRef.current = projects
 
   const {
     activeConversationKey,
@@ -162,18 +196,37 @@ export function App(): React.JSX.Element {
     updateTurnUserMessage,
   } = useConversationRuntime({ activeProjectId, activeConversationId })
 
-  const visibleProjects = projects.filter((project) => !project.archived)
+  const { sortingSaving, saveSort } = useSidebarSorting({ config, setConfig, setConfigDraft, onError: (message) => showToast(message, 'error') })
+  const visibleProjects = useMemo(() => sortProjects(
+    projects.filter((project) => !project.archived), config.sidebarSort.projects, i18n.resolvedLanguage,
+  ), [projects, config.sidebarSort.projects, i18n.resolvedLanguage])
+  const projectListScroll = useListScrollAnchor(visibleProjects.map((project) => project.id))
   const activeProject = visibleProjects.find((project) => project.id === activeProjectId)
   const { dialogProps: helpDialogProps, openHelp, openCommandRulesHelp, invalidateToolHelp } = useHelpDialog(activeProject?.folders[0]?.path)
   const {
     panelProps: modelSettingsPanelProps,
+    deletionDialogProps,
+    modelReplacements,
+    requestReferenceRepair,
     createSettingsDraft,
     invalidModelConfig,
+    resetModelSettingsUi,
     flatDraftModelConfigs,
     sortedConfigDraftModelGroups,
     sortedConfigDraftModels,
-  } = useModelSettings({ config, configDraft, setConfigDraft, showToast })
-  const visibleConversations = activeProject?.conversations.filter((conversation) => !conversation.archived) ?? []
+  } = useModelSettings({ config, configDraft, projects, setConfigDraft, showToast })
+  const settingsChanges = useMemo(() => {
+    const changes = getSettingsChanges(settingsBaseline, configDraft)
+    if (Object.keys(modelReplacements).some(key => key.startsWith('ref:'))) {
+      changes.push({ section: 'modelReferenceRepairTitle', kind: 'modified' })
+    }
+    return changes
+  }, [settingsBaseline, configDraft, modelReplacements])
+
+  const visibleConversations = useMemo(() => sortConversations(
+    activeProject?.conversations.filter((conversation) => !conversation.archived) ?? [], config.sidebarSort.conversations, i18n.resolvedLanguage,
+  ), [activeProject, config.sidebarSort.conversations, i18n.resolvedLanguage])
+  const conversationListScroll = useListScrollAnchor(visibleConversations.map((conversation) => conversation.id), activeProjectId)
   const archivedProjects = projects.filter((project) => project.archived)
   const archivedConversations = projects
     .filter((project) => !project.archived)
@@ -224,20 +277,22 @@ export function App(): React.JSX.Element {
     }
     return errors
   }, [projects])
-  const projectUnreadState = useMemo((): Record<string, { count: number; error: boolean }> => {
-    const state: Record<string, { count: number; error: boolean }> = {}
+  const projectNavState = useMemo((): Record<string, { count: number; error: boolean; runningCount: number }> => {
+    const state: Record<string, { count: number; error: boolean; runningCount: number }> = {}
     for (const project of projects) {
       let count = 0
       let error = false
+      let runningCount = 0
       for (const conv of project.conversations) {
         if (conv.archived) continue
         count += unreadCounts[conv.id] || 0
         if (conversationErrors[conv.id]) error = true
+        if (conversationStates[`${project.id}:${conv.id}`] === 'running') runningCount++
       }
-      state[project.id] = { count, error }
+      state[project.id] = { count, error, runningCount }
     }
     return state
-  }, [projects, unreadCounts, conversationErrors])
+  }, [projects, unreadCounts, conversationErrors, conversationStates])
   const projectModelConfigId = activeProject?.defaultModelConfigId ?? config.activeModelConfigId
   const effectiveModelConfigId = activeConversation?.modelConfigId ?? projectModelConfigId
   const effectiveModelConfig = resolveModelTarget(config, effectiveModelConfigId)
@@ -245,7 +300,7 @@ export function App(): React.JSX.Element {
   const displayedSessionModel = sessionModelDisplay?.key === activeConversationKey
     ? sessionModelDisplay
     : effectiveModelMember
-  /** Single models flattened (audit-model pickers list models only, no groups). */
+  /** Flattened individual choices; audit pickers also include model groups. */
   const flatModelConfigs = config.models
     .map((model) => flattenModelLink(config, model))
     .filter((model): model is ModelConfig => model !== undefined)
@@ -273,7 +328,8 @@ export function App(): React.JSX.Element {
   const activeConversationState = activeConversationKey
     ? conversationStates[activeConversationKey] ?? 'idle'
     : 'idle'
-  const interactionLocked = activeConversationState !== 'idle'
+  const interactionLocked = activeConversationState !== 'idle' || turnCoordinator.isBusy(activeConversationKey) || Boolean(immediateQueueMessages[activeConversationKey])
+  const activeQueue = activeConversationKey ? messageQueues[activeConversationKey] ?? [] : []
 
   const projectSettings = useProjectSettings({
     config,
@@ -321,7 +377,9 @@ export function App(): React.JSX.Element {
       activeConversation.contextConfigOverride ?? activeProject?.contextConfigOverride ?? config.contextManagement,
       effectiveModelConfig.modelMaxContext,
     ))
-  const canSend = Boolean(messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const modelIssue = activeProject && activeConversation ? modelReadinessIssue(config, activeProject, activeConversation) : null
+  const canSend = Boolean(!modelIssue && messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && !interactionLocked && !conversationContextConfigInvalid)
+  const queueEnabled = Boolean(!modelIssue && messageHistory.loaded && configured && activeProject?.folders.length && activeConversation && conversationWorking && !conversationContextConfigInvalid)
   const lastUserMessage = activeConversation
     ? [...activeConversation.messages].reverse().find((message) => message.role === 'user')
     : undefined
@@ -338,6 +396,57 @@ export function App(): React.JSX.Element {
         : prompts[0]
     void sendMessage(content, [], [], lastUserMessage.id)
   }
+
+  function updateMessageQueues(update: (current: Record<string, QueuedUserMessage[]>) => Record<string, QueuedUserMessage[]>): void {
+    const next = update(messageQueuesRef.current)
+    messageQueuesRef.current = next
+    setMessageQueues(next)
+  }
+
+  function enqueueMessage(conversationKey: string, content: string, images: ImageAttachment[], attachments: MediaAttachment[]): void {
+    updateMessageQueues((current) => ({
+      ...current,
+      [conversationKey]: [...(current[conversationKey] ?? []), {
+        id: crypto.randomUUID(), content, images, attachments, createdAt: Date.now(),
+      }],
+    }))
+  }
+
+  function removeQueuedMessage(conversationKey: string, messageId: string): void {
+    updateMessageQueues((current) => {
+      const remaining = (current[conversationKey] ?? []).filter((message) => message.id !== messageId)
+      const next = { ...current }
+      if (remaining.length) next[conversationKey] = remaining
+      else delete next[conversationKey]
+      return next
+    })
+  }
+
+  function reorderQueue(conversationKey: string, sourceId: string, targetId: string, placement: 'before' | 'after'): void {
+    updateMessageQueues((current) => ({
+      ...current,
+      [conversationKey]: reorderQueuedMessages(current[conversationKey] ?? [], sourceId, targetId, placement),
+    }))
+  }
+
+  useLayoutEffect(() => {
+    const tray = queueTrayRef.current
+    setQueueTrayHeight(tray?.getBoundingClientRect().height ?? 0)
+  }, [activeQueue.length, queueExpanded])
+
+  useEffect(() => {
+    const tray = queueTrayRef.current
+    if (!tray) return
+    const observer = new ResizeObserver(() => setQueueTrayHeight(tray.getBoundingClientRect().height))
+    observer.observe(tray)
+    return () => observer.disconnect()
+  }, [activeConversationKey, activeQueue.length, queueExpanded])
+
+  useLayoutEffect(() => {
+    if (showScrollToBottom || queueTrayHeight <= 0) return
+    const conversation = conversationRef.current
+    if (conversation) conversation.scrollTop = conversation.scrollHeight
+  }, [queueTrayHeight, showScrollToBottom])
 
   useEffect(() => {
     void window.codey
@@ -528,6 +637,7 @@ export function App(): React.JSX.Element {
         ...current,
         defaultSkillIds: current.defaultSkillIds.filter((id) => id !== skill.id),
       }))
+      setSettingsBaseline(current => ({ ...current, defaultSkillIds: current.defaultSkillIds.filter(id => id !== skill.id) }))
       if (skillPreview?.skillId === skill.id) setSkillPreview(null)
     } catch (reason) {
       setSkillError(reason instanceof Error ? reason.message : t('unableRemoveSkill'))
@@ -652,6 +762,7 @@ export function App(): React.JSX.Element {
         ...current,
         defaultKnowledgeBaseIds: current.defaultKnowledgeBaseIds.filter((id) => id !== knowledgeBase.id),
       }))
+      setSettingsBaseline(current => ({ ...current, defaultKnowledgeBaseIds: current.defaultKnowledgeBaseIds.filter(id => id !== knowledgeBase.id) }))
     } catch (reason) {
       setKnowledgeBaseError(reason instanceof Error ? reason.message : t('unableRemoveKnowledgeBase'))
     } finally {
@@ -715,20 +826,36 @@ export function App(): React.JSX.Element {
     setOpenProjectMenuId(null)
   }
 
-  function openArchiveList(): void {
+  function finishSettingsExit(target: 'close' | 'archive', nextConfig = config): void {
+    resetModelSettingsUi()
+    setConfigDraft(nextConfig)
+    setSettingsBaseline(nextConfig)
+    setSettingsError('')
+    setSettingsExitTarget(null)
     setSettingsOpen(false)
-    setArchiveError('')
-    setArchiveDialogOpen(true)
+    if (target === 'archive') {
+      setArchiveError('')
+      setArchiveDialogOpen(true)
+    }
+  }
+
+  function requestSettingsExit(target: 'close' | 'archive' = 'close'): void {
+    if (savingSettingsRef.current || settingsExitTarget || deletionDialogProps) return
+    if (settingsChanges.length > 0) setSettingsExitTarget(target)
+    else finishSettingsExit(target)
+  }
+
+  function openArchiveList(): void {
+    requestSettingsExit('archive')
   }
 
   function openSettings(): void {
-    // Keep unsaved drafts (e.g. a freshly added model configuration) across
-    // dialog close/reopen; only seed once when the dialog has never been
-    // opened or after a successful save replaced the draft.
-    if (!settingsOpenedOnceRef.current || configDraft === config) {
-      setConfigDraft(createSettingsDraft())
-      settingsOpenedOnceRef.current = true
-    }
+    resetModelSettingsUi()
+    const draft = createSettingsDraft()
+    setConfigDraft(draft)
+    // Automatically seeded first-run placeholders are not user edits.
+    setSettingsBaseline(draft)
+    setSettingsExitTarget(null)
     setSettingsError('')
     void window.codey.getCachedShellDetection().then((cached) => {
       if (cached) setShellDetection(cached)
@@ -992,20 +1119,24 @@ export function App(): React.JSX.Element {
   }
 
   async function saveSettings(): Promise<void> {
+    if (savingSettingsRef.current || settingsSaveDisabled || requestReferenceRepair()) return
+    savingSettingsRef.current = true
     setSaving(true)
     setSettingsError('')
 
     try {
-      const saved = await window.codey.saveConfig(configDraft)
+      const saved = await window.codey.saveConfig(configDraft, modelReplacements)
+      setProjects(current => reconcileModelReferences(saved, current, modelReplacements, false, config).projects)
       setConfig(saved)
       setConfigDraft(saved)
       setAppLanguage(saved.language)
       invalidateToolHelp()
       setError('')
-      setSettingsOpen(false)
-    } catch {
-      setSettingsError(t('invalidModelConfig'))
+      finishSettingsExit(settingsExitTarget ?? 'close', saved)
+    } catch (error) {
+      setSettingsError(t(String(error).includes('MODEL_REPLACEMENT_REQUIRED') ? 'modelDeleteReplacementError' : 'settingsSaveFailed'))
     } finally {
+      savingSettingsRef.current = false
       setSaving(false)
     }
   }
@@ -1137,58 +1268,121 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string): Promise<void> {
-    if ((!content && images.length === 0 && attachments.length === 0) || !canSend || !activeProject || !activeConversation || interactionLocked) {
-      return
+  async function sendMessage(content: string, images: ImageAttachment[], attachments: MediaAttachment[], continueFromMessageId?: string, queuedStart = false, queuedMessage?: QueuedUserMessage): Promise<boolean> {
+    if ((!content && images.length === 0 && attachments.length === 0) || !activeProject || !activeConversation || (!queuedStart && (!canSend || interactionLocked))) {
+      return false
     }
 
     const projectId = activeProject.id
     const conversationId = activeConversation.id
     const conversationKey = `${projectId}:${conversationId}`
-    const traceId = crypto.randomUUID()
-    const sendStartedAt = performance.now()
-    setError('')
-    const userMessageId = crypto.randomUUID()
-    messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
-    window.codey.recordPerformanceTrace({
-      traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
-      durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
+    // A run-now request keeps its original target even if the user switches conversations while stopping.
+    if (!projectsRef.current.some((project) => project.id === projectId && project.conversations.some((conversation) => conversation.id === conversationId))) return false
+    return turnCoordinator.run(conversationKey, async () => {
+      const traceId = crypto.randomUUID()
+      const sendStartedAt = performance.now()
+      try {
+        // Remove only after reserving this conversation; an executing message is no longer pending.
+        if (queuedMessage) removeQueuedMessage(conversationKey, queuedMessage.id)
+        if (conversationKey === activeConversationKeyRef.current) setError('')
+        const userMessageId = crypto.randomUUID()
+        messageHistory.addOptimistic({ id: userMessageId, role: 'user', content, images, attachments, createdAt: new Date().toISOString() })
+        window.codey.recordPerformanceTrace({
+          traceId, scope: 'renderer', phase: 'user-message-published', projectId, conversationId,
+          durationMs: performance.now() - sendStartedAt, data: { contentChars: content.length, imageCount: images.length, attachmentCount: attachments.length },
+        })
+        beginTurn({ projectId, conversationId, userMessageId, traceId })
+        window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
+        const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
+        if (result.project) {
+          const updatedConversation = result.project.conversations.find(
+            (conversation) => conversation.id === conversationId,
+          )
+          const updatedUserMessage = updatedConversation?.history?.lastUserMessage
+          await messageHistory.refresh()
+          if (updatedUserMessage?.id) updateTurnUserMessage(conversationKey, updatedUserMessage.id)
+          replaceProject(result.project)
+        }
+        finishTurn(conversationKey, {
+          result: result.stopped
+            ? 'stopped'
+            : result.error
+              ? /timed out/i.test(result.error) ? 'timeout' : 'other'
+              : 'normal',
+          error: result.stopped ? undefined : result.error,
+        })
+        if (result.error && conversationKey === activeConversationKeyRef.current) {
+          const files = result.writtenFiles.length
+            ? t('filesWritten', { count: result.writtenFiles.length })
+            : ''
+          setError(`${result.error}${files}`)
+        }
+        return true
+      } catch {
+        if (queuedMessage) {
+          updateMessageQueues((current) => ({ ...current, [conversationKey]: [queuedMessage, ...(current[conversationKey] ?? [])] }))
+          setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
+        }
+        finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
+        if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
+        return false
+      } finally {
+        clearRun(conversationKey)
+      }
     })
-    beginTurn({ projectId, conversationId, userMessageId, traceId })
+  }
 
+  function dispatchQueuedMessage(conversationKey: string, messageId: string, queuedStart = false): Promise<boolean> {
+    const message = messageQueuesRef.current[conversationKey]?.find((item) => item.id === messageId)
+    if (!message) return Promise.resolve(false)
+    return sendMessage(message.content, message.images, message.attachments, undefined, queuedStart, message)
+  }
+
+  async function runQueuedMessageNow(messageId: string): Promise<void> {
+    if (!activeProject || !activeConversation || maxInputTokensError || !(canSend || queueEnabled)
+      || immediateQueueMessages[activeConversationKey]
+      || turnCoordinator.isInterrupting(activeConversationKey)
+      || (conversationWorking && !turnCoordinator.hasTurn(activeConversationKey))
+      || !messageQueuesRef.current[activeConversationKey]?.some((message) => message.id === messageId)) return
+    const conversationKey = activeConversationKey
+    const projectId = activeProject.id
+    const conversationId = activeConversation.id
+    setImmediateQueueMessages((current) => ({ ...current, [conversationKey]: messageId }))
+    const clearImmediate = (): void => setImmediateQueueMessages((current) => {
+      if (current[conversationKey] !== messageId) return current
+      const next = { ...current }
+      delete next[conversationKey]
+      return next
+    })
     try {
-      window.codey.recordPerformanceTrace({ traceId, scope: 'renderer', phase: 'develop-ipc', projectId, conversationId })
-      const result = await window.codey.develop(projectId, conversationId, content, images, attachments, traceId, continueFromMessageId)
-      if (result.project) {
-        const updatedConversation = result.project.conversations.find(
-          (conversation) => conversation.id === conversationId,
-        )
-        const updatedUserMessage = updatedConversation?.history?.lastUserMessage
-        await messageHistory.refresh()
-        if (updatedUserMessage?.id) updateTurnUserMessage(conversationKey, updatedUserMessage.id)
-        replaceProject(result.project)
-      }
-      finishTurn(conversationKey, {
-        result: result.stopped
-          ? 'stopped'
-          : result.error
-            ? /timed out/i.test(result.error) ? 'timeout' : 'other'
-            : 'normal',
-        error: result.stopped ? undefined : result.error,
+      await turnCoordinator.runNow(conversationKey, async () => {
+        if (!turnCoordinator.hasTurn(conversationKey)) return
+        setStopping(conversationKey, true)
+        const accepted = await window.codey.stopDevelopment(projectId, conversationId)
+        // The main process may have just finished; the coordinator still waits for renderer cleanup.
+        if (!accepted) setStopping(conversationKey, false)
+      }, () => {
+        clearImmediate()
+        setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: false }))
+        return dispatchQueuedMessage(conversationKey, messageId, true)
       })
-      if (result.error && conversationKey === activeConversationKeyRef.current) {
-        const files = result.writtenFiles.length
-          ? t('filesWritten', { count: result.writtenFiles.length })
-          : ''
-        setError(`${result.error}${files}`)
-      }
     } catch {
-      finishTurn(conversationKey, { result: 'other', error: t('requestFailed') })
-      if (conversationKey === activeConversationKeyRef.current) setError(t('unableProcessRequest'))
+      setStopping(conversationKey, false)
+      setBlockedQueueKeys((current) => ({ ...current, [conversationKey]: true }))
+      if (conversationKey === activeConversationKeyRef.current) setError(t('unableStopRequest'))
     } finally {
-      clearRun(conversationKey)
+      clearImmediate()
     }
   }
+
+  useEffect(() => {
+    if (!activeConversationKey || activeConversationState !== 'idle' || !canSend || maxInputTokensError || blockedQueueKeys[activeConversationKey]) return
+    if (turnCoordinator.isBusy(activeConversationKey) || !messageQueuesRef.current[activeConversationKey]?.length) return
+    const conversationKey = activeConversationKey
+    const next = messageQueuesRef.current[conversationKey][0]
+    void dispatchQueuedMessage(conversationKey, next.id)
+  }, [activeConversationKey, activeConversationState, blockedQueueKeys, canSend, maxInputTokensError, messageQueues, queueDrainTick])
+
   async function stopMessage(): Promise<void> {
     if (!activeProject || !activeConversation || !conversationWorking || stopping) {
       return
@@ -1223,6 +1417,8 @@ export function App(): React.JSX.Element {
   const invalidGlobalCommandReview = !validateCommandReviewConfig(configDraft.commandReviewGlobal)
   const invalidGlobalAgentLimits = !isValidAgentLimits(configDraft.agentLimitsGlobal)
   const invalidGlobalCommandExecution = !isValidCommandExecutionDraft(configDraft.commandExecutionGlobal)
+  const settingsSaveDisabled = invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked
+    || modelSettingsPanelProps.definitions.capabilitiesBusy || modelSettingsPanelProps.models.comboBusy
 
   return (
     <FluentProvider className="app" theme={webLightTheme}>
@@ -1234,14 +1430,17 @@ export function App(): React.JSX.Element {
           </Button>
 
           <section className="sidebar-section projects-section">
-            <p className="section-label">{t('projects')}</p>
-            <nav className="nav-list" aria-label={t('projects')}>
+            <div className="section-heading">
+              <p className="section-label">{t('projects')}</p>
+              <ListSortMenu label={t('projects')} value={config.sidebarSort.projects} disabled={sortingSaving} onChange={(value) => void saveSort('projects', value)} />
+            </div>
+            <nav className="nav-list" aria-label={t('projects')} {...projectListScroll}>
               {visibleProjects.map((project) => (
-                <div className="project-nav-item" key={project.id}>
+                <div className="project-nav-item" key={project.id} data-nav-id={project.id}>
                   <div className="project-nav-row">
                     <Button className="nav-item-button" appearance={project.id === activeProjectId ? 'secondary' : 'subtle'} onClick={() => selectProject(project)}>
                       <span className="nav-item-title">{project.name}</span>
-                      <UnreadBadge count={projectUnreadState[project.id]?.count ?? 0} error={projectUnreadState[project.id]?.error ?? false} />
+                      <SidebarStatus unreadCount={projectNavState[project.id]?.count ?? 0} error={projectNavState[project.id]?.error ?? false} runningCount={projectNavState[project.id]?.runningCount ?? 0} project />
                     </Button>
                     <Button appearance="subtle" size="small" aria-expanded={openProjectMenuId === project.id} aria-label={t('projectOptions')} onClick={() => setOpenProjectMenuId((current) => current === project.id ? null : project.id)}>
                       …
@@ -1264,11 +1463,14 @@ export function App(): React.JSX.Element {
             <section className="sidebar-section conversations-section">
               <div className="section-heading">
                 <p className="section-label">{t('conversations')}</p>
-                <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
+                <div className="section-heading-actions">
+                  <ListSortMenu label={t('conversations')} value={config.sidebarSort.conversations} disabled={sortingSaving} onChange={(value) => void saveSort('conversations', value)} />
+                  <Button appearance="subtle" size="small" onClick={() => void startNewConversation()}>{t('new')}</Button>
+                </div>
               </div>
-              <nav className="nav-list" aria-label={t('conversations')}>
+              <nav className="nav-list" aria-label={t('conversations')} {...conversationListScroll}>
                 {visibleConversations.map((conversation) => (
-                  <div className="conversation-nav-item" key={conversation.id}>
+                  <div className="conversation-nav-item" key={conversation.id} data-nav-id={conversation.id}>
                     <div className="conversation-nav-row">
                       <Button className="nav-item-button" appearance={conversation.id === activeConversationId ? 'secondary' : 'subtle'} onClick={() => {
                         setActiveConversationId(conversation.id);
@@ -1278,7 +1480,7 @@ export function App(): React.JSX.Element {
 
                       }}>
                         <span className="nav-item-title">{conversation.title}</span>
-                        <UnreadBadge count={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} />
+                        <SidebarStatus unreadCount={unreadCounts[conversation.id] ?? 0} error={conversationErrors[conversation.id] ?? false} runningCount={conversationStates[`${activeProject.id}:${conversation.id}`] === 'running' ? 1 : 0} />
                       </Button>
                       <Button appearance="subtle" size="small" aria-expanded={openConversationMenuId === conversation.id} aria-label={t('conversationOptions')} onClick={() => setOpenConversationMenuId((current) => current === conversation.id ? null : conversation.id)}>…</Button>
                     </div>
@@ -1467,6 +1669,7 @@ export function App(): React.JSX.Element {
               ref={conversationRef}
               className="conversation"
               aria-label={t('conversation')}
+              style={{ '--queue-safe-bottom': `${queueTrayHeight + (queueTrayHeight ? 24 : 0)}px` } as React.CSSProperties}
             >
             {!activeConversation || (messageHistory.loaded && activeConversation.messages.length === 0 && !interactionLocked) ? (
               <div className="empty-state">
@@ -1505,6 +1708,48 @@ export function App(): React.JSX.Element {
               </div>
             )}
             </div>
+            {activeQueue.length > 0 && (
+              <section ref={queueTrayRef} className={`conversation-queue-tray ${queueExpanded ? 'is-expanded' : 'is-collapsed'}`}>
+                <div className="conversation-queue-header">
+                  <button className="conversation-queue-toggle" onClick={() => setQueueExpanded((expanded) => !expanded)} aria-expanded={queueExpanded}>
+                    <span aria-hidden="true">{queueExpanded ? '⌄' : '›'}</span>
+                    <strong>{t('queuedMessages')}</strong>
+                    <span className="conversation-queue-count">{activeQueue.length}</span>
+                    {!queueExpanded && <span className="conversation-queue-summary">{activeQueue[0]?.content || activeQueue[0]?.attachments[0]?.name || t('attachment')}</span>}
+                  </button>
+                  {blockedQueueKeys[activeConversationKey] && (
+                    <Button appearance="subtle" size="small" disabled={Boolean(immediateQueueMessages[activeConversationKey])} onClick={() => {
+                      setBlockedQueueKeys((current) => {
+                        const next = { ...current }
+                        delete next[activeConversationKey]
+                        return next
+                      })
+                      setQueueDrainTick((tick) => tick + 1)
+                    }}>{t('retryQueuedMessage')}</Button>
+                  )}
+                  <Button appearance="subtle" size="small" disabled={Boolean(immediateQueueMessages[activeConversationKey])} onClick={() => updateMessageQueues((current) => {
+                    const next = { ...current }
+                    delete next[activeConversationKey]
+                    return next
+                  })}>{t('clearQueue')}</Button>
+                </div>
+                {queueExpanded && (
+                  <QueuedMessageList
+                    key={activeConversationKey}
+                    items={activeQueue.map((message) => ({
+                      id: message.id,
+                      text: message.content || message.images[0]?.name || message.attachments[0]?.name || t('attachment'),
+                      attachmentCount: message.images.length + message.attachments.length,
+                    }))}
+                    pendingId={immediateQueueMessages[activeConversationKey]}
+                    canRunNow={!maxInputTokensError && (canSend || (queueEnabled && turnCoordinator.hasTurn(activeConversationKey)))}
+                    onReorder={(source, target, placement) => reorderQueue(activeConversationKey, source, target, placement)}
+                    onRunNow={(id) => void runQueuedMessageNow(id)}
+                    onRemove={(id) => removeQueuedMessage(activeConversationKey, id)}
+                  />
+                )}
+              </section>
+            )}
             {showScrollToBottom && (
               <Button
                 aria-label={t('scrollToBottom')}
@@ -1520,6 +1765,7 @@ export function App(): React.JSX.Element {
           </div>
 
           {error && <p className="composer-error" role="alert">{error}</p>}
+          {modelIssue && <p className="composer-error" role="alert">{t(modelIssue)}</p>}
           <Composer
             key={activeConversationKey || 'no-conversation'}
             canSend={canSend}
@@ -1529,9 +1775,10 @@ export function App(): React.JSX.Element {
             supportsPdfInput={effectiveModelConfig?.supportsPdfInput ?? false}
             configured={configured}
             conversationWorking={conversationWorking}
+            queueEnabled={queueEnabled}
             hasActiveConversation={Boolean(activeConversation)}
             hasProjectFolders={Boolean(activeProject?.folders.length)}
-            interactionLocked={interactionLocked}
+            interactionLocked={interactionLocked && !conversationWorking}
             networkAccessEnabled={config.networkAccessEnabled}
             stopping={stopping}
             onError={setError}
@@ -1542,7 +1789,13 @@ export function App(): React.JSX.Element {
                 setError(maxInputTokensError)
                 return false
               }
+              if (conversationWorking && queueEnabled && activeConversationKey) {
+                enqueueMessage(activeConversationKey, content, images, attachments)
+                return true
+              }
               if (!canSend || !activeProject || !activeConversation || interactionLocked) return false
+              // A second Enter can arrive before React publishes the first turn's running state.
+              if (turnCoordinator.isBusy(activeConversationKey)) return false
               void sendMessage(content, images, attachments)
               return true
             }}
@@ -1675,11 +1928,11 @@ export function App(): React.JSX.Element {
         />
       )}
 
-      <Dialog open={settingsOpen} onOpenChange={(_, data) => setSettingsOpen(data.open)}>
+      <Dialog open={settingsOpen} onOpenChange={(_, data) => { if (!data.open) requestSettingsExit() }}>
         <DialogSurface className="settings-dialog-surface">
           <DialogBody className="settings-dialog-body">
             <DialogTitle>{t('settings')}</DialogTitle>
-            <DialogContent className="settings-dialog-content settings-layout">
+            <DialogContent className="settings-dialog-content settings-layout" inert={saving}>
               <TabList
                 className="settings-tab-list"
                 vertical
@@ -1891,12 +2144,12 @@ export function App(): React.JSX.Element {
               </div>
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => setSettingsOpen(false)}>
+              <Button appearance="secondary" disabled={saving} onClick={() => requestSettingsExit()}>
                 {t('cancel')}
               </Button>
               <Button
                 appearance="primary"
-                disabled={invalidModelConfig || invalidAppContextConfig || invalidGlobalCommandReview || invalidGlobalAgentLimits || invalidGlobalCommandExecution || interactionLocked || saving}
+                disabled={settingsSaveDisabled || saving}
                 onClick={() => void saveSettings()}
               >
                 {saving ? t('saving') : t('save')}
@@ -1905,6 +2158,18 @@ export function App(): React.JSX.Element {
           </DialogBody>
         </DialogSurface>
       </Dialog>
+      {deletionDialogProps && <ModelDeletionDialog {...deletionDialogProps} />}
+      <UnsavedSettingsDialog
+        open={settingsExitTarget !== null && !deletionDialogProps}
+        changes={settingsChanges}
+        saving={saving}
+        saveDisabled={settingsSaveDisabled}
+        error={settingsError}
+        onReturn={() => { if (!savingSettingsRef.current) setSettingsExitTarget(null) }}
+        onSave={() => void saveSettings()}
+        onDiscard={() => { if (!savingSettingsRef.current) finishSettingsExit(settingsExitTarget ?? 'close') }}
+      />
+
 
       <Dialog open={archiveDialogOpen} onOpenChange={(_, data) => setArchiveDialogOpen(data.open)}>
         <DialogSurface>

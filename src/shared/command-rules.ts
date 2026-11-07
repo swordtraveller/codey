@@ -140,7 +140,6 @@ export function buildMemoryPattern(command: string, kind: 'exact' | 'prefix'): s
 export function validateCommandReviewConfig(config: CommandReviewConfig): boolean {
   if (!Number.isInteger(config.durationAllowSeconds)) return false
   if (config.durationAllowSeconds < 60 || config.durationAllowSeconds > 86_400) return false
-  if (config.reviewers.auditModel && !config.reviewers.auditModelConfigId) return false
   const seen: Record<string, true> = {}
   for (const rule of config.contentRules) {
     if (!rule.pattern.trim()) return false

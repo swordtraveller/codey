@@ -95,12 +95,24 @@ export function useConversationRuntime({
     void window.codey.subscribeDevelopmentProgress(null, null)
   }, [])
 
-  useEffect(() => window.codey.onConversationStateChange((change) => {
-    setConversationStates((current) => ({
-      ...current,
-      [`${change.projectId}:${change.conversationId}`]: change.state,
-    }))
-  }), [])
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.codey.onConversationStateChange((change) => {
+      setConversationStates((current) => ({
+        ...current,
+        [`${change.projectId}:${change.conversationId}`]: change.state,
+      }))
+    })
+    void window.codey.getConversationRuntimeStates().then((snapshot) => {
+      if (cancelled) return
+      // Events and local turns received after subscribing take precedence, including idle.
+      setConversationStates((current) => ({ ...snapshot, ...current }))
+    }).catch((error) => console.warn('Unable to load conversation runtime states', error))
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
 
   const beginTurn = useCallback(({ projectId, conversationId, userMessageId, traceId }: BeginTurnOptions): void => {
     const conversationKey = `${projectId}:${conversationId}`

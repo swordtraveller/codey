@@ -6,6 +6,7 @@ import { CodeReadingApp } from './CodeReadingApp'
 import { App } from './App'
 import { ContextDebugApp } from './ContextDebugApp'
 import { PerformanceTraceApp } from './PerformanceTraceApp'
+import { QueuePreviewApp } from './QueuePreviewApp'
 import { ScreenshotOverlay } from './ScreenshotOverlay'
 import './styles.css'
 
@@ -26,6 +27,8 @@ const content = params.get('view') === 'message-navigation'
     ? <ScreenshotOverlay />
     : params.get('view') === 'performance-trace'
       ? <PerformanceTraceApp fileName={params.get('file') ?? ''} />
+        : params.get('view') === 'queue-preview'
+          ? <QueuePreviewApp />
       : <App />
 
 createRoot(root).render(<StrictMode>{content}</StrictMode>)

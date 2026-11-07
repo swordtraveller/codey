@@ -1,14 +1,17 @@
 import React, { act, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import i18next from 'i18next'
-import { initReactI18next } from 'react-i18next'
+import i18next from '../../../src/renderer/src/i18n'
+import { runCommandReviewTests } from './command-review'
+import { runSidebarSortingTests } from './sidebar-sorting'
+import { runConversationRuntimeTests } from './conversation-runtime'
+import { runModelSettingsTests } from './model-settings'
 import { defaultAppConfig, type Conversation, type Project } from '../../../src/shared/types'
 import { useProjectSettings } from '../../../src/renderer/src/hooks/useProjectSettings'
 import { useConversationSettings } from '../../../src/renderer/src/hooks/useConversationSettings'
 
 // Exercise real React state and asynchronous IPC boundaries in Chromium.
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-await i18next.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: {} } }, initAsync: false })
+await i18next.changeLanguage('en')
 const assert: (value: unknown, message: string) => asserts value = (value, message) => { if (!value) throw new Error(message) }
 function equal(actual: unknown, expected: unknown, message: string): void {
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${message}: ${JSON.stringify(actual)} !== ${JSON.stringify(expected)}`)
@@ -240,6 +243,34 @@ async function runTests() {
     assert(!projects.projectSettingsOpen && !conversations.agentLimitsDialogOpen && !conversations.commandDialogOpen && !conversations.contextDialogOpen && !conversations.conversationSkillsOpen && !conversations.conversationKnowledgeBasesOpen, 'all dialogs locked')
     assert(detected === 0 && calls.length === 0, 'locked open has no side effects')
   })
+  await test('project and conversation saves retain audit group ids', async () => {
+    const auditReview = { ...config.commandReviewGlobal, reviewers: {
+      auditModel: true, auditModelConfigId: 'audit-group', manualConfirmation: true,
+    } }
+    config.commandReviewGlobal = auditReview
+    await render()
+    await act(async () => { projects.openProjectSettings(data) })
+    await act(async () => {
+      projects.setProjectCommandOverride(true)
+      projects.setProjectCommandDraft({ ...projects.projectCommandDraft, review: auditReview })
+    })
+    await act(async () => { await projects.saveProjectSettings() })
+    const savedProject = calls.find(call => call.name === 'setProjectCommandExecutionDefault')
+    equal((savedProject?.args[1] as typeof projects.projectCommandDraft).review?.reviewers.auditModelConfigId, 'audit-group', 'project audit group persisted')
+    calls = []
+    await act(async () => { conversations.openCommandSettings() })
+    equal(conversations.commandDraft.review?.reviewers.auditModelConfigId, 'audit-group', 'global audit group inherited')
+    await act(async () => {
+      conversations.setCommandOverride(true)
+      conversations.setCommandDraft({ ...conversations.commandDraft, review: auditReview })
+    })
+    await act(async () => { await conversations.saveCommandExecutionSettings() })
+    equal((calls[0].args[2] as typeof conversations.commandDraft).review?.reviewers.auditModelConfigId, 'audit-group', 'conversation audit group persisted')
+  })
+  passed.push(...await runCommandReviewTests())
+  passed.push(...await runSidebarSortingTests())
+  passed.push(...await runConversationRuntimeTests())
+  passed.push(...await runModelSettingsTests())
   return { passed: passed.length, tests: passed }
 }
 Object.assign(window, { runTests })

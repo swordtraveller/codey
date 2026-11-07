@@ -26,6 +26,7 @@ import {
   getProjectsLive,
   renameConversation,
   renameProject,
+  saveConversationContext,
   updateConversationHotLongTermContent,
 } from '../src/main/workspace'
 
@@ -71,6 +72,7 @@ describe('sharded workspace storage', () => {
     expect(projects.map((project) => project.id)).toEqual(['legacy-project', created.id])
     expect(projects[0].conversations[0].messages[0].images?.[0]).toEqual(attachment)
     expect(projects[0].conversations[0].hotLongTermContent).toBe('')
+    expect(projects[0].conversations[0].lastUsedModelId).toBeUndefined()
 
     const manifestText = await readFile(join(electronState.userData, 'workspace.json'), 'utf8')
     expect(JSON.parse(manifestText)).toEqual({ version: 2, projectIds: ['legacy-project', created.id] })
@@ -139,6 +141,19 @@ describe('sharded workspace storage', () => {
     await removeTemporaryDirectory(resetDirectory)
     electronState.userData = directory
   }
+
+  it('persists the last used model without clearing it on context-only saves', async () => {
+    const project = await createProject('Model memory')
+    const conversation = project.conversations[0]!
+
+    await saveConversationContext(project.id, conversation.id, [], undefined, 'backup-model')
+    await reloadFromDisk(electronState.userData)
+    expect((await getProjects())[0]!.conversations[0]!.lastUsedModelId).toBe('backup-model')
+
+    await saveConversationContext(project.id, conversation.id, [], undefined)
+    await reloadFromDisk(electronState.userData)
+    expect((await getProjects())[0]!.conversations[0]!.lastUsedModelId).toBe('backup-model')
+  })
 
   it('persists and clears Long-term content without sharing it across conversations', async () => {
     const project = await createProject('Long-term')
