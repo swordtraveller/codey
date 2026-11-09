@@ -10,6 +10,7 @@ import type {
   CommandApprovalResponse,
   ContextManagementConfig,
   ConversationStateChange,
+  ConversationRuntimeState,
   DevelopmentProgress,
   DevelopmentProgressState,
   ImageAttachment,
@@ -62,7 +63,8 @@ contextBridge.exposeInMainWorld(
     exportPerformanceTraces: (): Promise<string | null> => ipcRenderer.invoke('performance:export'),
     revealPerformanceTraces: (): Promise<void> => ipcRenderer.invoke('performance:reveal'),
     recordPerformanceTrace: (event: PerformanceTraceEvent): void => { ipcRenderer.send('performance:record', event) },
-    saveConfig: (config: AppConfig) => ipcRenderer.invoke('config:save', config),
+    saveConfig: (config: AppConfig, replacements?: Record<string, string | null>) => ipcRenderer.invoke('config:save', config, replacements),
+    saveSidebarSort: (preferences: AppConfig['sidebarSort']): Promise<AppConfig['sidebarSort']> => ipcRenderer.invoke('config:sidebar-sort', preferences),
     testMcpServer: (config: McpStdioServerConfig, projectRoot?: string): Promise<McpServerTestResult> =>
       ipcRenderer.invoke('mcp:test-stdio-server', config, projectRoot),
     fetchModelCapabilities: (modelName: string): Promise<ModelCapabilitiesResult> =>
@@ -252,6 +254,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('development:progress', handler)
       return () => ipcRenderer.removeListener('development:progress', handler)
     },
+    getConversationRuntimeStates: (): Promise<Record<string, ConversationRuntimeState>> =>
+      ipcRenderer.invoke('conversations:runtime-states'),
     onConversationStateChange: (listener: (change: ConversationStateChange) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, change: ConversationStateChange) =>
         listener(change)

@@ -17,11 +17,20 @@ export function resolveConversationModel(
   return resolveModelTargets(config, project, conversation)
 }
 
-/** Flattens a single model link (audit-model resolution path). */
+/** Flattens a single model link. */
 export function resolveModelById(config: AppConfig, modelId: string): ModelConfig | undefined {
   const link = config.models.find((model) => model.id === modelId)
   if (!link) return undefined
   return flattenModelLink(config, link)
+}
+
+/** Audit targets share group ordering/retries; single models retain one retry. */
+export function resolveAuditModelTarget(config: AppConfig, targetId: string): RuntimeModelConfig | undefined {
+  const target = resolveModelTarget(config, targetId)
+  if (!target) return undefined
+  return config.models.some((model) => model.id === targetId)
+    ? { ...target, retriesPerModel: 1 }
+    : target
 }
 
 /** Resolves any target id (model or group) for validation. */

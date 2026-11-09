@@ -62,6 +62,15 @@ describe('disk-backed conversation pagination', () => {
     expect(full.conversations[0].agentMessages).toEqual([expect.objectContaining({ content: 'Full model context' })])
   })
 
+  it('preserves the supplied timestamp for a persisted assistant message', async () => {
+    const project = await createProject('Timestamp')
+    const conversationId = project.conversations[0].id
+    const createdAt = '2026-10-23T04:30:45.000Z'
+    await addMessage(project.id, conversationId, 'assistant', 'Reply', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'assistant-time', createdAt)
+
+    const page = await getConversationMessagePage(project.id, conversationId)
+    expect(page.messages.find((message) => message.id === 'assistant-time')?.createdAt).toBe(createdAt)
+  })
   it('keeps older cursors stable after new messages and turn status updates', async () => {
     const { projectId, conversationId } = await seed()
     await reload()

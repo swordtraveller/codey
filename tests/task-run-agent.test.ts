@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defaultContextManagementConfig, defaultModelConfig, type Project } from '../src/shared/types'
+import type { CommandExecutorRuntime } from '../src/main/command-executor'
 import type { AgentToolProvider } from '../src/main/agent-tool-provider'
 import type { RunEventPayload } from '../src/shared/task-run'
 
@@ -49,7 +50,7 @@ describe('TaskRun agent event integration', () => {
       .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
       .mockResolvedValueOnce(response({ content: 'Done' }))
     vi.stubGlobal('fetch', fetchMock)
-    await requestCompletion({ ...model, chain: [model.chain[0], { ...model.chain[0], modelName: 'backup', label: 'backup' }] },
+    await requestCompletion({ ...model, chain: [model.chain[0], { ...model.chain[0], modelId: 'backup', modelName: 'backup', label: 'backup' }] },
       history, [], undefined, undefined, { requestIndex: 2, onRunEvent: async (event) => { events.push(event) } })
     expect(fetchMock).toHaveBeenCalledTimes(3)
     const calls = events.filter((event) => event.type === 'model-call')
@@ -251,5 +252,33 @@ describe('provider usage capture', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'Unsupported model' } }), { status: 400 }))
     expect(await capture(fetchMock)).toMatchObject([{ phase: 'failed' }])
     expect(fetchMock).toHaveBeenCalledOnce()
+  })
+})
+
+
+describe('audit identity after main-model failover', () => {
+  it('uses the successful member name before executing tools', async () => {
+    const commandRuntime: CommandExecutorRuntime = {
+      conversationId: 'conversation', sessionModelName: 'model',
+      resolveAuditModel: async () => undefined,
+      requestConfirmation: async () => ({ approved: false, timeoutSeconds: 60 }),
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
+      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
+      .mockResolvedValueOnce(response(toolDelta('check-identity')))
+      .mockResolvedValueOnce(response({ content: 'Done' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const execute = vi.fn(async () => {
+      expect(commandRuntime.sessionModelName).toBe('backup')
+      return 'checked'
+    })
+    const result = await develop(project,
+      { ...model, chain: [model.chain[0], { ...model.chain[0], modelId: 'backup', modelName: 'backup' }] },
+      contextConfig, { modelRequestsPerRound: 3, toolCallsPerRequest: 4 }, history,
+      undefined, undefined, { conversationId: 'conversation', commandRuntime, todoProvider: { tools: [], execute } })
+    expect(result.error).toBeUndefined()
+    expect(execute).toHaveBeenCalledOnce()
+    expect(commandRuntime.sessionModelName).toBe('backup')
   })
 })

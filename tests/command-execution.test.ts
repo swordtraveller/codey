@@ -1,5 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { spawnSync } from 'node:child_process'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 vi.mock('electron', () => ({
   app: {
@@ -132,8 +139,8 @@ describe('command execution config', () => {
     expect(isValidCommandExecutionConfig(config())).toBe(true)
   })
 
-  it('requires an audit model when model audit is enabled', () => {
-    expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: null, manualConfirmation: false } }) }))).toBe(false)
+  it('allows saving an empty enabled audit model; sending enforces readiness', () => {
+    expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: null, manualConfirmation: false } }) }))).toBe(true)
     expect(isValidCommandExecutionConfig(config({ review: review({ reviewers: { auditModel: true, auditModelConfigId: 'audit', manualConfirmation: false } }) }))).toBe(true)
   })
 
@@ -433,6 +440,31 @@ describe('executeCommand', () => {
     shellDetectTestHooks.setBashOverride(bashAvailable ? 'bash' : null)
   })
 
+  afterEach(() => {
+    vi.mocked(spawn).mockReset()
+    shellDetectTestHooks.setBashOverride(null)
+  })
+
+  // Review-chain unit tests must not depend on a locally installed shell.
+  // Only replace the OS process boundary; executeCommand still runs its real
+  // review logic, command dispatch, output collection and exit-code handling.
+  function mockBashExecution(stdout: string, exitCode = 0) {
+    shellDetectTestHooks.setBashOverride('test-bash')
+    return vi.mocked(spawn).mockImplementationOnce(() => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: vi.fn(),
+      })
+      queueMicrotask(() => {
+        child.stdout.end(stdout)
+        child.stderr.end()
+        child.emit('close', exitCode)
+      })
+      return child as unknown as ChildProcess
+    })
+  }
+
   it('refuses sandboxed execution when the workspace is not a project folder', async () => {
     const outcome = await executeCommand({
       project: { folders: [{ id: 'f', path: 'D:/registered-folder' }] },
@@ -524,6 +556,7 @@ describe('executeCommand', () => {
   })
 
   it('skips the reviewer chain entirely on a whitelist hit, regardless of duration', async () => {
+    const spawn = mockBashExecution('whitelist-ok\n')
     let confirmations = 0
     const outcome = await executeCommand({
       project: { folders: [] },
@@ -547,6 +580,29 @@ describe('executeCommand', () => {
     expect(confirmations).toBe(0)
     expect(outcome.ok).toBe(true)
     expect(outcome.output).toContain('whitelist-ok')
+    expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo whitelist-ok'], {
+      cwd: process.cwd(), windowsHide: true, shell: false,
+    })
+    expect(outcome.audit.some((entry) => entry.description.includes('timeout=7200s'))).toBe(true)
+  })
+
+  it('reports a nonzero exit code even when the whitelist bypasses review', async () => {
+    const spawn = mockBashExecution('command failed\n', 7)
+    const outcome = await executeCommand({
+      project: { folders: [] },
+      conversationId: 'whitelist-execution-failure',
+      config: config({ enabled: true }),
+      command: 'echo command failed; exit 7',
+      workspaceFolderId: 'f',
+      workspacePath: process.cwd(),
+      runtime: runtime({
+        ruleLayers: [{ level: 'global', rules: [rule({ pattern: 'echo *', list: 'allow' })] }],
+      }),
+    })
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(outcome.ok).toBe(false)
+    expect(outcome.audit.some((entry) => entry.description.includes('exit=7 '))).toBe(true)
+    expect(outcome.output).toContain('command failed')
   })
 
   it('denies when the audit model cannot be resolved (fail closed)', async () => {
@@ -666,6 +722,7 @@ describe('executeCommand', () => {
   })
 
   it('defaults an undeclared duration to the gate and runs the chain', async () => {
+    const spawn = mockBashExecution('hi\n')
     let confirmations = 0
     let observedTimeout = 0
     const outcome = await executeCommand({
@@ -686,6 +743,10 @@ describe('executeCommand', () => {
     expect(confirmations).toBe(1)
     expect(observedTimeout).toBe(180)
     expect(outcome.ok).toBe(true)
+    expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo hi'], {
+      cwd: process.cwd(), windowsHide: true, shell: false,
+    })
+    expect(outcome.audit.some((entry) => entry.description.includes('timeout=180s'))).toBe(true)
   })
 
   bashIt('runs unmatched commands at their declared duration with all reviewers off (no clamp)', async () => {
@@ -745,6 +806,7 @@ describe('executeCommand', () => {
   })
 
   it('passes the requested duration and gate reference to the audit prompt', async () => {
+    const spawn = mockBashExecution('hi\n')
     const fetchCalls: Array<{ body: string }> = []
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -784,6 +846,10 @@ describe('executeCommand', () => {
       expect(fetchCalls[0]?.body).toContain('duration gate reference: 180s')
       expect(fetchCalls[0]?.body).toContain('Judge both the command content and the requested duration')
       expect(outcome.ok).toBe(true)
+      expect(spawn).toHaveBeenCalledExactlyOnceWith('test-bash', ['-c', 'echo hi'], {
+        cwd: process.cwd(), windowsHide: true, shell: false,
+      })
+      expect(outcome.audit.some((entry) => entry.description.includes('timeout=900s'))).toBe(true)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -808,5 +874,64 @@ describe('executeCommand', () => {
     expect(first.ok).toBe(true)
     expect(second.ok).toBe(true)
     expect(order).toEqual([1, 2])
+  })
+})
+
+
+describe('audit group execution gate', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it.each(['deny', 'unavailable', 'aborted'])('never executes or asks for approval after %s', async (status) => {
+    const fetchMock = status === 'deny'
+      ? vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: '{"verdict":"deny","reason":"unsafe"}' } }] }))
+      : vi.fn().mockRejectedValue(new Error('unavailable'))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    if (status === 'aborted') controller.abort()
+    const confirmation = vi.fn()
+    vi.mocked(spawn).mockClear()
+    const outcome = await executeCommand({
+      project: { folders: [] }, conversationId: 'c',
+      config: config({ enabled: true, review: review({ reviewers: {
+        auditModel: true, auditModelConfigId: 'group', manualConfirmation: true,
+      } }) }),
+      command: 'echo audited', requestedTimeoutSeconds: 120,
+      workspaceFolderId: 'f', workspacePath: process.cwd(),
+      runtime: runtime({
+        sessionModelName: 'executor', signal: controller.signal, requestConfirmation: confirmation,
+        resolveAuditModel: async () => ({ ...defaultModelConfig, id: 'group', retriesPerModel: 1,
+          chain: ['first', 'second'].map(id => ({ modelId: id, label: id, modelName: id, baseUrl: 'https://audit.example/v1', apiKey: 'key' })),
+        }),
+      }),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(spawn).not.toHaveBeenCalled()
+    expect(confirmation).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(status === 'deny' ? 1 : status === 'aborted' ? 0 : 4)
+  })
+
+  it('shows the actual fallback auditor in manual approval and preserves manual denial', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('busy', { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"verdict":"allow"}' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const confirmation = vi.fn(async () => ({ approved: false, timeoutSeconds: 120 }))
+    vi.mocked(spawn).mockClear()
+    const outcome = await executeCommand({
+      project: { folders: [] }, conversationId: 'c',
+      config: config({ enabled: true, review: review({ reviewers: {
+        auditModel: true, auditModelConfigId: 'group', manualConfirmation: true,
+      } }) }),
+      command: 'echo audited', requestedTimeoutSeconds: 120,
+      workspaceFolderId: 'f', workspacePath: process.cwd(),
+      runtime: runtime({ sessionModelName: 'executor', requestConfirmation: confirmation,
+        resolveAuditModel: async () => ({ ...defaultModelConfig, id: 'group', retriesPerModel: 0,
+          chain: ['first', 'second'].map(id => ({ modelId: id, label: id, modelName: id, providerName: 'Provider', baseUrl: 'https://audit.example/v1', apiKey: 'key' })),
+        }),
+      }),
+    })
+    expect(outcome.ok).toBe(false)
+    expect(confirmation).toHaveBeenCalledWith(expect.objectContaining({ auditModelName: 'Provider / second' }))
+    expect(outcome.steps).toContainEqual(expect.objectContaining({ stage: 'audit-model', detail: expect.stringContaining('switching to Provider / second') }))
+    expect(spawn).not.toHaveBeenCalled()
   })
 })
