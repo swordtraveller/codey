@@ -90,8 +90,78 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Locate pnpm store
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $store = pnpm store path --silent
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to locate the pnpm store.' }
+          "path=$store" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Restore pnpm store
+        id: pnpm-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-v1-${{ runner.os }}-${{ runner.arch }}-node22-pnpm10.12.1-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # Skip only Electron's binary download; other allowed lifecycle scripts still run.
       - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: pnpm install --frozen-lockfile
+
+      - name: Save pnpm store
+        if: steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+
+      - name: Resolve installed Electron version
+        id: electron
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Frozen installation resolves the exact lockfile version, not package.json's range.
+          $version = node -p "require('./node_modules/electron/package.json').version"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$') {
+            throw 'Unable to resolve the installed Electron version.'
+          }
+          "version=$version" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $cache = Join-Path $env:RUNNER_TEMP 'electron-cache'
+          "electron_config_cache=$cache" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+          "cache=$cache" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Electron $version; cache directory: $cache"
+
+      # main pushes populate the default-branch cache for later tags. Different tags
+      # cannot share their own caches; a cold tag still needs the official download.
+      - name: Restore Electron ZIP
+        id: electron-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.electron.outputs.cache }}
+          key: electron-zip-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
+          # No restore-keys: restore only this exact Electron version and platform.
+
+      - name: Test Electron download retry policy
+        run: node --test scripts/test-install-electron-ci.mjs
+
+      - name: Install Electron binary with bounded retries
+        timeout-minutes: 15
+        env:
+          DEBUG: '@electron/get*'
+          ELECTRON_CACHE_HIT: ${{ steps.electron-cache.outputs.cache-hit }}
+        run: node scripts/install-electron-ci.mjs
+
+      # Save immediately after verified installation, even if later tests/build fail.
+      - name: Save Electron ZIP
+        if: steps.electron-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.electron.outputs.cache }}
+          key: ${{ steps.electron-cache.outputs.cache-primary-key }}
 
       - name: Run tests
         run: pnpm test --maxWorkers=4
